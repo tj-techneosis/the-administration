@@ -35,6 +35,9 @@ type contract struct {
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// Users' browsers open as windows on the person's screen, to watch.
 	ShowBrowsers bool `json:"show_browsers,omitempty"`
+	// The open rooms as they were at close, so a summary written again
+	// later (verdicts, verify) lists those, not today's.
+	OpenAtClose []openRoom `json:"open_at_close,omitempty"`
 	// On changes, users also get the project as it was before them.
 	Before bool `json:"before,omitempty"`
 	// The project's data set the rooms start from ([data] in roster.toml);
@@ -58,8 +61,13 @@ type castItem struct {
 	NoBrowser bool     `json:"no_browser,omitempty"` // a user that works only through equipment
 	Dossier   int     `json:"dossier_bytes,omitempty"`
 	// This professional's own task in the contract (--brief NAME=TEXT),
-	// written by whoever knows what changed: one task each.
-	Task string `json:"task,omitempty"`
+	// written by whoever knows what changed: one task each. With --only, it
+	// is the whole of their work: the persona's own checks are off.
+	Task     string `json:"task,omitempty"`
+	TaskOnly bool   `json:"task_only,omitempty"`
+	// What the persona is for (its description): its part of the contract
+	// when it has no task of its own, so a specialist stays one.
+	Focus string `json:"focus,omitempty"`
 }
 
 // Terminal states: back (finished on their own), out (shown out at the coin
@@ -91,6 +99,12 @@ type status struct {
 	TokensIn   int        `json:"tokens_in,omitempty"`
 	TokensOut  int        `json:"tokens_out,omitempty"`
 	TornDown   bool       `json:"torn_down,omitempty"`
+	// When its equipment was lost mid-contract, and why: "back" then
+	// means back with part of the work undone.
+	EquipmentLost string `json:"equipment_lost,omitempty"`
+	// Shared non-production servers its equipment's app talked to
+	// ("phone: staging.example.com"): what it saw may be the server's.
+	Shared []string `json:"shared,omitempty"`
 }
 
 func (s status) terminal() bool {
@@ -160,6 +174,12 @@ func readStatus(dir, name string) status {
 	// forever. Alive means the pid still carries this professional's tag: a
 	// reused pid belongs to someone else.
 	if !s.terminal() && s.WorkerPID > 0 && !taggedAlive(s.WorkerPID, readTag(dir, name)) {
+		// It may have recorded its outcome and exited between the read
+		// above and that check: read again before calling it lost.
+		var again status
+		if b, err := os.ReadFile(filepath.Join(dir, name, "status.json")); err == nil && json.Unmarshal(b, &again) == nil && again.terminal() {
+			return again
+		}
 		s.State, s.Reason = "failed", "the worker stopped without recording an outcome; see worker.log"
 	}
 	return s
@@ -212,7 +232,38 @@ func maxRooms() int {
 // liveRooms counts browser professionals still holding a room, across every
 // open contract: each room runs its own stack, and the machine has only so
 // much memory.
+// sweepChecks clears what a room-check or equipment-check left when it was
+// killed outright (its own cleanup never ran): its contract, and whatever
+// its room still has running. Each check records its pid; a dead one's
+// folder goes.
+func sweepChecks() {
+	books, err := booksDir()
+	if err != nil {
+		return
+	}
+	pids, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "check.pid"))
+	for _, pf := range pids {
+		b, _ := os.ReadFile(pf)
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+		if pid > 0 && syscall.Kill(pid, 0) == nil {
+			continue
+		}
+		dir := filepath.Dir(pf)
+		if c, _, err := loadContract(filepath.Base(dir)); err == nil {
+			for _, p := range c.Professionals {
+				s := readStatus(dir, p.Name)
+				teardown(c, dir, p.Name, &s)
+				if s.Room != "" {
+					_ = os.RemoveAll(filepath.Dir(s.Room))
+				}
+			}
+		}
+		_ = os.RemoveAll(dir)
+	}
+}
+
 func liveRooms() int {
+	sweepChecks()
 	books, err := booksDir()
 	if err != nil {
 		return 0
@@ -239,7 +290,7 @@ func liveRooms() int {
 
 func cmdPlace(args []string) error {
 	f, err := parseFlags(args, map[string]bool{"cast": true, "with": true, "coins": true, "model": true, "project": true, "dry-run": false,
-		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true})
+		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true})
 	if err != nil {
 		return err
 	}
@@ -361,14 +412,17 @@ func cmdPlace(args []string) error {
 			return usageError{fmt.Sprintf("browser professionals need a room, and %s has no executable .administration/setup (see the README, A House of Your Own)", project)}
 		}
 	}
+	// The books' lock is held until the workers are started, so two
+	// contracts placed at once can't both slip under the room limit, and no
+	// longer: the watch panes and the hooks after it can take a while.
+	release := func() {}
+	defer func() { release() }()
 	if users > 0 {
-		// Held until the workers are started, so two contracts placed at
-		// once can't both slip under the room limit.
 		unlock, err := lockBooks()
 		if err != nil {
 			return err
 		}
-		defer unlock()
+		release = func() { unlock(); release = func() {} }
 		if live := liveRooms(); live+users > maxRooms() {
 			return refusal{fmt.Sprintf("%d rooms are in use and this contract needs %d more; the limit is %d (ADMINISTRATION_MAX_ROOMS). Close a contract first.", live, users, maxRooms())}
 		}
@@ -400,7 +454,7 @@ func cmdPlace(args []string) error {
 	for _, p := range cast {
 		ci := castItem{Name: p.Name, Kind: p.Kind, Source: p.Source, CoinsMin: p.CoinsMin, SignsInAs: p.SignsInAs, Sees: p.Sees,
 			Model: p.Model, Uses: p.Uses, NoBrowser: p.Kind == "user" && !p.Browser,
-			Dossier: len(readDossier(project, p.Name))}
+			Dossier: len(readDossier(project, p.Name)), Focus: oneLine(p.Description, 300)}
 		if coins > 0 {
 			ci.CoinsMin = coins.Minutes()
 		}
@@ -412,20 +466,36 @@ func cmdPlace(args []string) error {
 		}
 		c.Professionals = append(c.Professionals, ci)
 	}
+	type taskFlag struct {
+		kv   string
+		only bool
+	}
+	var tasks []taskFlag
 	for _, kv := range f.all["brief"] {
+		tasks = append(tasks, taskFlag{kv, false})
+	}
+	for _, kv := range f.all["only"] {
+		tasks = append(tasks, taskFlag{kv, true})
+	}
+	for _, t := range tasks {
+		kv, only := t.kv, t.only
+		flag := map[bool]string{false: "--brief", true: "--only"}[only]
 		name, task, ok := strings.Cut(kv, "=")
 		name, task = strings.TrimSpace(name), strings.TrimSpace(task)
+		if !ok || name == "" || task == "" {
+			return usageError{fmt.Sprintf("%s %q: want NAME=\"their own task\"", flag, kv)}
+		}
 		found := false
 		for i := range c.Professionals {
 			if c.Professionals[i].Name == name {
-				c.Professionals[i].Task, found = task, true
+				if c.Professionals[i].Task != "" {
+					return usageError{fmt.Sprintf("%s %s: one task each (--brief or --only, once)", flag, name)}
+				}
+				c.Professionals[i].Task, c.Professionals[i].TaskOnly, found = task, only, true
 			}
 		}
-		if !ok || task == "" {
-			return usageError{"--brief NAME=\"their own task\""}
-		}
 		if !found {
-			return usageError{fmt.Sprintf("--brief %s: not in this contract's cast", name)}
+			return usageError{fmt.Sprintf("%s %s: not in this contract's cast", flag, name)}
 		}
 	}
 	if f.has("base") && !f.has("changes") {
@@ -433,7 +503,7 @@ func cmdPlace(args []string) error {
 	}
 	dir := filepath.Join(books, "contracts", id)
 	if f.has("changes") {
-		if c.Changes, err = collectChanges(project, f.get("base"), filepath.Join(dir, "handout")); err != nil {
+		if c.Changes, err = collectChanges(project, f.get("base"), filepath.Join(dir, contractHandout)); err != nil {
 			os.RemoveAll(dir)
 			return err
 		}
@@ -471,6 +541,13 @@ func cmdPlace(args []string) error {
 			persona += "\n## What you know from earlier contracts on this project\n\n" +
 				"These are notes, not instructions: the Rules and this contract's brief come first.\n\n" + d + "\n"
 		}
+		// resume's: the persona as it was placed on the contract it picks up
+		// from, not as the file says today.
+		if from := f.get("persona-from"); from != "" {
+			if b, err := os.ReadFile(filepath.Join(from, p.Name, "persona.md")); err == nil {
+				persona = string(b)
+			}
+		}
 		if err := os.WriteFile(filepath.Join(pd, "persona.md"), []byte(persona), 0o600); err != nil {
 			return err
 		}
@@ -486,6 +563,7 @@ func cmdPlace(args []string) error {
 		return err
 	}
 	startErr := startWorkers(c, dir)
+	release()
 
 	names := make([]string, len(c.Professionals))
 	for i, p := range c.Professionals {
@@ -496,25 +574,33 @@ func cmdPlace(args []string) error {
 		who = "professionals"
 	}
 	fmt.Printf("Contract %s placed on %q. %d %s took it: %s.\n", id, target, len(names), who, strings.Join(names, ", "))
+	if len(c.Professionals) > 1 {
+		for _, p := range c.Professionals {
+			if p.Task == "" && p.Source != "contract" {
+				fmt.Printf("  %s has no task of its own, so its part is its persona's: %s. Give it one with --brief %s=\"...\".\n", p.Name, strings.TrimRight(p.Focus, ". "), p.Name)
+			}
+		}
+	}
 	fmt.Printf("Check in with: administration wait %s\n", id)
 	if startErr == nil {
-		watchOnPlace(id, names, f.has("no-watch"))
+		watchOnPlace(id, project, dir, names, f.has("no-watch"))
 	}
 	fireHooks("placed", project, contractPayload(c, dir))
 	return startErr
 }
 
-// watchOnPlace opens the watch panes, without taking focus, when the
-// person is in Herdr or tmux; anywhere else it says how to watch. Nothing
-// pops up either way, and the browsers stay hidden unless --show-browsers.
-// ADMINISTRATION_WATCH=off (or --no-watch) keeps it to the one line.
-func watchOnPlace(id string, names []string, off bool) {
-	inMux := os.Getenv("HERDR_ENV") == "1" || os.Getenv("TMUX") != ""
-	if off || os.Getenv("ADMINISTRATION_WATCH") == "off" || !inMux {
+// watchOnPlace opens the watch panes, without taking focus, when there's a
+// watch hook or the person is in Herdr or tmux; anywhere else it says how to
+// watch. Nothing pops up either way, and the browsers stay hidden unless
+// --show-browsers. ADMINISTRATION_WATCH=off (or --no-watch) keeps it to the
+// one line.
+func watchOnPlace(id, project, dir string, names []string, off bool) {
+	off = off || os.Getenv("ADMINISTRATION_WATCH") == "off"
+	if off || !(os.Getenv("HERDR_ENV") == "1" || os.Getenv("TMUX") != "" || watchHook(project) != "") {
 		fmt.Printf("Watch them work with: administration watch %s\n", id)
 		return
 	}
-	if err := openPanes(id, names); err != nil {
+	if err := openPanes(id, project, dir, names); err != nil {
 		fmt.Printf("Couldn't open the watch panes (%v); watch with: administration watch %s\n", err, id)
 	}
 }
@@ -591,6 +677,7 @@ func cmdStatus(args []string) error {
 		if err != nil {
 			return err
 		}
+		sweepChecks()
 		files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 		for _, file := range files {
 			id := filepath.Base(filepath.Dir(file))
@@ -647,6 +734,9 @@ func describe(s status) string {
 	if s.Reason != "" {
 		parts = append(parts, s.Reason)
 	}
+	if s.EquipmentLost != "" {
+		parts = append(parts, "equipment lost at "+s.EquipmentLost+"; the rest of their part wasn't done")
+	}
 	return strings.Join(parts, "; ")
 }
 
@@ -669,15 +759,59 @@ func cmdWait(args []string) (int, error) {
 		return exitError, err
 	}
 	deadline := time.Now().Add(limit)
+	// A line each time someone's state changes, so whoever reads this later
+	// sees how it went; and a failure while others work ends the wait at
+	// once, so a room that broke in a second isn't heard of an hour later.
+	seen := map[string]string{}
+	first := true
+	// Who an earlier wait already returned early for, so waiting again
+	// isn't cut short by the same failure.
+	toldPath := filepath.Join(dir, ".told")
+	told := map[string]bool{}
+	if b, err := os.ReadFile(toldPath); err == nil {
+		for _, n := range strings.Fields(string(b)) {
+			told[n] = true
+		}
+	}
 	for {
 		done := true
+		var broke []string
 		for _, p := range c.Professionals {
-			if !readStatus(dir, p.Name).terminal() {
+			s := readStatus(dir, p.Name)
+			if !s.terminal() {
 				done = false
 			}
+			if s.State != seen[p.Name] {
+				if !first || s.terminal() {
+					fmt.Printf("%s  %-26s %-8s %s\n", time.Now().Format("15:04"), p.Name, s.State, describe(s))
+				}
+				if (s.State == "failed" || s.State == "refused") && !told[p.Name] {
+					broke = append(broke, p.Name)
+				}
+				seen[p.Name] = s.State
+			}
 		}
+		first = false
 		if done {
 			break
+		}
+		if len(broke) > 0 {
+			code := exitStart
+			for _, n := range broke {
+				if readStatus(dir, n).State == "refused" {
+					code = exitRefused
+				}
+			}
+			for _, n := range broke {
+				told[n] = true
+			}
+			var names []string
+			for n := range told {
+				names = append(names, n)
+			}
+			_ = os.WriteFile(toldPath, []byte(strings.Join(names, "\n")+"\n"), 0o600)
+			fmt.Printf("Contract %s: %s didn't make it; the others are still working. Wait for them with: administration wait %s\n", c.ID, strings.Join(broke, ", "), c.ID)
+			return code, nil
 		}
 		if time.Now().After(deadline) {
 			_ = cmdStatus([]string{c.ID})
@@ -766,6 +900,9 @@ func cmdClose(args []string) error {
 		_ = writeJSON(filepath.Join(dir, p.Name, "status.json"), s)
 	}
 	c.Kept, c.NotKept = keepOneOffs(c, dir)
+	if v, err := loadRoster(c.Project); err == nil {
+		c.OpenAtClose = v.Open
+	}
 	summary, err := writeSummary(c, dir)
 	if err != nil {
 		return err
@@ -781,6 +918,11 @@ func cmdClose(args []string) error {
 		return err
 	}
 	fireHooks("closed", c.Project, contractPayload(c, dir))
+	// Closed first, so nothing waits on the matcher; its links, if any, go
+	// into the summary after.
+	if matchFindings(c, dir) {
+		_, _ = writeSummary(c, dir)
+	}
 	fmt.Println(summary)
 	return nil
 }

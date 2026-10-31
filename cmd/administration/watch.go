@@ -18,7 +18,8 @@ import (
 // what they say, each FINDING as it's written. It reads the streams the
 // workers already keep in the books, so watching changes nothing about the
 // work and works anywhere a terminal does. With --panes it opens a pane per
-// professional in Herdr or tmux instead, each running watch for one name.
+// professional instead (Herdr, tmux, or the person's watch hook), each
+// running watch for one name.
 func cmdWatch(args []string) error {
 	f, err := parseFlags(args, map[string]bool{"panes": false})
 	if err != nil {
@@ -41,7 +42,7 @@ func cmdWatch(args []string) error {
 		return usageError{fmt.Sprintf("%s isn't on contract %s", f.pos[1], c.ID)}
 	}
 	if f.has("panes") {
-		return openPanes(c.ID, names)
+		return openPanes(c.ID, c.Project, dir, names)
 	}
 	return follow(os.Stdout, dir, names, pollEvery(), isTTY(os.Stdout))
 }
@@ -120,6 +121,17 @@ func follow(w io.Writer, dir string, names []string, every time.Duration, color 
 		}
 		if done {
 			return nil
+		}
+		// Closed or gone from the books (pruned, deleted): nobody is coming
+		// back, and a status that's no longer there reads as queued.
+		if b, err := os.ReadFile(filepath.Join(dir, "contract.json")); err != nil {
+			return fmt.Errorf("contract %s is no longer in the books", filepath.Base(dir))
+		} else {
+			var c contract
+			if json.Unmarshal(b, &c) == nil && c.ClosedAt != nil {
+				fmt.Fprintf(w, "Contract %s is closed.\n", c.ID)
+				return nil
+			}
 		}
 		time.Sleep(every)
 	}
@@ -343,37 +355,68 @@ func isTTY(f *os.File) bool {
 	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
 
-// openPanes gives each professional a pane of its own, in a new Herdr tab
-// or tmux window, each running watch for that one name. The panes are only
-// viewers: closing one stops nothing.
-func openPanes(id string, names []string) error {
+// openPanes gives each professional a pane of its own, each running watch
+// for that one name. A watch hook, if the person or project has one, opens
+// them wherever it likes; otherwise it's a new Herdr tab in the placer's
+// space, or a tmux window. The panes are only viewers: closing one stops
+// nothing, and each closes itself once its professional is back.
+func openPanes(id, project, dir string, names []string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	var env []string
-	for _, k := range []string{"ADMINISTRATION_HOME", "XDG_DATA_HOME"} {
+	for _, k := range []string{"ADMINISTRATION_HOME", "XDG_DATA_HOME", "ADMINISTRATION_POLL"} {
 		if v := os.Getenv(k); v != "" {
 			env = append(env, k+"="+v)
 		}
 	}
-	cmdFor := func(n string) string {
-		return shellQuote(self) + " watch " + id + " " + shellQuote(n) + "; echo; echo '(done; close this pane when you like)'; exec cat >/dev/null"
+	// A pane's own shell may be anything, so the command is sh's. Exec'd
+	// as the pane's last, it ends the shell, and the pane with it, when
+	// watch is done; if watch fails, the pane stays until return is
+	// pressed, so the error is seen.
+	paneCmd := func(n, prefix string) string {
+		inner := prefix + shellQuote(self) + " watch " + id + " " + shellQuote(n) +
+			` || { echo; echo "(watch stopped; press return to close)"; read x; }`
+		return "sh -c " + shellQuote(inner)
 	}
+	if hook := watchHook(project); hook != "" {
+		// The hook's panes may not inherit our environment, so the
+		// command carries the books' location itself.
+		prefix := ""
+		if len(env) > 0 {
+			var q []string
+			for _, e := range env {
+				q = append(q, shellQuote(e))
+			}
+			prefix = "env " + strings.Join(q, " ") + " "
+		}
+		if err := runWatchHook(hook, project, id, dir, names, func(n string) string { return paneCmd(n, prefix) }); err != nil {
+			books, _ := booksDir()
+			return fmt.Errorf("the watch hook %s: %v; see %s", hook, err, filepath.Join(books, "hooks.log"))
+		}
+		fmt.Printf("Watching through the watch hook (%s).\n", hook)
+		return nil
+	}
+	cmdFor := func(n string) string { return "exec " + paneCmd(n, "") }
 	switch {
 	case os.Getenv("HERDR_ENV") == "1":
 		return herdrPanes(id, names, env, cmdFor)
 	case os.Getenv("TMUX") != "":
 		return tmuxPanes(id, names, env, cmdFor)
 	}
-	return fmt.Errorf("--panes needs Herdr or tmux; outside them, run administration watch %s in a terminal of its own (VS Code's will do)", id)
+	return fmt.Errorf("--panes needs Herdr, tmux or a watch hook; outside them, run administration watch %s in a terminal of its own (VS Code's will do)", id)
 }
 
 func herdrPanes(id string, names, env []string, cmdFor func(string) string) error {
 	run := func(args ...string) (map[string]any, error) {
 		out, err := exec.Command("herdr", args...).Output()
 		if err != nil {
-			return nil, fmt.Errorf("herdr %s: %v", args[0], err)
+			msg := err.Error()
+			if ee, ok := err.(*exec.ExitError); ok && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+				msg = oneLine(string(ee.Stderr), 200)
+			}
+			return nil, fmt.Errorf("herdr %s %s: %s", args[0], args[1], msg)
 		}
 		var v map[string]any
 		_ = json.Unmarshal(out, &v)
@@ -383,7 +426,24 @@ func herdrPanes(id string, names, env []string, cmdFor func(string) string) erro
 	for _, e := range env {
 		targs = append(targs, "--env", e)
 	}
-	t, err := run(targs...)
+	// Without a space, Herdr uses whichever one is focused; the placer's
+	// is where the work is. HERDR_WORKSPACE_ID is only where the placer's
+	// pane started, so ask Herdr where it is now, and if that space won't
+	// take the tab, let Herdr choose rather than open nothing.
+	ws := os.Getenv("HERDR_WORKSPACE_ID")
+	if cur, err := run("pane", "current"); err == nil {
+		if w := dig(cur, "result", "pane", "workspace_id"); w != "" {
+			ws = w
+		}
+	}
+	var t map[string]any
+	err := fmt.Errorf("no space")
+	if ws != "" {
+		t, err = run(append(targs, "--workspace", ws)...)
+	}
+	if err != nil {
+		t, err = run(targs...)
+	}
 	if err != nil {
 		return err
 	}
@@ -433,6 +493,9 @@ func tmuxPanes(id string, names, env []string, cmdFor func(string) string) error
 		return fmt.Errorf("tmux new-window: %v", err)
 	}
 	win := strings.TrimSpace(string(out))
+	// So the window goes when its last watch is done, whatever the
+	// person's tmux keeps by default.
+	_ = exec.Command("tmux", "set-option", "-w", "-t", win, "remain-on-exit", "off").Run()
 	for _, n := range names[1:] {
 		args := append([]string{"split-window", "-d", "-t", win}, eargs...)
 		if err := exec.Command("tmux", append(args, cmdFor(n))...).Run(); err != nil {

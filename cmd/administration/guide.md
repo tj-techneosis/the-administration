@@ -12,11 +12,10 @@ one command per call: no `;`, `&&`, pipes or `cd` around it, because the
 person's permissions allow `administration ...` and a compound command
 asks for approval nobody may be there to give. Don't try to stand in for
 it. If it says it isn't installed, give the
-person the two steps, which they run once in a terminal:
+person the one line, which they run once in a terminal:
 
 ```
-git clone https://github.com/tj-techneosis/the-administration ~/.local/share/the-administration
-~/.local/share/the-administration/install.sh
+curl -fsSL https://raw.githubusercontent.com/tj-techneosis/the-administration/main/install.sh | sh
 ```
 
 When the person asks to upgrade the Administration, run `administration
@@ -101,7 +100,11 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    in their shoes would take through it, at the widths that matter, ending
    on the thing most likely broken ("an order paid half by gift card, half
    cash; check the card is charged only its half; refund one item and
-   check which payment it goes back to"). One task each; the Director's specialists already have theirs.
+   check which payment it goes back to"). One task each; the Director's
+   specialists already have theirs. `--only <name>="..."` makes the task
+   the whole of their work, with the persona's own checks off: for a quick
+   smoke test ("open the app and take one screenshot") that shouldn't turn
+   into a full run.
    If the Director's plan names a `data:` set, it's used; otherwise pick
    one with `--data <name>` when the default seed lacks what the tasks
    start from.
@@ -109,16 +112,24 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    [--changes] [--brief <name>="..."]... [--data <name>] [--coins 10m]`. It
    prints the contract id and returns at once.
 6. **Wait in the background**: run `administration wait <id>` with
-   `run_in_background` (a foreground wait dies at the Bash time limit). Tell
+   `run_in_background` (a foreground wait dies at the Bash time limit). It
+   prints a line as each professional's state changes, and returns early
+   if one fails or is refused while the others work: tell the person who
+   and why (its line says), then run the wait again for the rest. Tell
    the person it's placed, about how long it takes (the largest purse in
    minutes, plus a few minutes to build each room), and that in VS Code
    `/tasks` shows it running. Then carry on with whatever else they want. If
    they ask how it's going, `administration status <id>`.
    **Watching**: in Herdr or tmux, place opens a watch tab with a pane per
-   professional, without taking focus (its output says so); tell the person
-   it's there. Anywhere else (VS Code), give them the line place printed,
-   `administration watch <id>`, to run in a terminal of their own: a live
-   line per action and every finding as it's written. Watching changes
+   professional, without taking focus, in the Herdr space you're working
+   in; each pane closes once its professional is back. A `watch` hook (the
+   person's or the project's) opens them instead, wherever it likes. Place
+   says which ("Watching in Herdr", "Watching through the watch hook");
+   tell the person they're there. If it says "Couldn't open the watch
+   panes", pass on why, and the watch line it printed. Anywhere else (VS
+   Code), give them the line place printed, `administration watch <id>`,
+   to run in a terminal of their own: a live line per action and every
+   finding as it's written. Watching changes
    nothing about the work. If they don't want the panes, `--no-watch`.
    If they want to see the browsers themselves, place it with
    `--show-browsers`: each user's browser opens as a window on their
@@ -145,11 +156,35 @@ When the wait finishes:
    the summary (`report <id> <name>` one professional's report). Read them
    that way: the books are outside the project, and reading them directly
    asks for a permission the command doesn't need.
-2. **Check every finding** before reporting it. For a critic's finding, open
-   the file and line it cites. For a browser finding, find the code that
-   produces what they saw. Mark each one **confirmed**, **likely** (the code
-   agrees but you couldn't be sure) or **not confirmed** (say why). Never
-   pass a finding on unchecked.
+2. **Have the verifiers check every finding**: run `administration verify
+   <id>` with `run_in_background` (a few minutes). Walled verifiers read
+   the project's code, nothing else, and record **confirmed**, **likely**
+   (the code agrees, but reading can't settle it) or **false** for each,
+   with the line that decided it; the summary shows them as "by a
+   verifier". If one didn't finish, it says so; run verify again for what
+   it left. Then **review them**, yourself, before reporting: open the line
+   behind every NEW finding and every one marked false, and a few of the
+   confirmed. Never pass a finding on unchecked, by them or by you. The
+   summary lists each finding once, with who found it and its number in
+   their report (`name #3`); several who found the same thing on their own
+   come first. **Record where you disagree** in the books (yours replace
+   the verifiers'): write them to a file, `{"<name>": [{"finding": 3, "verdict":
+   "confirmed", "why": "..."}]}` (for a folded finding, under each name
+   that found it), and run `administration verdicts <id> <file>`; a later
+   run adds to earlier ones, and a finding checked again takes the new
+   verdict. When two who found the same thing were checked differently,
+   the summary shows both. The summary then shows each verdict beside its
+   finding, for whoever reads it next, and the stats learn who earns their
+   coins.
+   **Links between contracts**: when another contract on the same work
+   has the same bug (a critic predicted it, a user saw it on a phone), the
+   summary says "maybe the same as contract X name #n (proposed: ...)".
+   Check each like a finding: same defect, same cause? Add `"also":
+   ["X name #n"]` to that finding's verdict when it is, `"not_also":
+   [...]` when it isn't; also add an `also` for any you notice yourself.
+   A confirmed link shows on both summaries, first, as the strongest
+   evidence there is, and each decision teaches the matcher this
+   project's words.
 3. **Report briefly**: what broke, how to see it, how sure you are, ranked by
    how much it would hurt a person using the app. On a contract on changes
    (a release check, "redteam these changes") lead with the verdict: the
@@ -184,6 +219,12 @@ When the wait finishes:
 7. If the project has its own way to capture lessons (a capture or notes
    command), list the confirmed findings worth keeping as candidates for it.
    Don't run it yourself.
+
+**Equipment lost**: a professional whose device died mid-contract (three
+failed screenshots in a row) is told to stop and write what's left as
+unreached, and marked "equipment lost at HH:MM"; their part is partial. Say so, and offer `administration resume
+<id> <name>`: a new contract for them with only what they couldn't reach.
+It also picks up after a professional ran out of coins.
 
 Exit codes: 0 done, 1 error, 2 a room or professional failed, 3 refused by
 the Rules. On a 2, the `wait` line and `administration status <id>` give
@@ -224,9 +265,25 @@ their findings as tested.
    `.administration/roster.toml`, then onboard
    (or cast) again so those agents come in through it. The programs it
    declares needn't be executable; the Administration makes them so.
-   `room-check` checks the setup hook only: prove equipment with a small
-   first contract (one user through it, a few coins) that says whether
-   the window came up, the files arrived and each tool answered.
+   `room-check` checks the setup hook only; **check each piece with
+   `administration equipment-check <name>`** (in the background): it
+   starts it in a fresh room, says what its setup printed, takes one
+   picture through a screen and clears it away. Fix and run it again until
+   it passes. Equipment that points an app off this machine is refused
+   unless it declares that server shared (`shared = ["<host>"]`, a test
+   server, never production). When the plan has a **Shared server** part,
+   ask the person straight out, naming the host: "Is <host> production?
+   The professionals will make accounts and change data there." Add the
+   line only on a clear no, with a comment above it that says so: `#
+   <host>: a shared test server, not production (confirmed with the
+   person, <date>)`. If they're unsure, plan a local stand-in instead.
+   A host whose name looks like production (`prod-replica`, `live-demo`)
+   is refused until the person has said it isn't: ask about that host by
+   name, and on a clear no add it to `not_production = ["<host>"]` in the
+   same block, with the same comment.
+   Then a small
+   first contract (one user through it, a few coins, `--only` a short
+   task) proves the rest.
 5. **Data sets**, when the default seed lacks what contracts need (the
    records a flow starts from) or the person has their own way of pulling
    data for local testing: the hook loads it on `$ADMINISTRATION_DATA`,

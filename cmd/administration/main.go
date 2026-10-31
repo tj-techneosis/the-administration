@@ -23,25 +23,34 @@ const usage = `administration: contracts for persona agents.
       how a Claude session uses the Administration (the plugin's skill
       reads it from here, so it always matches this version)
   administration upgrade [--no-browser]
-      update your copy (~/.local/share/the-administration, or
-      $ADMINISTRATION_SRC) and install from it; open sessions use the new
-      version from their next task
+      install the latest release, or pull and rebuild your checkout
+      (~/.local/share/the-administration, or $ADMINISTRATION_SRC); open
+      sessions use the new version from their next task
   administration roster [--json] [--project DIR] [--match tag,tag]
       who's hired, where from, and the open rooms; --match is the Director's
       first draft of a cast, and the tags nobody knows
-  administration place TARGET... --cast a,b [--coins 10m] [--changes [--base REF]]
-                       [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME] [--brief NAME=TASK]...
+  administration place TARGET... --cast a,b | --with RUN [--coins 10m] [--model M]
+                       [--changes [--base REF]] [--brief NAME=TASK]... [--only NAME=TASK]...
+                       [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME]
       place a contract; prints its id. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare
-      (--no-before doesn't). In Herdr or tmux it
-      opens a watch pane per professional, unfocused (--no-watch, or
+      (--no-before doesn't). In Herdr or tmux it opens a watch pane per
+      professional, unfocused, in your space, each closing when they're
+      back; a watch hook opens them instead (--no-watch, or
       ADMINISTRATION_WATCH=off, doesn't); --show-browsers opens users'
-      browsers as windows on your screen
+      browsers as windows on your screen. --with brings a Director cast's
+      specialists; --brief gives one their own task on top of their
+      persona's checks, --only instead of them
   administration hire NAME|FILE [--replace] | hire --from CONTRACT NAME
       put a professional the Director trained on the project's roster, or
       keep a one-off specialist from a contract
-  administration wait ID [--timeout 30m]
-      until every professional is back or out of coins
+  administration wait ID [--timeout 3h]
+      until every professional is back or out of coins, with a line as each
+      one's state changes; returns early (2, or 3 if refused) when one fails
+      while others still work
+  administration resume ID NAME [--coins 10m]
+      a new contract for one professional on what contract ID left undone:
+      what they couldn't reach and the steps of their plan never answered
   administration status [ID] [--json]
       who's working, who's back
   administration close ID [--keep]
@@ -52,10 +61,15 @@ const usage = `administration: contracts for persona agents.
   administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]
       build one room with the project's setup hook, check it comes up on
       seed data, show its address and logins, and clear it away
+  administration equipment-check NAME [--project DIR] [--shot FILE]
+      start one piece of the project's equipment in a fresh room, say what
+      its setup printed, take one picture through a screen (saved to FILE,
+      or the books), and clear it away
   administration watch ID [NAME] [--panes]
       follow what each professional does as they do it; --panes gives each
-      one a pane in Herdr or tmux
-  administration director cast TARGET... [--changes [--base REF]] | train WHO... | onboard | review
+      one a pane in Herdr or tmux, or wherever the watch hook puts them
+  administration director cast TARGET... [--changes [--base REF]] | train WHO... [--contract ID]
+                         | onboard [--agents DIR] | review
                          [--project DIR] [--model M] [--coins 10m]
       cast: specialists for one contract, from reading the code in scope;
       place them with --with RUN
@@ -66,8 +80,17 @@ const usage = `administration: contracts for persona agents.
   administration missed WHAT... [--contract ID] [--by NAME] [--project DIR]
       something a professional saw and passed over; the Director's next
       review tunes whoever should have caught it (apply puts the tuning in)
+  administration verify ID [--batch 12] [--coins 10m] [--model M]
+      check a closed contract's unchecked findings in the house: walled
+      verifiers read the project's code (nothing else) and record confirmed,
+      likely or false for each, with the line that decided it; your own
+      verdicts replace theirs
   administration verdicts ID FILE|-
-      record each finding's check: {"name": [{"finding": 1, "verdict": "confirmed|likely|false"}]}
+      record each finding's check, adding to earlier ones:
+      {"name": [{"finding": 1, "verdict": "confirmed|likely|false", "why": "...",
+                 "also": ["ID NAME #N"], "not_also": ["ID NAME #N"]}]}
+      also/not_also confirm or reject a link to the same bug in another
+      contract
   administration stats [--project DIR] [--json]
       each professional's record: runs, findings, how many held up, coins used
   administration prune [--keep 10] [--older 30d] [--dry-run]
@@ -98,6 +121,10 @@ func run(args []string) int {
 		fmt.Print(usage)
 		return exitOK
 	}
+	if h, ok := commandHelp(args); ok {
+		fmt.Print(h)
+		return exitOK
+	}
 	var err error
 	code := exitOK
 	switch args[0] {
@@ -125,6 +152,12 @@ func run(args []string) int {
 		err = cmdWatch(args[1:])
 	case "room-check":
 		err = cmdRoomCheck(args[1:])
+	case "equipment-check":
+		err = cmdEquipmentCheck(args[1:])
+	case "resume":
+		err = cmdResume(args[1:])
+	case "verify":
+		err = cmdVerify(args[1:])
 	case "close":
 		err = cmdClose(args[1:])
 	case "check":
@@ -172,6 +205,31 @@ func run(args []string) int {
 		return exitError
 	}
 	return code
+}
+
+// commandHelp is a command's own entry in the usage, when its first
+// argument is --help or -h: agents try that before the README. Only there,
+// so a target or a task that happens to be "-h" is still one.
+func commandHelp(args []string) (string, bool) {
+	if len(args) < 2 || args[1] != "--help" && args[1] != "-h" || strings.HasPrefix(args[0], "_") {
+		return "", false
+	}
+	var b strings.Builder
+	in := false
+	for _, l := range strings.Split(usage, "\n") {
+		if strings.HasPrefix(l, "  administration ") {
+			in = strings.HasPrefix(l+" ", "  administration "+args[0]+" ")
+		} else if strings.TrimSpace(l) == "" {
+			in = false
+		}
+		if in {
+			b.WriteString(strings.TrimPrefix(l, "  ") + "\n")
+		}
+	}
+	if b.Len() == 0 {
+		return "", false
+	}
+	return b.String(), true
 }
 
 // flags is a small parser: --name value, --name=value and bare --switch, with

@@ -87,7 +87,20 @@ type drive struct {
 	mu    sync.Mutex
 	scale int         // device pixels per picture pixel, from the last picture
 	last  *image.RGBA // the picture at the last look, for what changed
+	// The device failing, not the professional's call: screenshots in a
+	// row that failed or weren't a picture (a bad tap or an unknown key is
+	// the professional's). At lostAfter it's gone, the worker is told
+	// through the file, and nothing more is asked of it.
+	fails    int
+	lost     string
+	lostFile string
+	stderr   string // the driver's last stderr, for a picture that isn't one
 }
+
+// lostAfter is how many failed screenshots in a row mean the device is gone:
+// a professional can't tell a dead screen from a slow one, and kept going on
+// one for its whole purse.
+const lostAfter = 3
 
 // cmdDrive is `administration _drive DRIVER [ARGS...] [-- KEY...]`: the
 // screen's MCP server in front of a project's driver. The keys after --
@@ -96,7 +109,7 @@ func cmdDrive(args []string) error {
 	if len(args) < 1 {
 		return usageError{"_drive DRIVER [ARGS...] [-- KEY...]"}
 	}
-	d := &drive{prog: args[0], scale: 1}
+	d := &drive{prog: args[0], scale: 1, lostFile: os.Getenv("ADMINISTRATION_EQUIPMENT_LOST")}
 	rest := args[1:]
 	for i, a := range rest {
 		if a == "--" {
@@ -137,7 +150,7 @@ func cmdDrive(args []string) error {
 			}
 			reply["result"] = map[string]any{"tools": tools}
 		case "tools/call":
-			reply["result"] = d.call(req.Params.Name, req.Params.Arguments)
+			reply["result"] = d.guarded(req.Params.Name, req.Params.Arguments)
 		case "ping":
 			reply["result"] = map[string]any{}
 		default:
@@ -151,6 +164,29 @@ func cmdDrive(args []string) error {
 		}
 	}
 	return in.Err()
+}
+
+// guarded is call, held to the device's health: once it has failed
+// lostAfter times running, it is lost, and every call says so.
+func (d *drive) guarded(name string, a map[string]any) map[string]any {
+	if d.lost != "" {
+		return textResult(d.lost, true)
+	}
+	res := d.call(name, a)
+	if d.fails < lostAfter {
+		return res
+	}
+	why := ""
+	if c, ok := res["content"].([]any); ok && len(c) > 0 {
+		if m, ok := c[0].(map[string]any); ok {
+			why, _ = m["text"].(string)
+		}
+	}
+	d.lost = fmt.Sprintf("The equipment has failed %d times in a row (last: %s). It's lost: the device, not the app. Stop using it now: write UNREACHED: for each thing left in your plan, saying the equipment was lost, and then your report.", d.fails, oneLine(why, 300))
+	if d.lostFile != "" {
+		_ = os.WriteFile(d.lostFile, []byte(time.Now().Format("15:04")+" "+oneLine(why, 300)+"\n"), 0o600)
+	}
+	return textResult(d.lost, true)
 }
 
 func cloneTool(t map[string]any, desc string) map[string]any {
@@ -173,7 +209,9 @@ func (d *drive) run(action ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, d.prog, append(append([]string{}, d.args...), action...)...)
 	var o, e bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &o, &e
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	d.stderr = oneLine(e.String(), 300)
+	if err != nil {
 		msg := strings.TrimSpace(e.String())
 		if msg == "" {
 			msg = err.Error()
@@ -277,12 +315,19 @@ func (d *drive) call(name string, a map[string]any) map[string]any {
 func (d *drive) shot(look bool) map[string]any {
 	b, err := d.run("screenshot")
 	if err != nil {
+		d.fails++
 		return textResult(err.Error(), true)
 	}
 	img, err := png.Decode(bytes.NewReader(b))
 	if err != nil {
-		return textResult("the driver's screenshot isn't a PNG: "+err.Error(), true)
+		d.fails++
+		msg := fmt.Sprintf("the driver's screenshot isn't a PNG (%s): %d bytes, starting %q", err, len(b), b[:min(len(b), 16)])
+		if d.stderr != "" {
+			msg += "; the driver said: " + d.stderr
+		}
+		return textResult(msg, true)
 	}
+	d.fails = 0
 	k := shotScale(img.Bounds().Dx(), img.Bounds().Dy())
 	small := shrink(img, k)
 	note := fmt.Sprintf("The screen, %dx%d.", small.Bounds().Dx(), small.Bounds().Dy())

@@ -39,6 +39,37 @@ with open(os.path.join(here, "fake-call.json"), "w") as f:
 def say(obj):
     print(json.dumps(obj), flush=True)
 
+if os.path.basename(persona) == "verifier.md":
+    # A verifier: walled to reading code. The save button is confirmed, the
+    # error is false; anything else it leaves out.
+    assert args[args.index("--tools") + 1] == "Read,Grep,Glob", "a verifier only reads"
+    data = json.loads(prompt)
+    assert data["project"] in args, "it can read the project"
+    out = []
+    for f in data["findings"]:
+        if "save button" in f["text"]:
+            out.append({"id": f["id"], "verdict": "confirmed", "why": "settings.js:12 never calls save()"})
+        elif "error says" in f["text"]:
+            out.append({"id": f["id"], "verdict": "false", "why": "errors.js:4 shows the message"})
+    say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "result": "Checked.\n" + json.dumps(out)})
+    sys.exit(0)
+
+if os.path.basename(persona) == "matcher.md":
+    # The finding matcher: pairs whose words are the same, and nothing else.
+    # What it was given is kept beside the books, for the tests to read.
+    data = json.loads(prompt)
+    assert args[args.index("--tools") + 1] == "", "the matcher has no tools"
+    contract = os.getcwd()
+    while not os.path.exists(os.path.join(contract, "contract.json")):
+        contract = os.path.dirname(contract)
+    with open(os.path.join(contract, "fake-matcher-seen.jsonl"), "a") as f:
+        f.write(json.dumps(data) + "\n")
+    pairs = [{"these": t["ref"], "others": o["ref"], "why": "same words"}
+             for t in data["these"] for o in data["others"] if t["text"] == o["text"]]
+    pairs.append({"these": "nobody #9", "others": "zzzz nobody #9", "why": "made up"})  # refs that don't exist are dropped
+    say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": json.dumps(pairs)})
+    sys.exit(0)
+
 def text(t):
     say({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}})
 
@@ -61,6 +92,14 @@ if mode == "write":
     notes = sorted(os.listdir("inbox")) if os.path.isdir("inbox") else []
     with open("outbox/tasks.md", "w") as f:
         f.write("# Tasks\n" + "".join(f"- from {n}\n" for n in notes))
+if mode == "hoard":
+    # Reads and reads, writes nothing down, and never finishes on its own:
+    # what it's sent is kept, for the tests to see.
+    for line in sys.stdin:
+        if line.strip():
+            with open(os.path.join(here, "fake-sent-back.jsonl"), "a") as f:
+                f.write(json.dumps(message_text(line)) + "\n")
+    sys.exit(0)
 text("Looking around.\n**FINDING:** the save button does nothing on /settings\n")
 if mode == "slow":
     text("UNREACHED: the billing page, ran out of time")

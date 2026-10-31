@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -21,7 +22,9 @@ import (
 // A hook runs as the person, like the setup hook, gets hookLimit, and is
 // stopped with its process group after that. Its exit code is ignored, its
 // output goes to the books' hooks.log, and nothing about it changes an
-// outcome.
+// outcome. The watch hook is the exception: it opens the watch panes in
+// place of the house's, so when it fails place says so and prints the
+// watch line instead.
 const hookLimit = 30 * time.Second
 
 var hookEvents = map[string]bool{"placed": true, "closed": true, "hired": true, "director": true}
@@ -74,7 +77,9 @@ func fireHooks(event, project string, payload map[string]any) {
 	}
 }
 
-func runHook(path, project, event string, body []byte, payload map[string]any, logf *os.File) {
+// runHook runs one hook and says whether it finished and exited 0, which
+// only the watch hook's caller looks at.
+func runHook(path, project, event string, body []byte, payload map[string]any, logf *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), hookLimit)
 	defer cancel()
 	cmd := exec.Command(path)
@@ -94,26 +99,95 @@ func runHook(path, project, event string, body []byte, payload map[string]any, l
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return
+		return err
 	}
 	if err := cmd.Start(); err != nil {
 		if logf != nil {
 			fmt.Fprintf(logf, "  could not start: %v\n", err)
 		}
-		return
+		return err
 	}
 	go func() { _, _ = stdin.Write(body); stdin.Close() }()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
-	case <-done:
+	case err := <-done:
+		return err
 	case <-ctx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-done
 		if logf != nil {
 			fmt.Fprintf(logf, "  took longer than %s and was stopped\n", hookLimit)
 		}
+		return fmt.Errorf("took longer than %s", hookLimit)
 	}
+}
+
+// watchHook is the executable that opens the watch panes in place of the
+// built-in Herdr and tmux ones, or "" for none. Unlike the other events only
+// one runs, since two would open everything twice, and the machine's comes
+// first: where panes appear is the person's choice, not the project's.
+func watchHook(project string) string {
+	paths := []string{filepath.Join(configDir(), "hooks", "watch")}
+	if project != "" {
+		paths = append(paths, filepath.Join(project, ".administration", "hooks", "watch"))
+	}
+	for _, path := range paths {
+		st, err := os.Stat(path)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		if st.Mode()&0o111 != 0 {
+			return path
+		}
+		// Once per run: place asks twice (whether to watch, then to open).
+		if logf := hooksLog(); logf != nil && !skipLogged[path] {
+			skipLogged[path] = true
+			fmt.Fprintf(logf, "%s watch %s\n  not executable; skipped\n", time.Now().Format(time.DateTime), path)
+			logf.Close()
+		}
+	}
+	return ""
+}
+
+var skipLogged = map[string]bool{}
+
+// hooksLog opens the books' hooks.log to append to, or nil.
+func hooksLog() *os.File {
+	books, err := booksDir()
+	if err != nil {
+		return nil
+	}
+	f, _ := os.OpenFile(filepath.Join(books, "hooks.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	return f
+}
+
+// runWatchHook hands the hook the contract and, for each professional, the
+// command that follows them and exits once they're back.
+func runWatchHook(path, project, id, dir string, names []string, cmdFor func(string) string) error {
+	pros := make([]map[string]string, 0, len(names))
+	for _, n := range names {
+		pros = append(pros, map[string]string{"name": n, "command": cmdFor(n)})
+	}
+	payload := map[string]any{"event": "watch", "project": project, "contract": id, "books": dir, "professionals": pros}
+	body, _ := json.Marshal(payload)
+	logf := hooksLog()
+	if logf != nil {
+		fmt.Fprintf(logf, "%s watch %s\n", time.Now().Format(time.DateTime), path)
+		defer logf.Close()
+	}
+	err := runHook(path, project, "watch", body, payload, logf)
+	// runHook already logged a timeout; an exit status is ours to log.
+	if ee, ok := err.(*exec.ExitError); ok {
+		err = fmt.Errorf("exited %d", ee.ExitCode())
+		if logf != nil {
+			fmt.Fprintf(logf, "  %v\n", err)
+		}
+	}
+	if err != nil && strings.HasPrefix(err.Error(), "took longer") {
+		err = fmt.Errorf("%v and was stopped, so some panes may be open already", err)
+	}
+	return err
 }
 
 // contractPayload is what contract hooks hear: the contract, each

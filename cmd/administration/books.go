@@ -21,6 +21,13 @@ type verdict struct {
 	Finding int    `json:"finding"` // 1-based, in the report's order
 	Verdict string `json:"verdict"` // confirmed, likely, false
 	Why     string `json:"why,omitempty"`
+	// The same bug in another contract ("ID NAME #N"), or a proposed link
+	// that isn't: see links.go.
+	Also    []string `json:"also,omitempty"`
+	NotAlso []string `json:"not_also,omitempty"`
+	// "verifier" when a walled verifier gave it (administration verify);
+	// empty when the session did, whose verdict replaces a verifier's.
+	By string `json:"by,omitempty"`
 }
 
 // cmdVerdicts records verdicts for a closed or open contract, from a JSON
@@ -51,6 +58,8 @@ func cmdVerdicts(args []string) error {
 	for _, p := range c.Professionals {
 		on[p.Name] = true
 	}
+	// Everything is checked before anything is written, so a mistake in one
+	// professional's list leaves the books as they were.
 	for name, vs := range all {
 		if !on[name] {
 			return usageError{fmt.Sprintf("%s is not on contract %s", name, c.ID)}
@@ -63,12 +72,69 @@ func cmdVerdicts(args []string) error {
 			if v.Finding < 1 || v.Finding > n {
 				return usageError{fmt.Sprintf("%s has %d findings; there's no finding %d", name, n, v.Finding)}
 			}
+			for _, ref := range append(append([]string{}, v.Also...), v.NotAlso...) {
+				if m := otherRef.FindStringSubmatch(ref); m != nil && m[1] == c.ID {
+					return usageError{fmt.Sprintf("%q: a link is to another contract's finding; findings within one contract are folded, not linked", ref)}
+				}
+				if _, _, err := resolveOther(ref); err != nil {
+					return err
+				}
+			}
 		}
-		if err := writeJSON(filepath.Join(dir, name, "verdicts.json"), vs); err != nil {
+	}
+	touched := map[string]bool{}
+	for name, vs := range all {
+		if len(vs) == 0 {
+			continue
+		}
+		// A later call adds to the earlier ones; a finding checked again
+		// takes its new verdict.
+		byN := map[int]verdict{}
+		var old []verdict
+		if b, err := os.ReadFile(filepath.Join(dir, name, "verdicts.json")); err == nil {
+			_ = json.Unmarshal(b, &old)
+		}
+		for _, v := range append(old, vs...) {
+			byN[v.Finding] = v
+		}
+		merged := make([]verdict, 0, len(byN))
+		for _, v := range byN {
+			merged = append(merged, v)
+		}
+		sort.Slice(merged, func(i, j int) bool { return merged[i].Finding < merged[j].Finding })
+		if err := writeJSON(filepath.Join(dir, name, "verdicts.json"), merged); err != nil {
+			return err
+		}
+		for _, v := range vs {
+			if err := decideLinks(c, dir, name, v); err != nil {
+				return err
+			}
+			for _, ref := range append(append([]string{}, v.Also...), v.NotAlso...) {
+				touched[otherRef.FindStringSubmatch(ref)[1]] = true
+			}
+		}
+	}
+	// The other side of each link shows it too.
+	for id := range touched {
+		if oc, odir, err := loadContract(id); err == nil {
+			if _, err := os.Stat(filepath.Join(odir, "summary.md")); err == nil {
+				_, _ = writeSummary(oc, odir)
+			}
+		}
+	}
+	n := 0
+	for _, vs := range all {
+		if len(vs) > 0 {
+			n++
+		}
+	}
+	fmt.Printf("Verdicts recorded for %s on contract %s.\n", plural(n, "professional", "professionals"), c.ID)
+	// A closed contract's summary shows each check beside its finding.
+	if _, err := os.Stat(filepath.Join(dir, "summary.md")); err == nil {
+		if _, err := writeSummary(c, dir); err != nil {
 			return err
 		}
 	}
-	fmt.Printf("Verdicts recorded for %d professionals on contract %s.\n", len(all), c.ID)
 	return nil
 }
 
@@ -91,6 +157,8 @@ type ledgerLine struct {
 	Likely    int      `json:"likely"`
 	False     int      `json:"false"`
 	Checked   bool     `json:"checked"` // verdicts were recorded
+	// Of those, the ones a verifier gave and nobody has reviewed since.
+	ByVerifier int `json:"by_verifier,omitempty"`
 	Dossier   int      `json:"dossier_bytes,omitempty"`
 }
 
@@ -113,6 +181,9 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 				l.Likely++
 			case "false":
 				l.False++
+			}
+			if v.By == "verifier" {
+				l.ByVerifier++
 			}
 		}
 	}
@@ -173,6 +244,7 @@ type standing struct {
 	Confirmed    int      `json:"confirmed"`
 	Likely       int      `json:"likely"`
 	False        int      `json:"false"`
+	ByVerifier   int      `json:"by_verifier,omitempty"` // of the checks, a verifier's not reviewed since
 	AvgTurns     float64  `json:"avg_turns"`
 	AvgMinutes   float64  `json:"avg_minutes"`
 	AvgCoinsUsed float64  `json:"avg_coins_used"` // minutes worked / coins, 1.0 = always out
@@ -207,6 +279,7 @@ func standings(lines []ledgerLine) []standing {
 		s.Confirmed += l.Confirmed
 		s.Likely += l.Likely
 		s.False += l.False
+		s.ByVerifier += l.ByVerifier
 		// Time and turns are averaged over the contracts they worked: a run
 		// that failed early says nothing about how long the work takes.
 		if l.State == "failed" || l.State == "refused" {
@@ -257,6 +330,17 @@ func cmdStats(args []string) error {
 	for _, s := range st {
 		fmt.Printf("  %-26s %4d %4d %4d %6d %6d %6d %6.0f %5.0f%%\n", s.Name, s.Contracts, s.Out, s.Failed,
 			s.Findings, s.Confirmed, s.False, s.AvgTurns, 100*s.AvgCoinsUsed)
+	}
+	verified, checks := 0, 0
+	for _, s := range st {
+		verified += s.ByVerifier
+		checks += s.Confirmed + s.Likely + s.False
+	}
+	if verified > 0 {
+		fmt.Printf("\n%d of the %d checks above are a verifier's that nobody has reviewed since.\n", verified, checks)
+	}
+	if held, wrong := matcherRecord(&contract{Project: project, Key: projectKey(project)}); held+wrong > 0 {
+		fmt.Printf("\nLinks the matcher proposed between contracts: %d held, %d didn't (%.0f%% right).\n", held, wrong, 100*float64(held)/float64(held+wrong))
 	}
 	return nil
 }
@@ -342,7 +426,10 @@ func cmdPrune(args []string) error {
 					}
 				}
 				if !f.has("dry-run") {
-					_ = os.RemoveAll(filepath.Join(dir, "handout"))
+					_ = os.RemoveAll(filepath.Join(dir, contractHandout))
+					_ = os.RemoveAll(filepath.Join(dir, ".verify")) // a failed verifier's or matcher's stream
+					_ = os.RemoveAll(filepath.Join(dir, ".match"))
+					_ = os.RemoveAll(filepath.Join(dir, "handout")) // where it was before 0.4
 					stripped++
 				}
 			}

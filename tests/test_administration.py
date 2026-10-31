@@ -276,6 +276,22 @@ class Roster(Base):
         v = json.loads(self.cli("roster", "--json").stdout)
         self.assertFalse(any(o["name"] == "first-timer" for o in v["open"]))
 
+    def test_the_open_rooms_fit_the_kind_of_project(self):
+        rooms = lambda: {o["name"] for o in json.loads(self.cli("roster", "--json").stdout)["open"]}
+        self.assertTrue({"every-screen", "small-phone"} <= rooms())  # nothing set up yet: every suggestion
+        write(os.path.join(self.project, ".administration", "roster.toml"),
+              '[equipment.phone]\nabout = "A phone."\nserver = "screen"\ndriver = "drv"\n')
+        self.assertIn("small-phone", rooms())
+        self.assertNotIn("every-screen", rooms())  # a phone app has no browser to resize
+        self.assertIn("keyboard-and-reader", rooms())
+        write(os.path.join(self.project, ".administration", "setup"), "#!/bin/sh\n", 0o755)
+        self.assertTrue({"every-screen", "small-phone"} <= rooms())  # both kinds
+        os.remove(os.path.join(self.project, ".administration", "setup"))
+        write(os.path.join(self.project, ".administration", "roster.toml"),
+              '[equipment.cli]\nabout = "The tool."\nserver = "sandboxed"\ncommands = ["bin/tool"]\n')
+        self.assertFalse({"every-screen", "small-phone"} & rooms())  # a command-line tool is neither
+        self.assertIn("failure-path", rooms())
+
     def test_a_broken_file_is_left_off_and_said(self):
         write(os.path.join(self.project, ".administration", "professionals", "bad.md"), "no frontmatter\n")
         self.hire_file("good")
@@ -385,10 +401,36 @@ class Upgrade(Base):
         self.assertIn("The plugin changed too (0.3.0)", out)
         self.assertIn("/reload-plugins", out)
 
+    def test_without_a_checkout_upgrade_installs_the_latest_release(self):
+        # The installer, piped into sh as a person would: here a stand-in,
+        # so nothing goes over the network.
+        fake = os.path.join(self.tmp, "installer.sh")
+        write(fake, 'echo "release installer $*"\n')
+        out = self.cli("upgrade", "--no-browser", env={"ADMINISTRATION_INSTALLER": "file://" + fake}).stdout
+        self.assertIn("release installer --no-browser", out)
+        p = self.cli("upgrade", check=1, env={"ADMINISTRATION_INSTALLER": "file://" + os.path.join(self.tmp, "none.sh")})
+        self.assertIn("installing the latest release", p.stderr)
+
     def test_upgrade_says_where_it_looked(self):
+        self.env["ADMINISTRATION_SRC"] = os.path.join(self.tmp, "nowhere")
         self.assertIn("no copy of the Administration", self.cli("upgrade", check=1).stderr)
         self.env["ADMINISTRATION_SRC"] = self.copy("0.2.0")
         self.assertIn("has no remote to pull from", self.cli("upgrade").stdout)
+
+
+class Help(Base):
+    def test_every_command_answers_help_with_its_own_usage(self):
+        for cmd in ("place", "hire", "watch", "verdicts", "director"):
+            for flag in ("--help", "-h"):
+                out = self.cli(cmd, flag).stdout
+                self.assertTrue(out.startswith("administration " + cmd), out)
+                self.assertNotIn("administration roster", out)
+        # Only right after the command: anywhere else it's an argument.
+        self.assertIn("unknown flag --help", self.cli("hire", "nobody", "--help", check=1).stderr)
+        self.hire_file("a", kind="critic")
+        p = self.place("x", "--cast", "a", "--brief", "a=-h")
+        self.assertTrue(len(p) == 4, p)  # placed, not help
+        self.assertIn('want NAME="their own task"', self.place("x", "--cast", "a", "--only", "a", check=1).stderr)
 
 
 class Place(Base):
@@ -452,6 +494,84 @@ class Critic(Base):
         self.assertIn("Open rooms", text)
         self.assertIn("none checked yet", text)
         self.assertEqual(self.cli("status", "--json").stdout.strip(), "null")
+
+    def test_each_brief_names_the_others_and_only_replaces_the_checks(self):
+        for n in ("a", "b"):
+            self.hire_file(n, kind="critic")
+        cid = self.place("x", "--cast", "a,b", "--brief", "a=read the cart totals", "--only", "b=take one screenshot of the home page")
+        self.cli("wait", cid)
+        a, b = (self.call(cid, n)["prompt"] for n in ("a", "b"))
+        self.assertIn("Also on this contract, each with their own part: b (critic: take one screenshot of the home page)", a)
+        self.assertIn("Keep to yours", a)
+        self.assertIn("Do this first and fully", a)
+        self.assertIn("a (critic: read the cart totals)", b)
+        self.assertIn("Do only this.", b)
+        self.assertIn("Take them from this task alone.", b)
+        self.assertNotIn("your persona's checks", b)
+        p = self.place("x", "--cast", "a", "--brief", "a=one", "--only", "a=two", check=1)
+        self.assertIn("one task each", p.stderr)
+        # With no task, a specialist's part is what it's for, ahead of the
+        # target everyone shares; place says so.
+        self.hire_file("c", kind="critic", knows=("payments",))
+        p = self.cli("place", "the checkout", "--cast", "a,c", "--brief", "a=read the cart totals")
+        self.assertIn('c has no task of its own, so its part is its persona\'s: c takes contracts on payments. Give it one with --brief c="...".', p.stdout)
+        self.assertNotIn("a has no task", p.stdout)
+        cid = p.stdout.split()[1]
+        self.cli("wait", cid)
+        c = self.call(cid, "c")["prompt"]
+        self.assertIn("is what you're here for: c takes contracts on payments.", c)
+        self.assertLess(c.index("what you're here for"), c.index("The contract's target, which the others on it share: the checkout"))
+
+    def test_resume_briefs_a_fresh_contract_with_what_was_left(self):
+        self.hire_file("reader", kind="critic")
+        cid = self.place("the settings page", "--cast", "reader", "--coins", "3m", "--model", "haiku")
+        self.cli("wait", cid)
+        f = os.path.join(self.project, ".administration", "professionals", "reader.md")
+        write(f, open(f).read().replace("You are reader.", "You are reader, edited since."))
+        out = self.cli("resume", cid, "reader").stdout
+        self.assertIn(f"Resuming reader from contract {cid}: 2 left undone", out)
+        new = out.split("Contract ")[1].split()[0]
+        self.assertNotEqual(new, cid)
+        self.cli("wait", new)
+        c = json.load(open(os.path.join(self.books, "contracts", new, "contract.json")))
+        self.assertEqual(c["target"], "the settings page")
+        [r] = c["professionals"]
+        self.assertTrue(r["task_only"])
+        self.assertEqual((r["coins_min"], r["model"]), (3, "haiku"))
+        self.assertIn("1) billing, no link to it; 2) logout, not found", r["task"])
+        # The persona as it was placed, not as the file says now.
+        self.assertEqual(open(os.path.join(self.pdir(new, "reader"), "persona.md")).read(),
+                         open(os.path.join(self.pdir(cid, "reader"), "persona.md")).read())
+        self.assertIn("isn't on contract", self.cli("resume", cid, "nobody", check=1).stderr)
+
+    def test_a_professional_is_asked_to_write_down_what_it_has(self):
+        # Models keep findings for the end; the limit throws the end away.
+        self.hire_file("hoarder", kind="critic", fake="hoard", coins="2m")
+        cid = self.place("x", "--cast", "hoarder")
+        self.cli("wait", cid)
+        sent = [json.loads(l) for l in open(os.path.join(self.pdir(cid, "hoarder"), "fake-sent-back.jsonl"))]
+        self.assertEqual(len(sent), 2, sent)  # halfway (nothing written yet), and near the end
+        self.assertTrue(all(m.startswith("Write down what you've found so far") for m in sent))
+        self.assertTrue(all("minute" not in m and "time" not in m for m in sent))  # no clock
+        self.assertEqual(self.status(cid)["status"]["hoarder"]["state"], "out")
+
+    def test_wait_returns_when_one_fails_while_others_work(self):
+        # A room that broke in a second is news now, not when the rest are back.
+        self.hire_file("bad", kind="critic", fake="crash")
+        self.hire_file("slow", kind="critic", fake="slow", coins="30m")
+        cid = self.place("x", "--cast", "bad,slow")
+        # The crash is over before the wait starts: it still counts.
+        deadline = time.time() + 20
+        while self.status(cid)["status"]["bad"]["state"] != "failed" and time.time() < deadline:
+            time.sleep(0.2)
+        p = self.cli("wait", cid, check=2, timeout=30)
+        self.assertRegex(p.stdout, r"\d\d:\d\d  bad +failed")
+        self.assertIn("bad didn't make it; the others are still working", p.stdout)
+        # Waiting again isn't cut short by the same failure.
+        self.assertIn("still working after", self.cli("wait", cid, "--timeout", "1s", check=1).stderr)
+        # And once everyone is back, the failure still sets the exit code.
+        self.cli("close", cid)
+        self.assertIn("failed", self.cli("wait", cid, check=2).stdout)
 
     def test_a_crash_is_failed_and_exits_2(self):
         self.hire_file("bad", kind="critic", fake="crash")
@@ -754,6 +874,33 @@ for line in sys.stdin:
         self.assertTrue(os.path.exists(os.path.join(contract_rooms, "gadget.started")))
         self.assertTrue(os.path.exists(os.path.join(contract_rooms, "gadget.stopped")))
 
+    def test_equipment_that_points_off_this_machine_is_refused(self):
+        # Rule 1 for equipment: a phone build pointed at a shared staging
+        # server is business done somewhere the house can't wall.
+        toml = '''
+            [equipment.gadget]
+            about = "x"
+            setup = ".administration/equipment/gadget/start"
+            teardown = ".administration/equipment/gadget/stop"
+            server = ".administration/equipment/gadget/server"
+            args = ["{API}"]
+            tools = ["poke"]
+            '''
+        self.hire_file("tinkerer", extra="  browser: false\n  uses: [gadget]")
+        for printed, want in (("API=https://staging.example.com/v1", "isn't on this machine"),
+                              ("API=postgres://db.example.com:5432/app", "isn't on this machine"),
+                              ("DATA=prod\necho API=x", "never production")):
+            self.equipment(toml, {**self.GADGET, ".administration/equipment/gadget/start": f"#!/bin/sh\necho {printed}\n"})
+            cid = self.place("x", "--cast", "tinkerer")
+            self.cli("wait", cid, check=3)  # refused by the Rules
+            self.assertIn(want, self.status(cid)["status"]["tinkerer"]["reason"])
+            self.cli("close", cid)
+        # The emulator's name for this machine is this machine.
+        self.equipment(toml, {**self.GADGET, ".administration/equipment/gadget/start": "#!/bin/sh\necho API=http://10.0.2.2:8080\n"})
+        cid = self.place("x", "--cast", "tinkerer")
+        self.cli("wait", cid)
+        self.assertEqual(self.status(cid)["status"]["tinkerer"]["state"], "back")
+
     def test_an_arg_the_setup_never_printed_fails_the_room(self):
         self.equipment('''
             [equipment.gadget]
@@ -957,6 +1104,149 @@ for line in sys.stdin:
             f"{serial} type hi there",
             f"{serial} key Enter"])
 
+    def test_a_dead_screen_is_lost_and_the_professional_told_to_stop(self):
+        # A crashed emulator looks like a slow one to a professional, who
+        # kept trying for its whole purse: three bad pictures and it's lost.
+        drv = os.path.join(self.tmp, "dead-driver")
+        write(drv, "#!/bin/sh\nif [ \"$2\" = screenshot ]; then printf 'PNGish'; echo 'adb: device offline' >&2; exit 0; fi\nexit 0\n", 0o755)
+        lost = os.path.join(self.tmp, "equipment-lost")
+        call = lambda i, n, a=None: {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": n, "arguments": a or {}}}
+        reqs = [call(1, "screen_look"), call(2, "screen_press_key", {"key": "Nope"}), call(3, "screen_look"),
+                call(4, "screen_look"), call(5, "screen_click", {"x": 1, "y": 1})]
+        p = subprocess.run([binary(), "_drive", drv, "emulator-5554"], input="".join(json.dumps(r) + "\n" for r in reqs),
+                           capture_output=True, text=True, timeout=60, env={**self.env, "ADMINISTRATION_EQUIPMENT_LOST": lost})
+        text = {r["id"]: r["result"]["content"][0]["text"] for r in map(json.loads, p.stdout.splitlines())}
+        # What the bad picture was, so a driver bug can be fixed from here.
+        self.assertIn("6 bytes, starting \"PNGish\"", text[1])
+        self.assertIn("adb: device offline", text[1])
+        self.assertNotIn("lost", text[3])  # a bad key is the professional's, not the device's
+        self.assertIn("It's lost", text[4])
+        self.assertIn("It's lost", text[5])  # and nothing more is asked of it
+        self.assertIn("device offline", open(lost).read())
+
+    def test_equipment_check_starts_it_takes_a_picture_and_clears_it(self):
+        toml = '''
+            [setup]
+            pass_env = ["DRIVER_LOG"]
+            [equipment.phone]
+            about = "A phone."
+            setup = ".administration/equipment/gadget/start"
+            teardown = ".administration/equipment/gadget/stop"
+            server = "screen"
+            driver = ".administration/equipment/phone/driver"
+            args = ["{ENDPOINT}"]
+            [equipment.gadget]
+            about = "x"
+            setup = ".administration/equipment/gadget/start"
+            server = ".administration/equipment/gadget/server"
+            tools = ["poke"]
+            '''
+        self.equipment(toml, {**self.GADGET, ".administration/equipment/phone/driver": self.DRIVER})
+        self.env["DRIVER_LOG"] = os.path.join(self.tmp, "driver.log")
+        shot = os.path.join(self.tmp, "phone.png")
+        out = self.cli("equipment-check", "phone", "--shot", shot).stdout
+        self.assertIn("Its setup printed: ENDPOINT=http://127.0.0.1:", out)
+        self.assertIn("The screen, 1000x66", out)
+        self.assertEqual(open(shot, "rb").read()[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertIn("Cleared away", out)
+        self.assertEqual(os.listdir(os.path.join(self.books, "contracts")), [])  # nothing left in the books
+        self.assertIn("not a screen", self.cli("equipment-check", "gadget").stdout)
+        # A dead screen fails the check, with what the driver said.
+        self.equipment(toml, {**self.GADGET, ".administration/equipment/phone/driver":
+                              "#!/bin/sh\necho 'adb: device offline' >&2\nexit 1\n"})
+        p = self.cli("equipment-check", "phone", check=2)
+        self.assertIn("didn't give a picture", p.stdout)
+        self.assertIn("device offline", p.stdout)
+        self.assertIn("no equipment called", self.cli("equipment-check", "nope", check=1).stderr)
+        write(os.path.join(self.project, ".administration", "roster.toml"),
+              open(os.path.join(self.project, ".administration", "roster.toml")).read().replace("[equipment.gadget]", "[equipment.gadget]\nneeds_app = true"))
+        self.assertIn("no executable .administration/setup", self.cli("equipment-check", "gadget", check=1).stderr)
+
+    def test_a_critic_whose_equipment_is_off_this_machine_is_refused(self):
+        self.equipment('''
+            [equipment.gadget]
+            about = "x"
+            setup = ".administration/equipment/gadget/start"
+            server = ".administration/equipment/gadget/server"
+            tools = ["poke"]
+            ''', {**self.GADGET, ".administration/equipment/gadget/start": "#!/bin/sh\necho DB=db.example.com:5432\n"})
+        self.hire_file("auditor", kind="critic", extra="  uses: [gadget]")
+        cid = self.place("x", "--cast", "auditor")
+        self.cli("wait", cid, check=3)
+        self.assertEqual(self.status(cid)["status"]["auditor"]["state"], "refused")
+        self.assertEqual(self.cli("equipment-check", "gadget", check=3).returncode, 3)
+
+    def test_a_declared_shared_test_server_is_allowed_and_marked(self):
+        toml = '''
+            [equipment.gadget]
+            about = "x"
+            setup = ".administration/equipment/gadget/start"
+            server = ".administration/equipment/gadget/server"
+            tools = ["poke"]
+            shared = [%s]
+            '''
+        start = "#!/bin/sh\necho API=https://api.staging.example.test/v1\necho DATA=shared\n"
+        self.equipment(toml % '"staging.example.test"', {**self.GADGET, ".administration/equipment/gadget/start": start})
+        self.hire_file("tinkerer", extra="  browser: false\n  uses: [gadget]")
+        cid = self.place("x", "--cast", "tinkerer")
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]["tinkerer"]
+        self.assertEqual((st["state"], st["shared"]), ("back", ["gadget: staging.example.test"]))
+        self.assertIn("talks to a shared test server (staging.example.test)", self.call(cid, "tinkerer")["prompt"])
+        self.cli("close", cid)
+        self.assertIn("(seen against the shared server staging.example.test: it could be the server, not the app)", self.cli("report", cid).stdout)
+        # Anything it didn't declare is still refused, and production can't be declared.
+        self.equipment(toml % '"other.example.test"', {**self.GADGET, ".administration/equipment/gadget/start": start})
+        cid = self.place("x", "--cast", "tinkerer")
+        self.cli("wait", cid, check=3)
+        self.assertIn("the shared servers it declares (other.example.test)", self.status(cid)["status"]["tinkerer"]["reason"])
+        self.cli("close", cid)
+        self.equipment(toml % '"api.prod.example.com"', self.GADGET)
+        p = self.place("x", "--cast", "tinkerer", check=None)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("looks like production", p.stderr)
+        self.assertIn("list it under not_production", p.stderr)
+        # Confirmed by the person: usable.
+        self.equipment(toml % '"api.prod-replica.example.test"]\n            not_production = ["api.prod-replica.example.test"',
+                       {**self.GADGET, ".administration/equipment/gadget/start": "#!/bin/sh\necho API=https://api.prod-replica.example.test\n"})
+        cid = self.place("x", "--cast", "tinkerer")
+        self.cli("wait", cid)
+        self.assertEqual(self.status(cid)["status"]["tinkerer"]["shared"], ["gadget: api.prod-replica.example.test"])
+
+    def test_resume_after_equipment_lost_before_anything_was_written(self):
+        start = "#!/bin/sh\necho '12:34 device offline' > \"$ADMINISTRATION_ROOM/equipment-lost\"\n"
+        self.equipment('''
+            [equipment.gadget]
+            about = "x"
+            setup = ".administration/equipment/gadget/start"
+            server = ".administration/equipment/gadget/server"
+            tools = ["poke"]
+            ''', {**self.GADGET, ".administration/equipment/gadget/start": start})
+        self.hire_file("tinkerer", extra="  browser: false\n  uses: [gadget]", fake="hoard", coins="1m")
+        cid = self.place("x", "--cast", "tinkerer", "--brief", "tinkerer=open the settings")
+        self.cli("wait", cid)
+        out = self.cli("resume", cid, "tinkerer").stdout
+        self.assertIn("all of their part left undone", out)
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        [r] = json.load(open(os.path.join(self.books, "contracts", new, "contract.json")))["professionals"]
+        self.assertEqual((r["task"], r.get("task_only", False)), ("open the settings", False))
+
+    def test_lost_equipment_shows_in_status_and_the_summary(self):
+        start = self.GADGET[".administration/equipment/gadget/start"] + '            echo "12:34 device offline" > "$ADMINISTRATION_ROOM/equipment-lost"\n'
+        self.equipment('''
+            [equipment.gadget]
+            about = "x"
+            setup = ".administration/equipment/gadget/start"
+            server = ".administration/equipment/gadget/server"
+            tools = ["poke"]
+            ''', {**self.GADGET, ".administration/equipment/gadget/start": start})
+        self.hire_file("tinkerer", extra="  browser: false\n  uses: [gadget]")
+        cid = self.place("x", "--cast", "tinkerer")
+        self.assertIn("equipment lost at 12:34 device offline", self.cli("wait", cid).stdout)
+        self.cli("close", cid)
+        self.assertIn("equipment lost at 12:34 device offline, so part of their work wasn't done", self.cli("report", cid).stdout)
+
     def test_a_window_is_seen_through_the_screen_unless_read_out(self):
         self.equipment('''
             [equipment.window]
@@ -1085,6 +1375,26 @@ for line in sys.stdin:
         self.assertIn("npm ERR! missing script: demo", p.stdout)
         self.assertIn("no .administration/setup", self.cli("room-check", "--project", self.tmp, check=1).stderr)
 
+    def test_watch_stops_when_its_contract_is_closed_or_gone(self):
+        # A pane following a contract that's closed, or deleted from the
+        # books, once waited forever on statuses that read as queued.
+        self.hire_file("slow", kind="critic", fake="slow", coins="30m")
+        cid = self.place("x", "--cast", "slow")
+        w = subprocess.Popen([binary(), "watch", cid], env=self.env, cwd=self.project, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1)
+        self.cli("close", cid)
+        out, _ = w.communicate(timeout=30)
+        self.assertEqual(w.returncode, 0)
+        cid = self.place("x", "--cast", "slow")
+        w = subprocess.Popen([binary(), "watch", cid], env=self.env, cwd=self.project, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1)
+        cj = os.path.join(self.books, "contracts", cid, "contract.json")
+        os.rename(cj, cj + ".away")
+        _, err = w.communicate(timeout=30)
+        os.rename(cj + ".away", cj)
+        self.assertIn("no longer in the books", err)
+        self.cli("close", cid)
+
     def test_watch_never_shows_a_room_password(self):
         self.house()
         self.hire_file("member", signs_in_as="member")
@@ -1149,7 +1459,64 @@ for line in sys.stdin:
     def test_watch_panes_needs_herdr_or_tmux(self):
         self.hire_file("reader", kind="critic")
         cid = self.place("x", "--cast", "reader")
-        self.assertIn("needs Herdr or tmux", self.cli("watch", cid, "--panes", check=1, env={"TMUX": "", "HERDR_ENV": ""}).stderr)
+        self.assertIn("needs Herdr, tmux or a watch hook", self.cli("watch", cid, "--panes", check=1, env={"TMUX": "", "HERDR_ENV": ""}).stderr)
+
+    def fake_herdr(self):
+        log = os.path.join(self.tmp, "herdr.log")
+        write(os.path.join(self.tmp, "bin", "herdr"), f"""#!/usr/bin/env python3
+import json, sys
+import os
+a = sys.argv[1:]
+open({log!r}, "a").write(json.dumps(a) + "\\n")
+if a[:2] == ["pane", "current"]:
+    if not os.environ.get("FAKE_HERDR_CURRENT"):
+        sys.exit("no current pane")
+    print(json.dumps({{"result": {{"pane": {{"workspace_id": os.environ["FAKE_HERDR_CURRENT"]}}}}}}))
+elif a[:2] == ["tab", "create"] and os.environ.get("FAKE_HERDR_GONE", "-") in a:
+    sys.exit("workspace_not_found")
+elif a[:2] == ["tab", "create"]:
+    print(json.dumps({{"result": {{"root_pane": {{"pane_id": "w7:p1"}}}}}}))
+elif a[:2] == ["pane", "split"]:
+    print(json.dumps({{"result": {{"pane": {{"pane_id": "w7:p2"}}}}}}))
+else:
+    print("{{}}")
+""", 0o755)
+        return {"PATH": os.path.join(self.tmp, "bin") + os.pathsep + self.env["PATH"], "HERDR_ENV": "1"}, log
+
+    def test_watch_panes_open_in_the_placers_herdr_space_and_close_when_done(self):
+        # Herdr puts a tab without a space in whichever one is focused, which
+        # is wherever the person happens to be looking. HERDR_WORKSPACE_ID
+        # is where the placer's pane started; Herdr knows where it is now.
+        env, log = self.fake_herdr()
+        self.hire_file("reader", kind="critic")
+        cid = self.place("x", "--cast", "reader", env={**env, "HERDR_WORKSPACE_ID": "w7", "FAKE_HERDR_CURRENT": "w9"})
+        calls = [json.loads(l) for l in open(log)]
+        tab = next(c for c in calls if c[:2] == ["tab", "create"])
+        self.assertEqual(tab[tab.index("--workspace") + 1], "w9")
+        run = next(c for c in calls if c[:2] == ["pane", "run"])
+        self.assertTrue(run[3].startswith("exec sh -c "))
+        self.cli("wait", cid)
+        # The pane's command ends (and Herdr closes the pane) once they're back.
+        done = subprocess.run(["sh", "-c", run[3]], env={**self.env}, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("press return", done.stdout)
+        # A watch that fails keeps its pane until return, so it can be read.
+        lost = subprocess.run(["sh", "-c", run[3]], env={**self.env, "ADMINISTRATION_HOME": os.path.join(self.tmp, "nobooks")},
+                              input="\n", capture_output=True, text=True, timeout=30)
+        self.assertIn("press return", lost.stdout)
+        self.assertEqual(lost.returncode, 0)
+
+    def test_a_space_herdr_refuses_still_gets_the_panes(self):
+        # A pane moved to another space keeps its old HERDR_WORKSPACE_ID;
+        # once that space is closed, Herdr refuses it.
+        env, log = self.fake_herdr()
+        self.hire_file("reader", kind="critic")
+        p = self.cli("place", "x", "--cast", "reader", env={**env, "HERDR_WORKSPACE_ID": "w2", "FAKE_HERDR_GONE": "w2"})
+        self.assertIn("Watching in Herdr", p.stdout)
+        tabs = [c for c in map(json.loads, open(log)) if c[:2] == ["tab", "create"]]
+        self.assertEqual(len(tabs), 2)
+        self.assertNotIn("--workspace", tabs[1])
+        self.cli("wait", p.stdout.split()[1])
 
     def test_a_long_name_gets_a_short_room(self):
         # The browser's socket lives under the room; a 64-character name in
@@ -1174,7 +1541,7 @@ for line in sys.stdin:
         self.assertIn("Socket directory path is too long", s["reason"])
         self.assertIn("Failed: the browser never worked", open(os.path.join(self.pdir(cid, "blind"), "report.md")).read())
         self.cli("close", cid)
-        self.assertIn("1 professionals failed", open(os.path.join(self.books, "contracts", cid, "summary.md")).read())
+        self.assertIn("1 professional failed", open(os.path.join(self.books, "contracts", cid, "summary.md")).read())
 
     def test_a_user_who_never_loads_a_page_has_failed(self):
         # Listing tabs and closing the browser work with no page at all.
@@ -1265,7 +1632,7 @@ for line in sys.stdin:
         cid = self.place("the till", "--cast", "member,guest", "--brief", "member=ring an order and two drinks, cash")
         self.cli("wait", cid)
         mine = open(os.path.join(self.pdir(cid, "member"), "brief.md")).read()
-        self.assertIn("Your own task in it, from whoever placed it: ring an order and two drinks, cash", mine)
+        self.assertIn("from whoever placed it: ring an order and two drinks, cash", mine)
         self.assertNotIn("Your own task", open(os.path.join(self.pdir(cid, "guest"), "brief.md")).read())
 
     def test_a_data_set_is_handed_to_the_setup_hook(self):
@@ -1319,6 +1686,10 @@ class Changes(Base):
         argv = self.call(cid, "reader")["argv"]
         handout = argv[argv.index("--add-dir") + 1]
         patch = open(os.path.join(handout, "changes.patch")).read()
+        # Only professionals beside each other in the books; the patch is
+        # in the contract's hidden .handout.
+        self.assertTrue(os.path.exists(os.path.join(self.books, "contracts", cid, ".handout", "changes.patch")))
+        self.assertEqual([d for d in os.listdir(os.path.join(self.books, "contracts", cid)) if not d.startswith(".") and os.path.isdir(os.path.join(self.books, "contracts", cid, d))], ["reader"])
         self.assertIn("+two", patch)
         self.assertNotIn("hunter2", patch)
         brief = self.call(cid, "reader")["prompt"]
@@ -1327,6 +1698,8 @@ class Changes(Base):
         self.assertNotIn(".env", brief)
         self.assertIn("NEW: these changes make the app behave differently", brief)
         self.assertIn("CHANGE: the change's own text is wrong", brief)
+        self.assertIn("the file and its line in the working tree", brief)
+        self.assertNotIn("which lines of the diff", brief)
 
     def test_a_release_check_summary_leads_with_what_the_change_broke(self):
         self.hire_file("reader", kind="critic", fake="release")
@@ -1336,13 +1709,158 @@ class Changes(Base):
         out = self.cli("report", cid).stdout
         broke = out.index("## What these changes broke")
         self.assertLess(broke, out.index("# reader"))  # before the reports
-        self.assertIn("1 findings marked NEW", out)
-        self.assertIn("- NEW: the total on /cart is $5 too high since the change (reader)", out)
-        self.assertIn("## Already so before these changes\n\n- OLD: the logo is blurry on both (reader)", out)
+        self.assertIn("1 finding marked NEW", out)
+        self.assertRegex(out, r"- NEW: the total on /cart is \$5 too high since the change \(reader #\d\)")
+        self.assertRegex(out, r"## Already so before these changes\n\n- OLD: the logo is blurry on both \(reader #\d\)")
         self.assertIn("## Wrong in the changes themselves", out)
-        self.assertIn("- CHANGE: the comment on total() still says tax is added later (reader)", out)
+        self.assertRegex(out, r"- CHANGE: the comment on total\(\) still says tax is added later \(reader #\d\)")
         self.assertLess(out.index("## Wrong in the changes"), out.index("## Already so"))
-        self.assertIn("2 more findings weren't marked either way", out)
+        unmarked = out[out.index("## Not marked either way"):out.index("# reader")]
+        self.assertEqual(unmarked.count("\n- "), 2)
+        # Each finding is listed once, not again in the report below it.
+        self.assertEqual(out.count("the logo is blurry on both"), 1)
+
+    def test_findings_seen_in_two_contracts_are_linked_and_learned_from(self):
+        # A critic's contract and a user's, on the same work: the matcher
+        # proposes the same bug in both, the check confirms or rejects, and
+        # those decisions are its examples next time.
+        self.hire_file("reader", kind="critic")
+        self.hire_file("other", kind="critic")
+        first = self.place("the settings page", "--cast", "reader")
+        self.cli("wait", first)
+        self.cli("close", first)
+        self.assertFalse(os.path.exists(os.path.join(self.books, "contracts", first, "links.json")))  # nothing related yet
+        second = self.place("the settings page", "--cast", "other")
+        self.cli("wait", second)
+        self.cli("close", second)
+        links = json.load(open(os.path.join(self.books, "contracts", second, "links.json")))
+        self.assertEqual({(l["from"], l["to"], l["state"]) for l in links},
+                         {("other #1", f"{first} reader #1", "proposed"), ("other #2", f"{first} reader #2", "proposed")})
+        out = self.cli("report", second).stdout
+        self.assertIn(f"maybe the same as contract {first} reader #1 (proposed: same words)", out)
+        # The check: one is the same bug, one isn't.
+        p = subprocess.run([binary(), "verdicts", second, "-"], env=self.env, cwd=self.project, capture_output=True, text=True,
+                           input=json.dumps({"other": [{"finding": 1, "verdict": "confirmed", "also": [f"{first} reader #1"]},
+                                                       {"finding": 2, "verdict": "likely", "not_also": [f"{first} reader #2"]}]}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = self.cli("report", second).stdout
+        self.assertIn(f"**also seen in contract {first} reader #1**", out)
+        self.assertNotIn(f"{first} reader #2", out)  # rejected, so not shown
+        self.assertLess(out.index("also seen"), out.index("the error says"))  # seen twice comes first
+        self.assertIn(f"**also seen in contract {second} other #1**", self.cli("report", first).stdout)  # both sides
+        self.assertIn("1 held, 1 didn't (50% right)", self.cli("stats").stdout)
+        subprocess.run([binary(), "verdicts", second, "-"], env=self.env, cwd=self.project, capture_output=True, text=True,
+                       input=json.dumps({"other": [{"finding": 1, "verdict": "confirmed", "also": [f"{first} reader #1"]}]}))
+        self.assertIn("1 held, 1 didn't (50% right)", self.cli("stats").stdout)  # recorded again, learned once
+        # A changed mind replaces the first decision, in the record too.
+        subprocess.run([binary(), "verdicts", second, "-"], env=self.env, cwd=self.project, capture_output=True, text=True,
+                       input=json.dumps({"other": [{"finding": 1, "verdict": "false", "not_also": [f"{first} reader #1"]}]}))
+        self.assertIn("0 held, 2 didn't (0% right)", self.cli("stats").stdout)
+        # A third contract: the matcher gets both decisions as examples.
+        self.hire_file("third", kind="critic")
+        third = self.place("the settings page", "--cast", "third")
+        self.cli("wait", third)
+        self.cli("close", third)
+        seen = [json.loads(l) for l in open(os.path.join(self.books, "contracts", third, "fake-matcher-seen.jsonl"))]
+        # Each pair once, as last decided: the first was changed to "not the same".
+        self.assertEqual(sorted(e["same"] for e in seen[0]["examples"]), [False, False])
+        # Wrong references are refused, and a made-up proposal was dropped.
+        p = subprocess.run([binary(), "verdicts", second, "-"], env=self.env, cwd=self.project, capture_output=True, text=True,
+                           input=json.dumps({"other": [{"finding": 1, "verdict": "confirmed", "also": [f"{first} reader #9"]}]}))
+        self.assertIn("has no finding reader #9", p.stderr)
+        self.assertNotIn("nobody", open(os.path.join(self.books, "contracts", third, "links.json")).read())
+
+    def test_verdicts_are_all_checked_before_any_is_written(self):
+        for n in ("a", "b"):
+            self.hire_file(n, kind="critic")
+        cid = self.place("x", "--cast", "a,b")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        run = lambda body, check=0: subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps(body), env=self.env,
+                                                   cwd=self.project, capture_output=True, text=True)
+        p = run({"a": [{"finding": 1, "verdict": "confirmed"}], "b": [{"finding": 9, "verdict": "false"}]})
+        self.assertIn("no finding 9", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.pdir(cid, "a"), "verdicts.json")))  # nothing half-written
+        p = run({"a": [{"finding": 1, "verdict": "confirmed", "also": [f"{cid} b #1"]}]})
+        self.assertIn("findings within one contract are folded, not linked", p.stderr)
+        # Checked differently: both shown. A later call adds to the earlier.
+        self.assertEqual(run({"a": [{"finding": 1, "verdict": "confirmed", "why": "save() is never called"}]}).returncode, 0)
+        self.assertEqual(run({"b": [{"finding": 1, "verdict": "false", "why": "it saves on blur"}]}).returncode, 0)
+        out = self.cli("report", cid).stdout
+        self.assertIn("**[confirmed: save() is never called]** (but b #1 was checked false: it saves on blur)", out)
+        self.assertEqual(len(json.load(open(os.path.join(self.pdir(cid, "a"), "verdicts.json")))), 1)
+        self.assertEqual(run({"a": [{"finding": 2, "verdict": "likely"}]}).returncode, 0)
+        self.assertEqual([v["finding"] for v in json.load(open(os.path.join(self.pdir(cid, "a"), "verdicts.json")))], [1, 2])
+
+    def test_verifiers_check_findings_in_the_house(self):
+        for n in ("a", "b"):
+            self.hire_file(n, kind="critic")
+        cid = self.place("x", "--cast", "a,b")
+        self.cli("wait", cid)
+        self.assertIn("close it, then verify", self.cli("verify", cid, check=1).stderr)
+        self.cli("close", cid)
+        # The session's own check of one is kept; the verifiers do the rest.
+        subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps({"b": [{"finding": 2, "verdict": "likely", "why": "mine"}]}),
+                       env=self.env, cwd=self.project, capture_output=True, text=True, check=True)
+        out = self.cli("verify", cid, "--batch", "1").stdout
+        self.assertIn("Verifying 1 finding on contract", out)  # the error was checked already
+        self.assertIn("Checked 1 of 1: 1 confirmed, 0 likely, 0 false", out)
+        summary = self.cli("report", cid).stdout
+        self.assertIn("on /settings (a #1; b #1) **[confirmed by a verifier: settings.js:12 never calls save()]**", summary)
+        self.assertIn("**[likely: mine]**", summary)
+        a = {v["finding"]: v for v in json.load(open(os.path.join(self.pdir(cid, "a"), "verdicts.json")))}
+        self.assertEqual((a[1]["verdict"], a[1]["by"]), ("confirmed", "verifier"))
+        self.assertIn("checked already", self.cli("verify", cid).stdout)
+        # The verifier's one check of the folded finding is a check under each name.
+        self.assertIn("2 of the 3 checks above are a verifier's that nobody has reviewed since", self.cli("stats").stdout)
+        # One verify at a time.
+        import fcntl
+        with open(os.path.join(self.books, "contracts", cid, ".verify.lock"), "a") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            self.assertIn("already running", self.cli("verify", cid, check=1).stderr)
+        # The session disagrees: its verdict replaces the verifier's.
+        subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps({"a": [{"finding": 1, "verdict": "false", "why": "it saves on blur"}],
+                                                                            "b": [{"finding": 1, "verdict": "false", "why": "it saves on blur"}]}),
+                       env=self.env, cwd=self.project, capture_output=True, text=True, check=True)
+        self.assertIn("**[false: it saves on blur]**", self.cli("report", cid).stdout)
+
+    def test_a_rewritten_summary_keeps_the_open_rooms_of_its_close(self):
+        self.hire_file("a", kind="critic")
+        cid = self.place("x", "--cast", "a")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.hire_file("change-reader", kind="critic")  # fills that room after the close
+        subprocess.run([binary(), "verdicts", cid, "-"], input='{"a": [{"finding": 1, "verdict": "likely"}]}',
+                       env=self.env, cwd=self.project, capture_output=True, text=True, check=True)
+        self.assertIn("**change-reader**", self.cli("report", cid).stdout)
+
+    def test_a_check_killed_outright_is_cleared_later(self):
+        d = os.path.join(self.books, "contracts", "zz99")
+        write(os.path.join(d, "contract.json"), json.dumps({"id": "zz99", "target": "equipment check", "project": self.project,
+                                                           "placed_at": "2026-10-31T00:00:00Z", "placed_by": "x", "professionals": []}))
+        write(os.path.join(d, "check.pid"), "999999\n")
+        self.assertNotIn("zz99", self.cli("status").stdout)
+        self.assertFalse(os.path.exists(d))
+
+    def test_close_folds_the_same_finding_and_shows_each_check(self):
+        # Two who found the same thing on their own are one line, and the
+        # check recorded for it shows beside it.
+        for n in ("a", "b"):
+            self.hire_file(n, kind="critic")
+        cid = self.place("x", "--cast", "a,b")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        out = self.cli("report", cid).stdout
+        self.assertIn("the save button does nothing on /settings (a #1; b #1)", out)
+        self.assertIn("4 findings in all, 2 once the same claim from several is folded into one, none checked yet", out)
+        p = subprocess.run([binary(), "verdicts", cid, "-"], input='{"a": [{"finding": 1, "verdict": "confirmed", "why": "save() is never called"}]}',
+                           env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = self.cli("report", cid).stdout
+        self.assertIn("on /settings (a #1; b #1) **[confirmed: save() is never called]**", out)
+        self.assertIn("1 checked: 1 confirmed, 0 likely, 0 false", out)
+        # b's own report keeps the words that were folded into a's.
+        self.assertIn("- #1: ", out[out.index("# b, on"):])
 
     def test_new_files_are_in_the_patch_and_detached_head_works(self):
         subprocess.run(["git", "checkout", "-q", "--detach"], cwd=self.project, check=True)
@@ -1509,6 +2027,62 @@ class Hooks(Base):
         cid = self.place("x", "--cast", "r")
         self.cli("wait", cid)
         self.assertTrue(self.cli("close", cid).stdout.strip().endswith("summary.md"))
+
+
+    def test_a_watch_hook_opens_the_panes_instead(self):
+        got = os.path.join(self.tmp, "watch.json")
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        self.hook(cfg, "watch", f'cat > "{got}"; echo "$ADMINISTRATION_CONTRACT" > "{got}.env"')
+        self.hook(os.path.join(self.project, ".administration"), "watch", f'touch "{got}.project"')
+        self.hire_file("r", kind="critic")
+        # Outside Herdr and tmux, and the hook still runs: it's the person's
+        # way of watching, wherever that is.
+        p = self.cli("place", "x", "--cast", "r", env={"TMUX": "", "HERDR_ENV": ""})
+        cid = p.stdout.split()[1]
+        self.assertIn("watch hook", p.stdout)
+        self.assertFalse(os.path.exists(f"{got}.project"), "only one watch hook runs, the machine's")
+        ev = json.load(open(got))
+        self.assertEqual((ev["event"], ev["contract"]), ("watch", cid))
+        self.assertEqual(open(f"{got}.env").read().strip(), cid)
+        [pro] = ev["professionals"]
+        self.assertEqual(pro["name"], "r")
+        self.cli("wait", cid)
+        self.assertIn("ADMINISTRATION_POLL=", pro["command"])  # the panes poll as the house does
+        self.assertIn("press return", pro["command"])  # a failed watch waits to be read
+        done = subprocess.run(["sh", "-c", pro["command"]], env={"PATH": self.env["PATH"], "HOME": self.home},
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_failing_watch_hook_falls_back_to_the_watch_line(self):
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        self.hook(os.path.join(self.project, ".administration"), "watch", "exit 3")
+        # The machine's comes first, but not when it can't run.
+        write(os.path.join(cfg, "hooks", "watch"), "#!/bin/sh\nexit 0\n")
+        self.hire_file("r", kind="critic")
+        p = self.cli("place", "x", "--cast", "r")
+        self.assertIn("Couldn't open the watch panes", p.stdout)
+        self.assertIn("administration watch", p.stdout)
+        log = open(os.path.join(self.books, "hooks.log")).read()
+        self.assertIn("not executable; skipped", log)
+        self.assertIn("exited 3", log)
+        self.cli("wait", p.stdout.split()[1])
+
+    def test_the_books_are_not_locked_while_the_watch_hook_runs(self):
+        # The lock keeps two contracts from overbooking the rooms; a slow
+        # watch hook mustn't hold up everyone else's place.
+        got = os.path.join(self.tmp, "locked")
+        self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")
+        lock = os.path.join(self.books, "lock")
+        self.hook(self.env["ADMINISTRATION_CONFIG"], "watch",
+                  f"python3 -c 'import fcntl; fcntl.flock(open(\"{lock}\", \"a\"), fcntl.LOCK_EX | fcntl.LOCK_NB)' "
+                  f"&& echo free > {got} || echo held > {got}")
+        self.house()
+        self.hire_file("u")
+        cid = self.place("x", "--cast", "u")
+        self.assertEqual(open(got).read().strip(), "free")
+        self.cli("wait", cid, check=None)
 
 
 class Kinds(Base):
@@ -1722,6 +2296,15 @@ class With(Base):
         self.assertIn("its tools come from these only: browser_navigate", job)
         self.assertNotIn("no users", job)
         self.assertNotIn("broken", job)
+        self.assertNotIn("a screen to work through", job)  # the gadget isn't one
+        # A phone is: the Director is asked for a user through it.
+        write(os.path.join(self.project, ".administration", "roster.toml"),
+              '[equipment.phone]\nabout = "A phone."\nserver = "screen"\ndriver = "srv"\n')
+        out = self.cli("director", "cast", "the sign-up", check=None).stdout
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        job = open(os.path.join(self.books, "director", run, "in", "job.md")).read()
+        self.assertIn("The project has a screen to work through (phone)", job)
+        self.assertIn("uses: [phone], browser: false", job)
 
     def test_director_show_prints_the_equipment_plan_and_apply_leaves_it(self):
         out = self.cli("director", "cast", "the desktop app", check=None).stdout

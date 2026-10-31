@@ -20,7 +20,7 @@ skill's own file only to change when it triggers.
 | `tests/` | `tests/isolated.sh`: black-box against the CLI with a fake claude, in a private process namespace; run before every commit |
 | `tests/live/` | probes against the real browser (`gate_probe.py`) and claude, run by hand, inside the same namespace |
 | `docs/design.md` | the plain-language version: why each piece is the way it is |
-| `dist/` | the built binaries, committed so `install.sh` and `administration upgrade` need no Go: rebuild with `scripts/release.sh` in the commit that changes the code |
+| `scripts/package.sh` | builds a release's archives and `SHA256SUMS`; `.github/workflows/release.yml` runs it on a pushed `v*` tag, checks the archives on Linux and macOS, and publishes the release. Nothing built is committed |
 
 ## Rules
 
@@ -43,8 +43,8 @@ skill's own file only to change when it triggers.
   probe.
 - **Exit codes are a contract** with the skill: 0, 1, 2, 3 as in `main.go`.
 - **The framework hires nobody.** No professional ships in `house/` or in
-  the plugin; projects train their own. The Director's prompt is the only
-  persona writing that ships.
+  the plugin; projects train their own. The Director's and the verifier's
+  prompts are the only persona writing that ships.
 - **The README stays in the frame**, and every metaphor maps to real
   behaviour. `docs/design.md` is the plain version.
 - **Nothing specific to one project or person** goes in the code, the

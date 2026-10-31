@@ -103,7 +103,10 @@ func work(id, name string) error {
 		}
 		if err != nil {
 			teardown(c, dir, name, &s)
-			if ctx.Err() != nil {
+			var r refusal
+			if errors.As(err, &r) {
+				finish("refused", r.msg)
+			} else if ctx.Err() != nil {
 				finish("closed", "closed while the room was being built")
 			} else {
 				finish("failed", err.Error())
@@ -143,6 +146,12 @@ func work(id, name string) error {
 	s.State = "working"
 	save()
 	state, reason := runProfessional(ctx, c, ci, pd, tag, m, before, vars, &s, save)
+	if s.Room != "" {
+		if b, err := os.ReadFile(filepath.Join(s.Room, "equipment-lost")); err == nil {
+			s.EquipmentLost = strings.TrimSpace(string(b))
+			save()
+		}
+	}
 	if ci.Kind == "user" || len(ci.Uses) > 0 {
 		teardown(c, dir, name, &s)
 	}
@@ -660,12 +669,36 @@ func mcpFor(node, configPath string) map[string]any {
 func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You have taken a contract from the Administration.\n\n")
-	fmt.Fprintf(&b, "Contract %s: %s\n\n", c.ID, c.Target)
-	if ci.Task != "" {
-		fmt.Fprintf(&b, "Your own task in it, from whoever placed it: %s\nDo this first and fully; the contract's target is the context.\n\n", ci.Task)
+	// Your own part first, then the whole, which others share: a specialist
+	// given only the shared target took on the others' parts too.
+	from := "Take them from your part, your persona's checks, and each size you test, within the contract's target."
+	switch {
+	case ci.TaskOnly:
+		fmt.Fprintf(&b, "Your part of contract %s, from whoever placed it, and the whole of your work: %s\nDo only this. Your persona is who you are, not a list to work through: its usual checks are off for this contract, and when the task is done, so are you.\n\n", c.ID, ci.Task)
+		from = "Take them from this task alone."
+	case ci.Task != "":
+		fmt.Fprintf(&b, "Your part of contract %s, from whoever placed it: %s\nDo this first and fully.\n\n", c.ID, ci.Task)
+	case ci.Focus != "":
+		fmt.Fprintf(&b, "Your part of contract %s is what you're here for: %s\nWork the target as that specialist, not all of it.\n\n", c.ID, ci.Focus)
+	}
+	fmt.Fprintf(&b, "The contract's target, which the others on it share: %s\n\n", c.Target)
+	// Who else is on it, so nobody redoes another's checklist.
+	var others []string
+	for _, p := range c.Professionals {
+		if p.Name == ci.Name {
+			continue
+		}
+		o := p.Name + " (" + p.Kind
+		if p.Task != "" {
+			o += ": " + oneLine(p.Task, 100)
+		}
+		others = append(others, o+")")
+	}
+	if len(others) > 0 {
+		fmt.Fprintf(&b, "Also on this contract, each with their own part: %s. Keep to yours: the target is shared, the work isn't. Something in their part that you meet on the way is still a finding; don't go looking for it.\n\n", strings.Join(others, "; "))
 	}
 	fmt.Fprintf(&b, "You are %s, working alone. Write as you go:\n", ci.Name)
-	fmt.Fprintf(&b, "- First write your plan: one line for each thing you'll check, numbered, as PLAN 1: ..., PLAN 2: ... Take them from your own task, your persona's checks, every screen, flow or path the contract names, and each size you test. When one is done, write COVERED 3 (after any FINDING: lines it gave); one you can't do is UNREACHED: 3 and why. There's no clock for you to watch: you'll be stopped if you take too long, and everything you've written is kept.\n")
+	fmt.Fprintf(&b, "- First write your plan: one line for each thing you'll check, numbered, as PLAN 1: ..., PLAN 2: ... %s When one is done, write COVERED 3 (after any FINDING: lines it gave); one you can't do is UNREACHED: 3 and why. There's no clock for you to watch: you'll be stopped if you take too long, and everything you've written is kept.\n", from)
 	fmt.Fprintf(&b, "- The moment you find something, write one line starting FINDING: with what happened, where (the URL and the steps, or the file and line), and what you expected instead.\n")
 	fmt.Fprintf(&b, "- For anything you meant to try and could not reach, write one line starting UNREACHED: and why.\n")
 	fmt.Fprintf(&b, "- A FINDING: line is only for something wrong. A check that held, or a comparison you ruled out, goes in your report under what held, never on a FINDING: line.\n")
@@ -694,6 +727,19 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 			fmt.Fprintf(&b, "Those tools are the only way in. Take a screenshot when you need to see what a person would see, and say in each finding which tool calls get there.\n")
 			fmt.Fprintf(&b, "A finding is anything that would trip up the person you are, however small, with the steps to see it: they can't tell something is a button, don't know it worked, have to scroll to find what they need, read a message that's no longer true, or have to ask someone. Judge it as them, not as a designer. Leave out only your own preferences that wouldn't change what they do: a colour you'd pick, a wording you like better that means the same.\n")
 		}
+	}
+	// A shared test server is the one thing outside the room it may
+	// reach; what goes wrong there may be the server's, not the app's.
+	var shared []string
+	for _, u := range ci.Uses {
+		if eq, err := checkEquipment(c.Project, u); err == nil {
+			if hs, _ := eq.sharedHosts(); len(hs) > 0 {
+				shared = append(shared, hs...)
+			}
+		}
+	}
+	if len(shared) > 0 {
+		fmt.Fprintf(&b, "The app here talks to a shared test server (%s), not one of its own: other people's data and changes may be there too, and it can be slow or down. When something goes wrong that could be the server rather than the app (an error from it, missing or odd data, a timeout), still write the finding, and say in it that it may be the server.\n", strings.Join(shared, ", "))
 	}
 	shots := ci.Kind == "user" && !ci.NoBrowser
 	for _, u := range ci.Uses {
@@ -783,7 +829,7 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 		fmt.Fprintf(&b, "\nThe contract is on these changes: everything since %s (merge base %.8s), working tree included.\n", ch.Base, ch.MergeBase)
 		if ci.Kind == "critic" {
 			fmt.Fprintf(&b, "The diff is %s. Read it first, then the code around it.\n", ch.Patch)
-			fmt.Fprintf(&b, "This is a release check: start each finding, after the FINDING: mark, with one of three, and say which lines of the diff it comes from.\n- NEW: these changes make the app behave differently for the worse: something that worked before doesn't, or now goes wrong. Say what the code did before (the old lines, or that the path didn't exist) and what it does now; a risk you can't trace to lines the diff added or changed isn't NEW.\n- CHANGE: the change's own text is wrong but nothing that ran before behaves differently: a comment or document that misstates the code, a test that can fail or tests the wrong thing, a check that's missing.\n- OLD: it was already so before these changes.\n")
+			fmt.Fprintf(&b, "This is a release check: start each finding, after the FINDING: mark, with one of three, and say where as the file and its line in the working tree (src/cart.ts:412), never the diff's own lines or hunk: the diff shows what changed, the files are what a reader opens.\n- NEW: these changes make the app behave differently for the worse: something that worked before doesn't, or now goes wrong. Say what the code did before (the old lines, or that the path didn't exist) and what it does now; a risk you can't trace to lines the diff added or changed isn't NEW.\n- CHANGE: the change's own text is wrong but nothing that ran before behaves differently: a comment or document that misstates the code, a test that can fail or tests the wrong thing, a check that's missing.\n- OLD: it was already so before these changes.\n")
 		}
 		fmt.Fprintf(&b, "Changed files:\n")
 		for i, f := range append(ch.Files, ch.Untracked...) {
@@ -1078,6 +1124,13 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 	coins := time.Duration(ci.CoinsMin * float64(coinUnit()))
 	limit := time.NewTimer(coins)
 	defer limit.Stop()
+	// Models save their findings for the end, and the limit throws the end
+	// away: a 1-minute contract once came back with nothing from two of
+	// three. So halfway (if nothing's written yet) and near the end, it's
+	// asked to write down what it has. Never with a clock: it carries on.
+	half, late := time.NewTimer(coins/2), time.NewTimer(coins*85/100)
+	defer half.Stop()
+	defer late.Stop()
 	started := time.Now()
 	state, reason := "back", ""
 	rounds, secondPass := 0, false
@@ -1089,6 +1142,20 @@ wait:
 				s.ExitCode = code
 			}
 			break wait
+		case <-half.C:
+			repMu.Lock()
+			none := len(rep.findings) == 0
+			repMu.Unlock()
+			if none {
+				say(writeDownText)
+			}
+		case <-late.C:
+			repMu.Lock()
+			finished := rep.results > 0
+			repMu.Unlock()
+			if !finished {
+				say(writeDownText)
+			}
 		case <-limit.C:
 			state, reason = "out", "stopped at the limit"
 			killGroup(cmd.Process.Pid, done)
@@ -1162,6 +1229,10 @@ wait:
 	}
 	return state, reason
 }
+
+// writeDownText asks a professional to put what it has on record, so a stop
+// at the limit loses nothing; it doesn't say why.
+const writeDownText = "Write down what you've found so far, now, before anything else: each as its own FINDING: line, and anything you can't reach as UNREACHED: and why. Then carry on where you were."
 
 func exitCode(err error) *int {
 	code := 0

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +108,15 @@ func startEquipment(ctx context.Context, c *contract, ci *castItem, pd, tag stri
 			sc := bufio.NewScanner(&out)
 			for sc.Scan() {
 				if m := eqLine.FindStringSubmatch(strings.TrimSpace(sc.Text())); m != nil {
+					shared, _ := eq.sharedHosts()
+					hit, err := equipmentGround(name, m[1], m[2], shared)
+					if err != nil {
+						return nil, err
+					}
+					if hit != "" && !slices.Contains(s.Shared, name+": "+hit) {
+						s.Shared = append(s.Shared, name+": "+hit)
+						save()
+					}
 					v[m[1]] = m[2]
 				}
 			}
@@ -113,6 +124,117 @@ func startEquipment(ctx context.Context, c *contract, ci *castItem, pd, tag stri
 		vars[name] = v
 	}
 	return vars, nil
+}
+
+// equipmentGround holds what an equipment's setup prints to Rule 1, as a
+// room's manifest is held: data is seed or a local copy, and an address is
+// on this machine. An address is a URL, a database string (jdbc:..., a DSN
+// with user@host), or a bare host:port or IP; 10.0.2.2 is this machine as
+// an Android emulator sees it. It can't see what a built app talks to; the
+// setup says, or the Director's plan and the person's review must.
+//
+// A shared non-production server the equipment declares (shared = [...] in
+// roster.toml) is the one exception: it's allowed, and returned, so the
+// worker can tell the professional and the summary can mark what was seen
+// against it. DATA may then also be "shared".
+func equipmentGround(name, key, val string, shared []string) (string, error) {
+	if key == "DATA" && !roomData(val) && !(val == "shared" && len(shared) > 0) {
+		return "", refusal{fmt.Sprintf("equipment %s: its setup says DATA=%s; equipment works on seed data or a local copy (\"seed\" or \"local\"), or \"shared\" with a shared server it declares, never production (no business on consecrated ground)", name, val)}
+	}
+	hit := ""
+	for _, h := range addressHosts(val) {
+		if localHost(h) {
+			continue
+		}
+		if s := sharedMatch(h, shared); s != "" {
+			// Under a declared host is not a free pass: a name there that
+			// looks like production needs declaring (and confirming) itself.
+			if lh := strings.ToLower(strings.Trim(h, "[]")); lh != s && prodLabel.MatchString(lh) {
+				return "", refusal{fmt.Sprintf("equipment %s: its setup points %s at %s, under the shared %s but named like production; if it isn't, declare it in shared and not_production itself (no business on consecrated ground)", name, key, h, s)}
+			}
+			hit = s
+			continue
+		}
+		hint := "equipment works with the room's own app or a local stand-in"
+		if len(shared) == 0 {
+			hint += ", or a shared test server it declares (shared = [\"" + strings.ToLower(h) + "\"] in roster.toml, never production)"
+		} else {
+			hint += ", or the shared servers it declares (" + strings.Join(shared, ", ") + ")"
+		}
+		return "", refusal{fmt.Sprintf("equipment %s: its setup points %s at %s, which isn't on this machine; %s (no business on consecrated ground)", name, key, h, hint)}
+	}
+	return hit, nil
+}
+
+// sharedMatch is the declared shared host h is, or one it's under.
+func sharedMatch(h string, shared []string) string {
+	h = strings.ToLower(strings.Trim(h, "[]"))
+	for _, s := range shared {
+		if h == s || strings.HasSuffix(h, "."+s) {
+			return s
+		}
+	}
+	return ""
+}
+
+var (
+	bareHostPort = regexp.MustCompile(`^\[?([A-Za-z0-9.:-]+?)\]?:(\d{1,5})(/.*)?$`)
+	// A key=value database string: host=, hostaddr=, server=, data source=.
+	dsnHost = regexp.MustCompile(`(?i)\b(?:host|hostaddr|server|data source)\s*=\s*['"]?([A-Za-z0-9.:\[\],-]+)`)
+)
+
+// addressHosts is every host a value names: as a URL (after any jdbc: or
+// quotes; a URL's user@host is the URL's), a key=value database string,
+// host:port or a bare IP. Not a bare name or an email: a setup prints
+// those for other reasons (a seed login, a device serial).
+func addressHosts(val string) []string {
+	v := strings.Trim(strings.TrimSpace(val), `"'`)
+	var hs []string
+	// A value can list several (ORIGINS=a,b): each is checked.
+	for _, t := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == ';' }) {
+		t = strings.TrimPrefix(strings.Trim(t, `"'`), "jdbc:")
+		if u, err := url.Parse(t); err == nil && u.Scheme != "" && u.Host != "" {
+			hs = append(hs, u.Hostname())
+		} else if strings.HasPrefix(t, "//") {
+			if u, err := url.Parse("x:" + t); err == nil && u.Host != "" {
+				hs = append(hs, u.Hostname())
+			}
+		} else if m := bareHostPort.FindStringSubmatch(t); m != nil && hostLike(m[1]) {
+			hs = append(hs, m[1])
+		} else if ip := net.ParseIP(t); ip != nil {
+			hs = append(hs, t)
+		}
+	}
+	for _, m := range dsnHost.FindAllStringSubmatch(v, -1) {
+		for _, h := range strings.Split(m[1], ",") { // libpq lists hosts with commas
+			if h != "" {
+				hs = append(hs, h)
+			}
+		}
+	}
+	return hs
+}
+
+// hostLike: an IP, localhost, or a dotted name with a letter in it, so a
+// time (10:30:00) or a version (1.2:3) isn't read as an address.
+func hostLike(h string) bool {
+	return net.ParseIP(h) != nil || h == "localhost" || strings.Contains(h, ".") && strings.ContainsAny(strings.ToLower(h), "abcdefghijklmnopqrstuvwxyz")
+}
+
+// localHost: a loopback name or address, any address of this machine's
+// (0.0.0.0, ::), or the name a device or VM on it uses for it.
+func localHost(h string) bool {
+	h = strings.ToLower(strings.Trim(h, "[]"))
+	switch h {
+	case "localhost", "10.0.2.2", // the Android emulator's name for this machine
+		"host.docker.internal", "gateway.docker.internal", "host.containers.internal", "host.lima.internal":
+		return true
+	}
+	if strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 // eqPort is a fresh port the equipment may listen on, kept in the status so
@@ -255,6 +377,8 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 					env[k] = v
 				}
 			}
+			// Where it says the device is lost, for the worker to record.
+			env["ADMINISTRATION_EQUIPMENT_LOST"] = filepath.Join(room, "equipment-lost")
 			servers[key] = map[string]any{"command": self, "args": dargs, "env": env}
 			tools = driveToolNames()
 		case "commands":

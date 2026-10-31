@@ -11,6 +11,11 @@ import (
 
 // A contract on changes: the diff from where the branch left its base,
 // working tree included, handed to critics as a file they may read.
+// contractHandout is where a contract keeps what every professional is
+// handed (the changes' patch): hidden, so the contract's folder holds only
+// professionals, and a script going through */status.json finds only them.
+const contractHandout = ".handout"
+
 type changes struct {
 	Base      string   `json:"base"`
 	MergeBase string   `json:"merge_base"`

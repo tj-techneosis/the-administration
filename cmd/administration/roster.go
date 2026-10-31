@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net"
+	"net/url"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -297,6 +299,9 @@ type openRoom struct {
 	Name  string   `json:"name" toml:"name"`
 	Says  string   `json:"says" toml:"says"`
 	Knows []string `json:"knows,omitempty" toml:"knows"`
+	// For a kind of project only: "web" (it has a setup hook, so a browser
+	// room) or "device" (it has a screen to work through). Empty is any.
+	For string `json:"for,omitempty" toml:"for"`
 }
 
 type rosterView struct {
@@ -425,13 +430,35 @@ func loadRoster(project string) (*rosterView, error) {
 		}
 		v.Problems = append(v.Problems, fmt.Sprintf("critic %s (%s): %v", name, rel(project, f), err))
 	}
+	// The house's rooms for the kinds of project this is: web with a setup
+	// hook, device with a screen (a phone, or a window driven by one).
+	// Equipment that is all command line makes it a tool project, which
+	// neither kind fits; one with nothing set up yet sees them all.
+	kinds := map[string]bool{}
+	if project != "" {
+		if _, err := os.Stat(filepath.Join(project, ".administration", "setup")); err == nil {
+			kinds["web"] = true
+		}
+	}
+	for _, eq := range cfg.Equipment {
+		if eq.Server == "screen" {
+			kinds["device"] = true
+		}
+	}
+	if len(kinds) == 0 && len(cfg.Equipment) > 0 {
+		kinds["tool"] = true
+	}
 	v.Open = append(v.Open, cfg.Open...)
 	// A room is open only while nobody holds it.
 	open := v.Open[:0]
 	for _, o := range v.Open {
-		if _, held := byName[o.Name]; !held {
-			open = append(open, o)
+		if _, held := byName[o.Name]; held {
+			continue
 		}
+		if o.For != "" && len(kinds) > 0 && !kinds[o.For] {
+			continue
+		}
+		open = append(open, o)
 	}
 	v.Open = open
 	for _, n := range order {
@@ -695,6 +722,56 @@ type equipment struct {
 	// Its setup reads what the app's room has (its database, its files): only
 	// a user with the browser gets a room with the app in it.
 	NeedsApp bool `toml:"needs_app"`
+	// Shared non-production servers its app may talk to (a staging API), by
+	// host: the one exception to "everything on this machine", declared
+	// here where the team reviews it. Never production.
+	Shared []string `toml:"shared"`
+	// Shared hosts whose names look like production (prod-replica, a live
+	// demo) that the person has confirmed aren't: a name is a hint, and this
+	// is the answer to it.
+	NotProduction []string `toml:"not_production"`
+}
+
+// prodLabel is a host part that names production: a shared server named so
+// needs the person's word (not_production) that it isn't.
+var prodLabel = regexp.MustCompile(`(?i)(^|[.-])(prod|prd|production|live)\d*($|[.-])`)
+
+// hostOf is a shared entry as a bare host name, or "" if it isn't one.
+func hostOf(s string) string {
+	h := strings.TrimSpace(s)
+	if u, err := url.Parse(h); err == nil && u.Host != "" {
+		h = u.Hostname()
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host // staging.example.com:443
+	}
+	h = strings.ToLower(strings.Trim(h, "[]/"))
+	if h == "" || strings.ContainsAny(h, " /@:") && net.ParseIP(h) == nil {
+		return ""
+	}
+	return h
+}
+
+// sharedHosts is the equipment's shared servers as bare host names, or why
+// one can't be listed yet: not a host name, or named like production with
+// no word from the person that it isn't.
+func (eq *equipment) sharedHosts() ([]string, error) {
+	confirmed := map[string]bool{}
+	for _, s := range eq.NotProduction {
+		confirmed[hostOf(s)] = true
+	}
+	var out []string
+	for _, s := range eq.Shared {
+		h := hostOf(s)
+		if h == "" {
+			return nil, fmt.Errorf("shared %q: a host name, like staging.example.com", s)
+		}
+		if prodLabel.MatchString(h) && !confirmed[h] {
+			return nil, fmt.Errorf("shared %q looks like production by its name. If it isn't (a replica, a demo), confirm that with the person and list it under not_production too; shared servers are for testing only (no business on consecrated ground)", s)
+		}
+		out = append(out, h)
+	}
+	return out, nil
 }
 
 // notFor says why a professional of this kind can't work through eq, or "".
@@ -722,6 +799,9 @@ func checkEquipment(project, name string) (*equipment, error) {
 	}
 	if strings.TrimSpace(eq.About) == "" {
 		return nil, fmt.Errorf("equipment %s: no about (what it reaches and how to use it)", name)
+	}
+	if _, err := eq.sharedHosts(); err != nil {
+		return nil, refusal{fmt.Sprintf("equipment %s: %v", name, err)}
 	}
 	for _, h := range []string{eq.Setup, eq.Teardown} {
 		if h == "" {

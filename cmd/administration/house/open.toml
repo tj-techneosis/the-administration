@@ -12,6 +12,21 @@ knows = ["onboarding", "mobile", "copy"]
 name = "every-screen"
 says = "every device, size and orientation"
 knows = ["mobile", "responsive", "layout"]
+for = "web"
+
+# On a device project, the room to fill first: one specific person on the
+# smallest phone the app supports, through one real flow.
+[[open]]
+name = "small-phone"
+says = "one particular person on the smallest phone the app supports: the keyboard over the form, sheets over sheets, the edges of the screen"
+knows = ["mobile", "layout"]
+for = "device"
+
+[[open]]
+name = "says-no"
+says = "turns down every permission (location, camera, notifications) and expects the app to carry on"
+knows = ["mobile", "errors"]
+for = "device"
 
 [[open]]
 name = "keyboard-and-reader"

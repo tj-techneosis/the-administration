@@ -131,6 +131,31 @@ needs_app = true          # its setup reads the app's room: a browser user's onl
   and `ADMINISTRATION_SHOW=1` (with the screen's variables) when the contract
   was placed with `--show-browsers`. What they leave running is cleared
   with the room.
+- **No business on consecrated ground**, for equipment too. An app on a
+  device talks to the room's own app (`needs_app = true`; an Android
+  emulator reaches this machine at 10.0.2.2) or a local stand-in its setup
+  starts, and the accounts it uses are made there. The setup prints the
+  addresses it points the app at, and `DATA=seed` or `DATA=local` if it
+  loads data; a contract whose equipment prints an address off this
+  machine, or other data, is refused, as a room is. The house can't see
+  inside a built app, so the hook is where this is kept.
+- **A shared test server, declared.** When a local stand-in isn't
+  practical and the project has a test server everyone shares (a staging
+  API), the equipment lists it: `shared = ["staging.example.com"]` (that
+  host and those under it). Its setup may then point the app there and say
+  `DATA=shared`; any other address off this machine is still refused. A
+  host whose name looks like production (a part that is `prod`,
+  `production` or `live`) is refused until the team confirms it isn't, by
+  listing it under `not_production` as well: a name is a hint, so
+  `prod-replica.example.com` can be used, once someone has said so. Never list production under another name: it's the one
+  line the house can't check. When the Director plans one, its plan has a
+  **Shared server** part that says so, and the Claude session setting it
+  up asks the person, naming the host, before writing the line, with a
+  comment above it recording that it was confirmed. Each professional on it is told the app
+  talks to a shared server, and the summary marks what was seen only
+  there: "it could be the server, not the app". The same finding from
+  every device is one line, so a server's own fault shows as one. Accounts
+  made there are other people's to see: make them test ones.
 - Every path is inside the project, one program, no arguments.
 
 ## Casting with it
@@ -164,6 +189,39 @@ that placed the contract finds or builds it with the person, shows them
 the hooks, runs the check, and casts again. The Director proposes; the
 person's own session builds, where they can see it.
 
+## Checking it
+
+`administration equipment-check <name>` starts one piece the way a
+contract would, in a fresh room (with the app's room first when it
+`needs_app`), says what its setup printed, takes one picture through a
+screen (saved to `--shot FILE`, or the books), and clears it all away. A
+device that won't boot, a driver whose pictures come out truncated, or an
+address off this machine shows up there in a minute, not as a contract's
+lost purse. Then a small first contract, one user with `--only` a short
+task, proves the rest.
+
+During a contract, a screen whose pictures fail three times in a row is
+lost: the professional is told it's the device, not the app, to stop, and
+to write what's left as unreached; the summary says "equipment lost at
+HH:MM", so the coverage reads as partial. `administration resume <id>
+<name>` places a new contract for them with only what they couldn't reach.
+
+## Codes and links that arrive elsewhere
+
+Sign-up that needs a code from an email or a text can't be finished on the
+screen alone. Give it a way that stays in the room:
+
+- the setup makes accounts already confirmed, so the flow under test starts
+  past that step; or
+- the room's app sends mail to a local catcher its setup starts (Mailpit,
+  MailHog), and a `commands` program reads the newest message for one
+  address: the professional's own mailbox, and nothing else.
+
+Never read codes from a shared server. A program under `commands` runs as
+the person with whatever it holds, so give it the narrowest reach there is:
+one fixed query, its argument checked (an address that matches the room's
+pattern), no credentials it doesn't need.
+
 ## The wall
 
 The professional is walled as before: only the declared tools or
@@ -192,6 +250,15 @@ controls that drive the thing under test and nothing more (no
 - **A tool on another OS.** A command wrapper that runs the tool inside a
   VM or container the person already has (Docker, UTM, Lima), copying
   files in and results out. The professional only ever runs the wrapper.
+- **A device on another machine.** An iOS simulator on a Mac, driven from
+  Linux: setup, teardown and the driver each run over SSH (`simctl` to boot
+  and screenshot, `idb` to tap and type). Copy a helper script to the far
+  side rather than nest quotes (`ssh ... bash -lc` around `python3 -c`
+  breaks); share one SSH connection (`ControlMaster`), or every tap is a
+  new login; write `simctl io ... screenshot` to a temp file and send that,
+  since some Xcode versions write nothing to stdout. The app on it talks
+  to a stand-in its setup starts on that machine, or a shared test server
+  the equipment declares.
 
 ## Not in the first build
 
@@ -210,6 +277,13 @@ command line on Linux through the command server, and the desktop window
 through Xvfb, Electron's debug port and the pinned browser server, with a
 drop tool for real files. Six live runs, and what each changed:
 
+- **Hire one narrow person on a small device first.** On a phone app, the
+  most useful professional was one specific person on the smallest phone
+  the app supports, going through one real flow: they found the layout,
+  keyboard and sheet problems no critic could. Once the equipment works, a
+  persona written by hand is fine (who they are, their device, what they
+  do and what trips them up): `administration check` it, hire it, and
+  `director review` tunes it from what it finds and misses.
 - **Tell the Director users can work through equipment.** With no web
   setup it read "no users" and cast only critics.
 - **Equipment is only as good as its room's material.** Six good photos

@@ -97,13 +97,38 @@ changes" into CLI calls, and checks findings against the code afterwards.
   group gets SIGTERM, then SIGKILL after 10 s. Findings are parsed from the
   stream as they arrive (`FINDING:` and `UNREACHED:` lines), so a kill loses
   only the closing prose.
+- **The brief** names everyone else on the contract, with their own task if
+  they have one, and asks each to keep to their part: the target is shared,
+  the work isn't. `--brief` adds a task to the persona's own checks;
+  `--only` replaces them, for a smoke test that shouldn't grow into a run.
+  `resume` is `place` with `--only` the professional's unreached items and
+  unanswered plan steps, and the persona exactly as it was placed (not as
+  its file says today).
+- **Lost equipment**: the screen's server counts screenshots that fail or
+  aren't a picture (a bad tap or an unknown key is the professional's, not
+  the device's). At three in a row it answers every call with "lost: stop,
+  write what's left as unreached", and writes the time to the room, where
+  the worker records it in the status before teardown.
+- **Wait** prints a line when someone's state changes, and returns early
+  when one fails or is refused while others work, so a room that broke in
+  a second is heard of then, even one that happened before it started. A
+  failure it has returned for once (kept in the contract's `.told`) doesn't
+  end a later wait again.
 - **Watch**: reads the same streams from the books and prints each action,
   the first line of what was said, and every marked line, until everyone
   is back. It only reads, so watching can't change the work. `--panes`
   opens a Herdr tab or tmux window with one `watch` per professional, and
   `place` does that by itself, unfocused, when it runs inside one
   (`--no-watch` or `ADMINISTRATION_WATCH=off` doesn't); elsewhere it prints
-  the watch line.
+  the watch line. The Herdr tab goes in the placer's space, as Herdr
+  says it is now (`herdr pane current`; `HERDR_WORKSPACE_ID` is only where
+  the pane started), not whichever one has focus, and each pane runs
+  watch as its shell's last command, so it closes once its professional is
+  back (a watch that fails waits for return, so the error is seen). Where
+  panes go is a matter of taste, so a `watch` hook replaces all of this: it
+  hears the contract and each professional's watch command, and opens them
+  however it likes. Only one runs, the machine's before the project's, since
+  two would open everything twice and the placement is the person's choice.
   `place --show-browsers` opens the users' browsers as windows instead of
   headless: the browser gets the screen's variables (`DISPLAY`,
   `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`), so it can draw there.
@@ -111,7 +136,55 @@ changes" into CLI calls, and checks findings against the code afterwards.
   anything else on the screen.
 - **Close**: SIGTERM to any worker still running (it records `closed` and
   tears down), a merged `summary.md` with the open rooms at the end, rooms
-  removed.
+  removed, and the open rooms as they are then kept with the contract, so a
+  summary written again later lists those. The summary lists each finding
+  once: the same claim from several
+  professionals (or one, twice) is folded into one line naming each, when
+  most of the words match, or more than half do and they cite the same lines
+  of a file. The reports follow without their lists, except for findings
+  folded into another's, kept in their own words so a wrong fold loses
+  nothing; their closing prose loses what it restates (the plan and its
+  answers, findings marked or under a heading like "What broke"), which
+  leaves what held: the evidence of what was looked at. Each professional's
+  own report keeps every word. `verdicts` writes it again with each check beside its finding,
+  confirmed first and false last.
+- **Checks** (`room-check`, `equipment-check`) build a room under a
+  contract of their own and clear it away. Killed outright, they can't, so
+  each writes its pid; the next `status` or `place` clears a check whose
+  process is gone, room and all.
+- **Verify** (`verify.go`): after close, the summary's unchecked findings
+  go in batches (12 by default) to verifiers, four at once. A verifier is
+  `claude -p` walled as the Director is: `Read`, `Grep` and `Glob` only,
+  the project and the contract's patch added, a deny list for the shell,
+  the web, writing and secrets. Its prompt (`house/verifier.prompt`) has it
+  trace each finding in the code and answer confirmed, likely or false with
+  the line that decided it. The verdicts go into each professional's
+  `verdicts.json` marked `by: verifier`, under every name a folded finding
+  carries; a verdict the session recorded is never replaced, and one it
+  records later replaces the verifier's. A verifier that fails keeps its
+  folder (`.verify/N`) and its findings stay unchecked for the next run.
+  One verify runs at a time per contract (a lock in its folder). `stats`
+  says how many of its checks are a verifier's that nobody has reviewed
+  since, so the numbers don't pass for a person's.
+- **Links between contracts** (`links.go`): at close, contracts on the same
+  work (the same project and merge base, or the same target, within a
+  week) are found, and one small model call (Haiku, read-only) proposes
+  pairs of findings that are the same bug. A critic's `cart.ts:88` and a
+  user's "the total was $5 high" share no words, so it can't be done by
+  matching text. Proposals are shown as proposed; the session confirms or
+  rejects each with `verdicts` (`also`, `not_also`), which writes the link
+  into both contracts and the decision, with both findings' words, into the
+  project's log in the books. The matcher's next call gets the latest of
+  those as examples, so it learns the project's vocabulary, and `stats`
+  shows how many of its proposals held. `ADMINISTRATION_MATCH=off` skips
+  it.
+- **Findings that aren't**: a `FINDING:` line that opens with "Held:",
+  "Plan 3:", "No issue -" and the like is kept under "Not counted" in the
+  report, not counted and never dropped; the word needs a colon or dash
+  after it, so "the OK button" and "the plan page" still count. Halfway
+  through the purse (if nothing's written yet) and near its end, the
+  professional is asked to write down what it has, without being told why:
+  the limit throws away findings kept for the end.
 - **Workers**: started directly by `place`, each in a session of its own,
   so they outlive the shell or tool call that placed the contract. The
   worker resets PATH to the placer's.
@@ -143,7 +216,14 @@ changes" into CLI calls, and checks findings against the code afterwards.
   anyone enters.
 - **Seed data only.** The manifest declares the data, and anything but
   `seed` is refused. It's a declaration, so the hook is trusted to tell the
-  truth; the README asks for it in plain words.
+  truth; the README asks for it in plain words. Equipment is held to the
+  same: its setup's printed addresses must be on this machine (10.0.2.2 is
+  this machine to an Android emulator) and any `DATA=` seed or local, or
+  the shared test servers the equipment declares (`shared`, never a host
+  that names production) with `DATA=shared`. Professionals on one are told,
+  and the summary marks what only they saw. The house can't see inside a
+  built app, so the hook is trusted here too, and the `shared` line is the
+  team's word, in a file they review, that the server isn't production.
 - **Findings as marked lines.** A professional killed at the coin limit
   can't write a closing report, so the report is built from the stream.
 - **A screen, not a text of the screen.** Users are there to stand in for

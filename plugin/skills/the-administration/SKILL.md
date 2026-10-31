@@ -13,14 +13,12 @@ Bash, on its own (no `;`, `&&`, pipes or `cd` around it), and follow what
 it prints for the rest of this task. Run it again in each new task; don't
 work from an earlier copy.
 
-- If it says `administration` isn't installed, give the person the two
-  steps, which they run once in a terminal:
+- If it says `administration` isn't installed, give the person the one
+  line, which they run once in a terminal:
 
   ```
-  git clone https://github.com/tj-techneosis/the-administration ~/.local/share/the-administration
-  ~/.local/share/the-administration/install.sh
+  curl -fsSL https://raw.githubusercontent.com/tj-techneosis/the-administration/main/install.sh | sh
   ```
 
 - If it says `guide` is an unknown command, the installed tool is older
-  than this plugin: they upgrade it by running `install.sh` again from
-  their copy, after updating that copy.
+  than this plugin: they upgrade it by running that line again.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"context"
 	"fmt"
 	"os"
@@ -42,7 +43,7 @@ func cmdRoomCheck(args []string) error {
 	hook := filepath.Join(project, ".administration", "setup")
 	st, err := os.Stat(hook)
 	if err != nil {
-		return usageError{fmt.Sprintf("%s has no .administration/setup to check (see the README, A House of Your Own). room-check checks the setup hook only; equipment is proven by a small first contract with a user who works through it", project)}
+		return usageError{fmt.Sprintf("%s has no .administration/setup to check (see the README, A House of Your Own). room-check checks the setup hook only; equipment-check NAME checks a piece of equipment", project)}
 	}
 	if st.Mode()&0o111 == 0 {
 		// A session that wrote the hook often can't chmod it; this is the
@@ -71,11 +72,14 @@ func cmdRoomCheck(args []string) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
+	// Killed outright, it can't clean up; this says it's still running, and
+	// sweepChecks clears it once it isn't.
+	_ = os.WriteFile(filepath.Join(dir, "check.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	c := &contract{ID: id, Target: "room check", Project: project, PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Data: data,
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house"}}}
 	ci := &c.Professionals[0]
 	if f.has("changes") {
-		if c.Changes, err = collectChanges(project, f.get("base"), filepath.Join(dir, "handout")); err != nil {
+		if c.Changes, err = collectChanges(project, f.get("base"), filepath.Join(dir, contractHandout)); err != nil {
 			return err
 		}
 	}

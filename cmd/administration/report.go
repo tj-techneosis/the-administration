@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,9 @@ import (
 type report struct {
 	findings  []string
 	unreached []string
+	// FINDING: lines that read as a check that held or a plan step, not
+	// something wrong: kept apart, not counted, never dropped.
+	notCounted []string
 	seen      map[string]bool
 	final     string
 	isError   string
@@ -41,6 +45,30 @@ type report struct {
 	plan     map[int]string
 	answered map[int]bool
 	results  int
+}
+
+// heldLine is a FINDING: whose body says nothing is wrong: "Held: ...",
+// "No issue - ...". Only words that can't open a real defect, and then a
+// colon or a spaced dash: "Holds: the lock holds forever", "Covered - the
+// banner covers Pay" and "Plan 3: the Pay button is hidden" all count.
+var heldLine = regexp.MustCompile(`(?i)^[*_\s]*(held|no issues?|no problems?|works as expected|not a bug)[*_]*(\s*:|\s+[-–—]\s)`)
+
+// markRE is a release check's mark on a finding, as written: upper case and a
+// word of its own, so "NEWLINE missing" and "New users see..." aren't NEW.
+var markRE = regexp.MustCompile(`^[*_\s]*(NEW|CHANGE|OLD)([^A-Za-z]|$)`)
+
+func findingTag(t string) string {
+	if m := markRE.FindStringSubmatch(t); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 var planLine = regexp.MustCompile("(?i)^[\\s>*_#`-]*PLAN\\s*(\\d+)\\s*[:.)-]\\s*[*_`]*\\s*(\\S.*)$")
@@ -193,7 +221,9 @@ func (r *report) scan(text string) bool {
 				return
 			}
 		}
-		if kind == "FINDING" {
+		if kind == "FINDING" && heldLine.MatchString(body) {
+			r.notCounted = append(r.notCounted, body)
+		} else if kind == "FINDING" {
 			r.findings = append(r.findings, body)
 		} else {
 			r.unreached = append(r.unreached, body)
@@ -288,6 +318,12 @@ func (r *report) markdown(c *contract, ci *castItem, state, reason string) strin
 	for _, f := range r.findings {
 		fmt.Fprintf(&b, "- %s\n", f)
 	}
+	if len(r.notCounted) > 0 {
+		fmt.Fprintf(&b, "\n## Not counted\n\nMarked FINDING:, but they read as checks that held or plan steps, not something wrong:\n\n")
+		for _, f := range r.notCounted {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
 	fmt.Fprintf(&b, "\n## Could not reach\n\n")
 	if len(r.unreached) == 0 {
 		b.WriteString("Nothing said.\n")
@@ -326,7 +362,7 @@ func writeSummary(c *contract, dir string) (string, error) {
 	fmt.Fprintf(&b, "# Contract %s: %s\n\n", c.ID, c.Target)
 	fmt.Fprintf(&b, "Placed %s by %s, in %s.\n\n", c.PlacedAt.Local().Format(time.DateTime), c.PlacedBy, c.Project)
 	fmt.Fprintf(&b, "| professional | kind | outcome | findings | unreached |\n|---|---|---|---|---|\n")
-	total, failed := 0, 0
+	total, failed, failedF := 0, 0, 0
 	for _, p := range c.Professionals {
 		s := readStatus(dir, p.Name)
 		outcome := s.State
@@ -339,19 +375,44 @@ func writeSummary(c *contract, dir string) (string, error) {
 		if s.Leftovers != "" {
 			outcome += "; " + s.Leftovers
 		}
+		if s.EquipmentLost != "" {
+			outcome += "; equipment lost at " + s.EquipmentLost + ", so part of their work wasn't done"
+		}
 		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d |\n", p.Name, p.Kind, strings.ReplaceAll(outcome, "|", "/"), s.Findings, s.Unreached)
+		total += s.Findings
 		if s.State == "failed" {
 			failed++
-			continue
+			failedF += s.Findings
 		}
-		total += s.Findings
 	}
-	fmt.Fprintf(&b, "\n%d findings in all, none checked yet. Each one is checked against the code before it is reported as real.\n", total)
+	all, folded := gatherFindings(c, dir)
+	checked := map[string]int{}
+	for _, f := range all {
+		if f.verdict != "" {
+			checked[f.verdict]++
+		}
+	}
+	fmt.Fprintf(&b, "\n%s in all", plural(total, "finding", "findings"))
+	if failedF > 0 {
+		fmt.Fprintf(&b, " (%d from professionals who failed)", failedF)
+	}
+	if folded := len(all); folded < total {
+		fmt.Fprintf(&b, ", %d once the same claim from several is folded into one", folded)
+	}
+	if total == 0 {
+		b.WriteString(".\n")
+	} else if n := checked["confirmed"] + checked["likely"] + checked["false"]; n == 0 {
+		b.WriteString(", none checked yet. The session that placed the contract checks each one against the code before calling it real, and records it with `administration verdicts`.\n")
+	} else {
+		fmt.Fprintf(&b, "; %d checked: %d confirmed, %d likely, %d false. Unchecked ones aren't real yet.\n", n, checked["confirmed"], checked["likely"], checked["false"])
+	}
 	if failed > 0 {
-		fmt.Fprintf(&b, "%d professionals failed; their findings aren't in that count, and their part of the contract wasn't done.\n", failed)
+		fmt.Fprintf(&b, "%s failed: their part of the contract wasn't done, and what they found (marked \"failed\") wasn't seen working the app.\n", plural(failed, "professional", "professionals"))
 	}
 	if c.Changes != nil {
-		b.WriteString(releaseVerdict(c, dir, failed))
+		b.WriteString(releaseVerdict(all, failed))
+	} else if len(all) > 0 {
+		fmt.Fprintf(&b, "\n## Findings\n\nEach with who found it and its number in their report. Several who found the same thing on their own come first.\n\n%s\n", listFindings(all))
 	}
 	// One-off specialists who found something joined the roster at close,
 	// so the next contract casts them rather than training them again.
@@ -373,11 +434,33 @@ func writeSummary(c *contract, dir string) (string, error) {
 			fmt.Fprintf(&b, "\n---\n\n# %s\n\nNo report: %s\n", p.Name, readStatus(dir, p.Name).Reason)
 			continue
 		}
-		fmt.Fprintf(&b, "\n---\n\n%s", rp)
+		// Their findings are in the list above, once each. One folded into
+		// someone else's stays here in its own words, so a fold that was
+		// wrong loses nothing.
+		text := string(rp)
+		if i := strings.Index(text, "## Findings\n"); i >= 0 {
+			if j := strings.Index(text[i:], "\n## "); j >= 0 {
+				own := "## Findings\n\nIn the list above."
+				if f := folded[p.Name]; len(f) > 0 {
+					own += " These were folded there into another's, so here they are as written:\n\n" + strings.Join(f, "\n")
+				}
+				text = text[:i] + own + "\n" + text[i+j:]
+			}
+		}
+		if i := strings.Index(text, "## Their report\n"); i >= 0 {
+			text = text[:i] + stripMarked(text[i:])
+		}
+		fmt.Fprintf(&b, "\n---\n\n%s", text)
 	}
-	if v, err := loadRoster(c.Project); err == nil && len(v.Open) > 0 {
+	open := c.OpenAtClose
+	if c.ClosedAt == nil || open == nil {
+		if v, err := loadRoster(c.Project); err == nil {
+			open = v.Open
+		}
+	}
+	if len(open) > 0 {
 		fmt.Fprintf(&b, "\n---\n\n# Open rooms\n\nNobody on the roster holds these yet. If this contract needed one, the Director can train it (/hire):\n\n")
-		for _, o := range v.Open {
+		for _, o := range open {
 			if o.Says != "" {
 				fmt.Fprintf(&b, "- **%s**: %s\n", o.Name, o.Says)
 			} else {
@@ -391,13 +474,49 @@ func writeSummary(c *contract, dir string) (string, error) {
 
 var (
 	wordRE = regexp.MustCompile(`[a-z0-9_]{4,}`)
-	refRE  = regexp.MustCompile(`[\w./-]+\.\w+:\d+`)
+	// A file a finding cites, and the line or lines right after it, however
+	// it's written: "watch.go:410", "`watch.go` new lines 410-415",
+	// "README lines 30-39".
+	fileRE = regexp.MustCompile(`(?:[\w.-]+/)*[\w-]+\.(?:go|md|py|sh|ts|tsx|js|jsx|mjs|json|toml|ya?ml|rb|rs|java|kt|swift|css|scss|html|sql|txt|vue|svelte|php|cs|c|h|cpp)\b|\bREADME\b|\bCHANGELOG\b`)
+	lineRE = regexp.MustCompile(`^[^\d\n]{0,30}?(\d+)(?:\s*[-–]\s*(\d+))?`)
 )
 
+type ref struct {
+	file   string
+	lo, hi int
+}
+
+func refs(s string) []ref {
+	var out []ref
+	for _, m := range fileRE.FindAllStringIndex(s, -1) {
+		lm := lineRE.FindStringSubmatch(s[m[1]:])
+		if lm == nil {
+			continue
+		}
+		lo, _ := strconv.Atoi(lm[1])
+		hi := lo
+		if lm[2] != "" {
+			hi, _ = strconv.Atoi(lm[2])
+		}
+		out = append(out, ref{strings.TrimSuffix(s[m[0]:m[1]], ".md"), lo, max(lo, hi)})
+	}
+	return out
+}
+
+// sameRef: the same file (one path may be the tail of the other) and lines
+// within a few of each other.
+func sameRef(x, y ref) bool {
+	if x.file != y.file && !strings.HasSuffix(x.file, "/"+y.file) && !strings.HasSuffix(y.file, "/"+x.file) {
+		return false
+	}
+	return x.lo <= y.hi+3 && y.lo <= x.hi+3
+}
+
 // sameFinding says whether b restates a: most of the shorter one's words
-// are in the other, or they cite the same file and line and share half.
-// Tuned on a round of real reports: it merged every restatement there and
-// none of the findings that only looked alike (the same bug in two files).
+// are in the other, or they cite the same lines of a file and share more
+// than half. Tuned on two rounds of real reports: it merged the
+// restatements there and none of the findings that only looked alike (the
+// same bug in two files, two bugs in one function).
 func sameFinding(a, b string) bool {
 	wa, wb := wordSet(a), wordSet(b)
 	if len(wa) == 0 || len(wb) == 0 {
@@ -413,12 +532,12 @@ func sameFinding(a, b string) bool {
 	if c >= 0.75 {
 		return true
 	}
-	if c < 0.5 {
+	if c < 0.55 {
 		return false
 	}
-	for _, x := range refRE.FindAllString(a, -1) {
-		for _, y := range refRE.FindAllString(b, -1) {
-			if x == y {
+	for _, x := range refs(a) {
+		for _, y := range refs(b) {
+			if sameRef(x, y) {
 				return true
 			}
 		}
@@ -434,62 +553,277 @@ func wordSet(s string) map[string]bool {
 	return m
 }
 
-// releaseVerdict leads a contract on changes with what it's for: what the
-// professionals say these changes broke (findings marked NEW), then what's
-// wrong in the change's own text (CHANGE), then what was already so (OLD),
-// with the rest below. Nothing here is checked yet;
-// the session checks each before calling it real.
-func releaseVerdict(c *contract, dir string, failed int) string {
-	var newF, chF, oldF []string
-	other := 0
+var (
+	// A heading in a model's prose: markdown, a bold line, or a short line
+	// ending in a colon.
+	proseHeading = regexp.MustCompile(`^\s*(#{1,6} \S.*|\*\*[^*]{2,80}\*\*:?\s*|[A-Z][^.!?]{1,60}:\s*)$`)
+	listItem = regexp.MustCompile(`^\s*([-*+]|\d+[.)])\s`)
+	// One whose section is findings again.
+	restatedSection = regexp.MustCompile(`(?i)findings|what broke|broken|regressions?`)
+)
+
+// stripMarked is a professional's closing prose without what the summary
+// already holds in order: the findings it restates (the brief asks for
+// every one again, so a cut-off run loses none), the unreached, and the
+// plan with its answers. What's left is what held and how they went about
+// it. Their own report keeps it all.
+func stripMarked(prose string) string {
+	var out []string
+	blank := 0
+	skipping, afterBlank := false, false
+	for _, l := range strings.Split(prose, "\n") {
+		// A section that restates findings ("What broke:", "All findings,
+		// repeated:") goes whole: its list, up to the next heading or the
+		// first plain paragraph after a blank line.
+		if proseHeading.MatchString(l) {
+			skipping = restatedSection.MatchString(l)
+			if skipping {
+				continue
+			}
+		} else if skipping && afterBlank && strings.TrimSpace(l) != "" && !listItem.MatchString(l) && !markLine.MatchString(l) {
+			skipping = false
+		}
+		afterBlank = strings.TrimSpace(l) == ""
+		if skipping || markLine.MatchString(l) || bareMark.MatchString(l) || planLine.MatchString(l) || answerLine.MatchString(l) {
+			continue
+		}
+		if strings.TrimSpace(l) == "" {
+			if blank++; blank > 1 {
+				continue
+			}
+		} else {
+			blank = 0
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+// summed is one claim in the summary: every professional who made it (by
+// name and its number in their report, which is what verdicts takes), and
+// the check it got.
+type summed struct {
+	text, tag string // tag: NEW, CHANGE, OLD, or "" when unmarked
+	by        []string
+	verdict   string
+	why       string
+	whose     string   // which of by the verdict was recorded on
+	checker   string   // "verifier", or empty for the session
+	dissent   []string // other checks of it that disagree
+	links     []link   // the same bug in another contract
+	shared    []string // the shared servers behind it, when everyone who saw it was on one
+}
+
+func dissentText(ref, verdict, why string) string {
+	t := ref + " was checked " + verdict
+	if why != "" {
+		t += ": " + oneLine(why, 300)
+	}
+	return t
+}
+
+// gatherFindings reads each professional's findings from their report, with
+// any verdicts recorded, and folds the same claim made by several (or by one,
+// twice) into one. What's confirmed comes first, then what several found on
+// their own; what was found false goes last. It also returns, for each
+// professional, the findings folded into another's, as they wrote them.
+func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
+	var all []*summed
+	folded := map[string][]string{}
 	for _, p := range c.Professionals {
 		rp, err := os.ReadFile(filepath.Join(dir, p.Name, "report.md"))
 		if err != nil {
 			continue
 		}
-		sec := string(rp)
-		if i := strings.Index(sec, "## Findings"); i >= 0 {
-			sec = sec[i:]
-		}
-		if j := strings.Index(sec, "## Could not reach"); j >= 0 {
-			sec = sec[:j]
-		}
-		for _, l := range strings.Split(sec, "\n") {
-			t, ok := strings.CutPrefix(l, "- ")
-			if !ok || strings.TrimSpace(t) == "" || strings.HasPrefix(t, "none") {
-				continue
+		vs := map[int]verdict{}
+		var vl []verdict
+		if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vl) == nil {
+			for _, v := range vl {
+				vs[v.Finding] = v
 			}
-			switch u := strings.ToUpper(strings.TrimLeft(t, "*_ ")); {
-			case strings.HasPrefix(u, "NEW"):
-				newF = append(newF, fmt.Sprintf("- %s (%s)", t, p.Name))
-			case strings.HasPrefix(u, "CHANGE"):
-				chF = append(chF, fmt.Sprintf("- %s (%s)", t, p.Name))
-			case strings.HasPrefix(u, "OLD"):
-				oldF = append(oldF, fmt.Sprintf("- %s (%s)", t, p.Name))
+		}
+		failed := readStatus(dir, p.Name).State == "failed"
+		for n, t := range reportFindings(string(rp)) {
+			ref := fmt.Sprintf("%s #%d", p.Name, n+1)
+			if failed {
+				ref += ", failed"
+			}
+			tag := findingTag(t)
+			v := vs[n+1]
+			var into *summed
+			for _, f := range all {
+				if f.tag == tag && sameFinding(f.text, t) {
+					into = f
+					break
+				}
+			}
+			if into == nil {
+				into = &summed{text: t, tag: tag}
+				all = append(all, into)
+			} else {
+				folded[p.Name] = append(folded[p.Name], fmt.Sprintf("- #%d: %s", n+1, t))
+			}
+			into.by = append(into.by, ref)
+			// Checks of a folded finding can disagree; the best one ranks
+			// it, and the others are shown beside it, never dropped.
+			switch {
+			case v.Verdict == "":
+			case into.verdict == "":
+				into.verdict, into.why, into.whose, into.checker = v.Verdict, v.Why, ref, v.By
+			case v.Verdict == into.verdict:
+			case verdictRank(v.Verdict) < verdictRank(into.verdict):
+				into.dissent = append(into.dissent, dissentText(into.whose, into.verdict, into.why))
+				into.verdict, into.why, into.whose, into.checker = v.Verdict, v.Why, ref, v.By
 			default:
-				other++
+				into.dissent = append(into.dissent, dissentText(ref, v.Verdict, v.Why))
 			}
 		}
 	}
+	ls := readLinks(dir)
+	onShared := map[string][]string{}
+	for _, p := range c.Professionals {
+		if sh := readStatus(dir, p.Name).Shared; len(sh) > 0 {
+			onShared[p.Name] = sh
+		}
+	}
+	for _, f := range all {
+		f.links = linksFor(ls, f.by)
+		// Seen only against a shared server: say so, as the server may be
+		// what's wrong (every device seeing it points there too).
+		var hosts []string
+		for _, ref := range f.by {
+			sh := onShared[strings.SplitN(ref, " #", 2)[0]]
+			if len(sh) == 0 {
+				hosts = nil
+				break
+			}
+			for _, h := range sh {
+				if h = h[strings.Index(h, ": ")+2:]; !slices.Contains(hosts, h) {
+					hosts = append(hosts, h)
+				}
+			}
+		}
+		f.shared = hosts
+	}
+	// Seen two ways (a confirmed link to another contract) is the strongest
+	// evidence there is, after a check.
+	linked := func(f *summed) int {
+		for _, l := range f.links {
+			if l.State == "confirmed" {
+				return 0
+			}
+		}
+		if len(f.links) > 0 {
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if a, b := verdictRank(all[i].verdict), verdictRank(all[j].verdict); a != b {
+			return a < b
+		}
+		if a, b := linked(all[i]), linked(all[j]); a != b {
+			return a < b
+		}
+		return len(all[i].by) > len(all[j].by)
+	})
+	return all, folded
+}
+
+func verdictRank(v string) int {
+	return map[string]int{"confirmed": 0, "likely": 1, "": 2, "false": 3}[v]
+}
+
+// reportFindings is the bullet list under a report's "## Findings".
+func reportFindings(rp string) []string {
+	i := strings.Index(rp, "## Findings\n")
+	if i < 0 {
+		return nil
+	}
+	sec := rp[i:]
+	if j := strings.Index(sec[1:], "\n## "); j >= 0 {
+		sec = sec[:j+1]
+	}
+	var out []string
+	for _, l := range strings.Split(sec, "\n") {
+		if t, ok := strings.CutPrefix(l, "- "); ok && strings.TrimSpace(t) != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func listFindings(fs []*summed) string {
+	var b strings.Builder
+	for _, f := range fs {
+		fmt.Fprintf(&b, "- %s (%s)", f.text, strings.Join(f.by, "; "))
+		if f.verdict != "" {
+			fmt.Fprintf(&b, " **[%s", f.verdict)
+			if f.checker == "verifier" {
+				b.WriteString(" by a verifier")
+			}
+			if f.why != "" {
+				fmt.Fprintf(&b, ": %s", oneLine(f.why, 300))
+			}
+			b.WriteString("]**")
+		}
+		if len(f.dissent) > 0 {
+			fmt.Fprintf(&b, " (but %s)", strings.Join(f.dissent, "; "))
+		}
+		if len(f.shared) > 0 {
+			fmt.Fprintf(&b, " (seen against the shared server %s: it could be the server, not the app)", strings.Join(f.shared, ", "))
+		}
+		for _, l := range f.links {
+			// A contract pruned since is gone from the books; say so.
+			gone := ""
+			if m := otherRef.FindStringSubmatch(l.To); m != nil {
+				if dir, err := contractDir(m[1]); err == nil {
+					if _, err := os.Stat(filepath.Join(dir, "contract.json")); err != nil {
+						gone = " (pruned since)"
+					}
+				}
+			}
+			if l.State == "confirmed" {
+				fmt.Fprintf(&b, "; **also seen in contract %s**%s", l.To, gone)
+			} else if gone != "" {
+				continue
+			} else {
+				fmt.Fprintf(&b, "; maybe the same as contract %s (proposed: %s)", l.To, l.Why)
+			}
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// releaseVerdict leads a contract on changes with what it's for: what the
+// professionals say these changes broke (findings marked NEW), then what's
+// wrong in the change's own text (CHANGE), then what was already so (OLD),
+// then what wasn't marked.
+func releaseVerdict(all []*summed, failed int) string {
+	by := map[string][]*summed{}
+	for _, f := range all {
+		by[f.tag] = append(by[f.tag], f)
+	}
 	var b strings.Builder
 	b.WriteString("\n## What these changes broke\n\n")
-	if len(newF) == 0 {
+	if newF := by["NEW"]; len(newF) == 0 {
 		b.WriteString("Nobody reported anything these changes broke.")
 		if failed > 0 {
 			b.WriteString(" Some professionals failed, so part of it went unchecked.")
 		}
 		b.WriteString("\n")
 	} else {
-		fmt.Fprintf(&b, "%d findings marked NEW (the professional says the change caused it; check each before calling it real):\n\n%s\n", len(newF), strings.Join(newF, "\n"))
+		fmt.Fprintf(&b, "%s marked NEW (the professional says the change caused it; check each before calling it real):\n\n%s\n", plural(len(newF), "finding", "findings"), listFindings(newF))
 	}
-	if len(chF) > 0 {
-		fmt.Fprintf(&b, "\n## Wrong in the changes themselves\n\nNothing here behaves differently from before; the change's own comments, documents or tests are wrong (CHANGE):\n\n%s\n", strings.Join(chF, "\n"))
+	if chF := by["CHANGE"]; len(chF) > 0 {
+		fmt.Fprintf(&b, "\n## Wrong in the changes themselves\n\nNothing here behaves differently from before; the change's own comments, documents or tests are wrong (CHANGE):\n\n%s\n", listFindings(chF))
 	}
-	if len(oldF) > 0 {
-		fmt.Fprintf(&b, "\n## Already so before these changes\n\n%s\n", strings.Join(oldF, "\n"))
+	if oldF := by["OLD"]; len(oldF) > 0 {
+		fmt.Fprintf(&b, "\n## Already so before these changes\n\n%s\n", listFindings(oldF))
 	}
-	if other > 0 {
-		fmt.Fprintf(&b, "\n%d more findings weren't marked either way; they're in the reports below.\n", other)
+	if other := by[""]; len(other) > 0 {
+		fmt.Fprintf(&b, "\n## Not marked either way\n\n%s\n", listFindings(other))
 	}
 	return b.String()
 }

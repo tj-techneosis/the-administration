@@ -155,6 +155,7 @@ func directorJob(job string, args []string) (int, error) {
 			_ = os.WriteFile(filepath.Join(in, "recent.txt"), []byte(log+"\n"), 0o600)
 		}
 		projectNote(&jobText, project)
+		screenUsersNote(&jobText, project)
 		if f.has("changes") {
 			ch, err := collectChanges(project, f.get("base"), in)
 			if err != nil {
@@ -493,7 +494,7 @@ func copyContract(src, dst string) {
 	copyFile(filepath.Join(src, "summary.md"), filepath.Join(dst, "summary.md"))
 	entries, _ := os.ReadDir(src)
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == "handout" {
+		if !e.IsDir() || e.Name() == "handout" || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		for _, f := range []string{"report.md", "status.json", "verdicts.json"} {
@@ -933,6 +934,29 @@ func equipmentNote(b *strings.Builder, project string) {
 	}
 }
 
+// screenUsersNote asks for a user through each screen the project has: on a
+// phone app, one particular person on a small device found the release
+// blocker that a cast of critics missed, and the Director cast none until
+// told. The roster's own users of it count.
+func screenUsersNote(b *strings.Builder, project string) {
+	var screens []string
+	for n, eq := range loadProjectConfig(project).Equipment {
+		if _, err := checkEquipment(project, n); err == nil && eq.Server == "screen" {
+			screens = append(screens, n)
+		}
+	}
+	if len(screens) == 0 {
+		return
+	}
+	sort.Strings(screens)
+	fmt.Fprintf(b, "The project has a screen to work through (%s). Users there find what no critic can: layout at a small size, the keyboard over a form, sheets over sheets, a permission turned down. Cast at least one user through it (uses: [%s], browser: false): one particular person on it, going through one real flow in scope, the narrower the better; or also cast a roster user who already uses it. Only if nothing in scope can be seen on that screen, say so under \"Not covered\" in cast.md, and why.\n",
+		strings.Join(screens, ", "), screens[0])
+}
+
+// notProdNote is the plan's part on a shared server: a heading for it, and
+// the words "not production" in it.
+var notProdNote = regexp.MustCompile(`(?is)shared server.*not\s+(be\s+)?production`)
+
 var tomlBlock = regexp.MustCompile("(?s)```toml\n(.*?)```")
 
 // checkEquipmentPlan reads the declarations in an equipment plan the way
@@ -972,6 +996,23 @@ func checkEquipmentPlan(path string, have map[string]equipment) []string {
 			}
 			if strings.TrimSpace(eq.About) == "" {
 				problems = append(problems, fmt.Sprintf("equipment.md: %s has no about", name))
+			}
+			// A shared server is the one line the house can't check: the plan
+			// must say so, so the session asks the person before writing it.
+			// A production-looking name isn't the Director's to settle: only
+			// the person can say, so it goes to the session, not back here.
+			if len(eq.Shared) > 0 {
+				bad := ""
+				for _, s := range eq.Shared {
+					if hostOf(s) == "" {
+						bad = s
+					}
+				}
+				if bad != "" {
+					problems = append(problems, fmt.Sprintf("equipment.md: %s: shared %q: a host name, like staging.example.com", name, bad))
+				} else if !notProdNote.MatchString(string(b)) {
+					problems = append(problems, fmt.Sprintf("equipment.md: %s declares shared = %v but the plan has no \"Shared server\" part saying it must not be production and that the session confirms that with the person before adding it", name, eq.Shared))
+				}
 			}
 			switch eq.Server {
 			case "playwright":

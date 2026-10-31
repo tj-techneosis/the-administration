@@ -9,7 +9,6 @@ for b in "${ADMINISTRATION_REAL:-}" "$HOME/.local/bin/administration" /opt/homeb
 done
 cat >&2 <<'MSG'
 administration: not installed. Once, in a terminal:
-  git clone https://github.com/tj-techneosis/the-administration ~/.local/share/the-administration
-  ~/.local/share/the-administration/install.sh
+  curl -fsSL https://raw.githubusercontent.com/tj-techneosis/the-administration/main/install.sh | sh
 MSG
 exit 1

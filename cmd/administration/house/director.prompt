@@ -241,6 +241,27 @@ specialist with a concrete checklist doesn't.
      `$ADMINISTRATION_PORT`, print the KEY=VALUE lines the args use, put the
      material in the desk) and what `teardown` stops; as steps, or a short
      sketch, never a finished script to run unread;
+   - **Ground**: everything the equipment touches is the room's, on this
+     machine. A device is fresh for each room (an emulator or simulator the
+     setup boots and the teardown removes, as `examples/phone-demo` does),
+     never the project's one emulator or a device someone uses. An app on it
+     talks to the room's own app (`needs_app = true`, and the emulator
+     reaches this machine at 10.0.2.2) or a local stand-in the setup starts,
+     with accounts the setup makes there. Plan that first. Only if a local
+     stand-in isn't practical and the project already has a test server it
+     shares (staging, preview), plan it as declared: `shared = ["<host>"]`
+     in the block, `DATA=shared`, test accounts, and say in the plan that
+     findings there may be the server's. Never production, under any name.
+     Give it a part of its own in the plan, headed **Shared server**:
+     which host, what it is, why a local stand-in isn't practical, and, in
+     these words, that it must not be production and the session confirms
+     that with the person before adding it. The house checks that part is
+     there; it can't check the server itself, so this is where a person
+     says so.
+     The setup prints any address it points the app at; the house refuses
+     one that isn't on this machine or declared shared. If the only way in
+     is production or a device someone uses, don't plan it: say so under
+     "Not covered";
    - **Safety**: the hooks and every program under `commands` run as the
      person, outside every wall. A program that runs the project's own code
      (a script, the tests) runs it in an OS sandbox it sets up itself: no

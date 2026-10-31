@@ -30,17 +30,21 @@ rest for the tools you build next.
 You need macOS or Linux, **the standalone Claude Code CLI** (`claude` on
 PATH: professionals run it; the VS Code extension's private copy doesn't
 count, though you can place contracts from the extension) and Node for the
-browser. The repo carries a built binary for macOS and Linux (Apple
-silicon, ARM, Intel and AMD); anywhere else it builds from source with Go
-(or mise, which reads `mise.toml`).
+browser. Releases carry a binary for macOS and Linux (Apple silicon, ARM,
+Intel and AMD):
 
 ```
-git clone https://github.com/tj-techneosis/the-administration ~/.local/share/the-administration
-~/.local/share/the-administration/install.sh
+curl -fsSL https://raw.githubusercontent.com/tj-techneosis/the-administration/main/install.sh | sh
 ```
 
-That puts `administration` in `~/.local/bin` and installs Playwright's
-Chromium. Then add the plugin in Claude Code. In VS Code, type the same
+That fetches the latest release for your machine, checks it against the
+release's SHA-256 sums, puts `administration` in `~/.local/bin` and
+installs Playwright's Chromium (`| sh -s -- --no-browser` skips it). To
+build from source instead, clone the repo anywhere and run its
+`install.sh`: a checkout builds, with Go 1.26 or newer (or mise, which
+reads `mise.toml`; without either it installs the latest release instead),
+and `administration upgrade` pulls and rebuilds it (set `ADMINISTRATION_SRC` if it isn't in
+`~/.local/share/the-administration`). Then add the plugin in Claude Code. In VS Code, type the same
 commands in the chat, or use the `/plugins` panel, then quit and reopen VS
 Code:
 
@@ -52,8 +56,8 @@ Code:
 The plugin puts a small launcher on Claude's PATH, so it finds the binary
 even when the extension's shell doesn't read your profile.
 
-**Upgrading** is `administration upgrade`: it pulls your copy and installs
-from it. The plugin's skill reads its instructions from the binary
+**Upgrading** is `administration upgrade`: it installs the latest release,
+or, if you built from a checkout, pulls it and builds again. The plugin's skill reads its instructions from the binary
 (`administration guide`), so open sessions use the new version from their
 next task, with no restart. Only a change to the plugin itself (rare) needs
 `/reload-plugins`, and `upgrade` says when.
@@ -102,10 +106,13 @@ hit a stub or ran out of coins says so. Silence is not a pass.
    Browser professionals each get a room first. The Administration runs
    every stay itself, to its coins, and keeps its log.
 3. **Worked.** You keep working. Claude waits in the background and checks
-   in when they're back. There's no live feed.
-4. **Closed.** The reports are merged into one summary, and each finding is
-   checked against the code. You hear what broke, how to see it and how sure
-   we are. The rooms are cleared.
+   in when they're back. In Herdr or tmux the watch panes show them at
+   work; anywhere else, `administration watch`.
+4. **Closed.** The reports are merged into one summary, each finding once
+   with everyone who found it. Verifiers, walled like everyone else, check
+   each against the code and record the verdict in the books, beside the
+   finding; Claude reviews theirs and records where it disagrees. You hear what
+   broke, how to see it and how sure we are. The rooms are cleared.
 5. **Open rooms.** If the contract needed someone nobody is, the summary
    says so and Claude offers the Director.
 
@@ -178,7 +185,11 @@ The roster is read from:
 
 3. **the open rooms**: suggestions the framework ships, plus your own
    (`[[open]]` entries in `roster.toml`). A room closes once a professional
-   of that name is hired.
+   of that name is hired. The framework's are chosen by the kind of
+   project: one with a setup hook gets the web rooms (`for = "web"`), one
+   with a screen to work through the device rooms (`for = "device"`), one
+   with only command-line equipment neither; a project with nothing set up
+   yet sees them all.
 
 ## The Director
 
@@ -319,7 +330,9 @@ project. Each professional is a separate headless Claude Code session:
   sign in.
 
 Reports are text. Screenshots stay in the room and go with it at close
-(`close --keep` keeps them).
+(`close --keep` keeps them). Only `FINDING:` lines count as findings, and
+one that opens like a check that held ("Held:", "No issue -") is kept under
+"Not counted" in the report instead: never dropped, never counted.
 
 ---
 
@@ -328,15 +341,19 @@ Reports are text. Screenshots stay in the room and go with it at close
 | command | does |
 |---|---|
 | `administration roster [--match tags] [--json] [--project DIR]` | who's hired, what they know, the open rooms; `--match` drafts a cast |
-| `administration place TARGET --cast a,b [--coins 10m] [--changes [--base REF]] [--project DIR] [--dry-run] [--show-browsers]` | places a contract and prints its id; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work |
-| `administration wait ID [--timeout 3h]` | waits until everyone is back or out of coins |
+| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before]` | places a contract and prints its id; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work |
+| `administration wait ID [--timeout 3h]` | waits until everyone is back or out of coins, with a line as each one's state changes; returns early (2, or 3 if refused) when one fails while others still work |
 | `administration status [ID] [--json]` | who's working and who's back |
 | `administration close ID [--keep]` | stops anyone still working, merges the reports, puts the Director's specialists who found something on the roster and clears the rooms; prints the summary's path |
 | `administration report ID [NAME]` | prints the summary once closed, or one professional's report |
 | `administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]` | builds one room with the setup hook, checks it comes up on seed data, shows its address and logins (not the passwords), and clears it away: the test for a hook you just wrote. `--changes` also builds the app before them, as a release check does |
-| `administration watch ID [NAME] [--panes]` | follows each professional live: every action, every finding as it's written; `--panes` gives each one a pane in Herdr or tmux |
+| `administration resume ID NAME [--coins 10m]` | a new contract for one professional on only what contract ID left undone: what they couldn't reach, and their plan's steps never answered (out of coins, equipment lost) |
+| `administration equipment-check NAME [--shot FILE]` | starts one piece of equipment in a fresh room, says what its setup printed, takes one picture through a screen and clears it away: room-check for equipment |
+| `administration watch ID [NAME] [--panes]` | follows each professional live: every action, every finding as it's written; `--panes` gives each one a pane in Herdr or tmux (or wherever your `watch` hook puts them), which closes when they're back |
 | `administration hire NAME\|FILE [--replace]` | puts a candidate on the roster |
 | `administration hire --from CONTRACT NAME` | keeps one of the Director's specialists from a contract by hand (one that found something joins the roster at close by itself), with the record it earned there |
+| `administration verify ID [--batch 12] [--coins 10m] [--model M]` | checks a closed contract's unchecked findings in the house: walled verifiers read the project's code (nothing else, no shell) and record confirmed, likely or false for each, with the line that decided it; yours replace theirs |
+| `administration verdicts ID FILE\|-` | records the check of each finding, `{"name": [{"finding": 3, "verdict": "confirmed", "why": "...", "also": ["ID NAME #N"], "not_also": [...]}]}`; the summary shows each beside its finding, and `also` links it to the same bug in another contract, on both sides |
 | `administration check FILE...` | checks a professional's file |
 
 Exit codes: **0** done, **1** error, **2** a room or a professional failed
@@ -347,6 +364,10 @@ Each contract is a directory in `~/.local/share/administration/contracts/`,
 with every professional's brief, settings, stream, report and status, and
 the merged `summary.md`. Up to four browser rooms run at once
 (`ADMINISTRATION_MAX_ROOMS`), because each one runs a copy of the app.
+The books grow: a phone user's stream can pass 10MB in ten minutes.
+`administration prune` strips reviewed or old contracts to their summaries
+(`--keep 10`, `--older 30d`), and past `--keep` to a line each in the
+project's ledger, so the stats outlive them.
 
 **Hooks.** The Administration tells nobody anything itself; it runs your
 hooks. An executable named after an event, `placed`, `closed`, `hired` or
@@ -355,11 +376,59 @@ hooks. An executable named after an event, `placed`, `closed`, `hired` or
 `ADMINISTRATION_*` variables (the contract, the summary's path). Post the
 summary to a chat, send it to your phone, open issues from confirmed
 findings: that's the hook's business. A hook that fails or hangs changes
-nothing.
+nothing (except `watch`, below).
+
+A `watch` hook decides where the watch panes open, in place of the house's
+own (a Herdr tab in the space you placed from, or a tmux window). It hears
+JSON on stdin: `contract`, `project`, `books`, and `professionals`, each
+with its `name` and the `command` that follows it and returns once it's
+back. `exec` that command as a pane's last and the pane closes itself
+(if watch fails, it waits for return first, so the error can be read).
+Only one `watch` hook runs, the machine's before the project's (one that
+isn't executable is skipped, and hooks.log says so): where the panes go is
+your call. Exit 0 once they're open; on any other exit, or after 30
+seconds, `place` says the panes didn't open and prints the watch line. To send every contract's panes
+to a Herdr space of their own (here `swarm`, made when it's missing, since
+Herdr closes a space with its last tab):
+
+```sh
+#!/bin/sh
+# ~/.config/administration/hooks/watch
+set -eu
+space_name=swarm
+ev=$(cat)
+label="contract $ADMINISTRATION_CONTRACT"
+space=$(herdr workspace list |
+        jq -r --arg l "$space_name" '[.result.workspaces[] | select(.label == $l)][0].workspace_id // empty')
+if [ -z "$space" ]; then
+  # Herdr drops a space with its last tab, so make it when it's gone and
+  # give its first tab to this contract.
+  out=$(herdr workspace create --label "$space_name" --no-focus)
+  herdr tab rename "$(printf '%s' "$out" | jq -r .result.tab.tab_id)" "$label" >/dev/null
+else
+  out=$(herdr tab create --workspace "$space" --label "$label" --no-focus)
+fi
+pane=$(printf '%s' "$out" | jq -r .result.root_pane.pane_id)
+n=$(printf '%s' "$ev" | jq '.professionals | length')
+# Every pane first, then each watch: one that ends at once would close its
+# pane while the next is still being split from it.
+panes=$pane i=1
+while [ "$i" -lt "$n" ]; do
+  # Split the newest pane, across then down, so no pane gets squeezed.
+  dir=right; [ $((i % 2)) -eq 0 ] && dir=down
+  pane=$(herdr pane split "$pane" --direction "$dir" --no-focus | jq -r .result.pane.pane_id)
+  panes="$panes $pane" i=$((i + 1))
+done
+i=0
+for pane in $panes; do
+  herdr pane rename "$pane" "$(printf '%s' "$ev" | jq -r ".professionals[$i].name")" >/dev/null
+  herdr pane run "$pane" "exec $(printf '%s' "$ev" | jq -r ".professionals[$i].command")" >/dev/null
+  i=$((i + 1))
+done
+```
 
 ## Not Yet
 
-- prebuilt binaries, so nobody needs Go;
 - trial contracts for new hires, and tuning a professional from past
   contracts;
 - sharing professionals between projects (a roster source other projects

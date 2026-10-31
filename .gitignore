@@ -2,3 +2,4 @@
 *.test
 __pycache__/
 /cmd/administration/administration
+/dist/
