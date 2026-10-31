@@ -1,0 +1,8 @@
+[project]
+name = "cli-demo"
+
+[equipment.slugify]
+about = "slugify, built for this room (bin/slugify), and wc and cmp to check what it writes. Your desk is the working directory: write test inputs there and point the tool at them."
+setup = ".administration/equipment/slugify/build"
+server = "sandboxed"
+commands = ["bin/slugify", "wc", "cmp"]

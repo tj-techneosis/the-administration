@@ -1,0 +1,222 @@
+// The Administration: a roster of persona agents that test, and the
+// contracts they take. See README.md for the frame and docs/design.md for the plain
+// version.
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+// Exit codes are a contract with the skill and with scripts.
+const (
+	exitOK      = 0
+	exitError   = 1 // bad usage, unknown names, a broken file
+	exitStart   = 2 // a room or a professional failed to start, or failed at the work (a user whose browser never worked)
+	exitRefused = 3 // refused by the Rules
+)
+
+const usage = `administration: contracts for persona agents.
+
+  administration guide
+      how a Claude session uses the Administration (the plugin's skill
+      reads it from here, so it always matches this version)
+  administration upgrade [--no-browser]
+      update your copy (~/.local/share/the-administration, or
+      $ADMINISTRATION_SRC) and install from it; open sessions use the new
+      version from their next task
+  administration roster [--json] [--project DIR] [--match tag,tag]
+      who's hired, where from, and the open rooms; --match is the Director's
+      first draft of a cast, and the tags nobody knows
+  administration place TARGET... --cast a,b [--coins 10m] [--changes [--base REF]]
+                       [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME] [--brief NAME=TASK]...
+      place a contract; prints its id. --changes puts it on the branch's
+      changes, and gives users the app before them too, to compare
+      (--no-before doesn't). In Herdr or tmux it
+      opens a watch pane per professional, unfocused (--no-watch, or
+      ADMINISTRATION_WATCH=off, doesn't); --show-browsers opens users'
+      browsers as windows on your screen
+  administration hire NAME|FILE [--replace] | hire --from CONTRACT NAME
+      put a professional the Director trained on the project's roster, or
+      keep a one-off specialist from a contract
+  administration wait ID [--timeout 30m]
+      until every professional is back or out of coins
+  administration status [ID] [--json]
+      who's working, who's back
+  administration close ID [--keep]
+      stop anyone still working, merge the reports, clear the rooms;
+      prints the summary's path
+  administration report ID [NAME]
+      print the summary (once closed), or one professional's report
+  administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]
+      build one room with the project's setup hook, check it comes up on
+      seed data, show its address and logins, and clear it away
+  administration watch ID [NAME] [--panes]
+      follow what each professional does as they do it; --panes gives each
+      one a pane in Herdr or tmux
+  administration director cast TARGET... [--changes [--base REF]] | train WHO... | onboard | review
+                         [--project DIR] [--model M] [--coins 10m]
+      cast: specialists for one contract, from reading the code in scope;
+      place them with --with RUN
+      the Director, walled like a professional: writes only into its run folder
+  administration director show RUN | apply RUN
+      what a run wrote (a cast's plan in full) and the checks it passed;
+      apply puts it into .administration/
+  administration missed WHAT... [--contract ID] [--by NAME] [--project DIR]
+      something a professional saw and passed over; the Director's next
+      review tunes whoever should have caught it (apply puts the tuning in)
+  administration verdicts ID FILE|-
+      record each finding's check: {"name": [{"finding": 1, "verdict": "confirmed|likely|false"}]}
+  administration stats [--project DIR] [--json]
+      each professional's record: runs, findings, how many held up, coins used
+  administration prune [--keep 10] [--older 30d] [--dry-run]
+      strip reviewed or old contracts to their summaries; past --keep, to the ledger
+  administration check FILE...
+      check professional files (what the Director writes)
+  administration version
+
+Exit codes: 0 done, 1 error, 2 a room or professional failed (to start,
+or a user whose browser never worked), 3 refused by the Rules.
+`
+
+type usageError struct{ msg string }
+
+func (e usageError) Error() string { return e.msg }
+
+// refusal is an error the Rules raise; it exits 3.
+type refusal struct{ msg string }
+
+func (e refusal) Error() string { return e.msg }
+
+func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+func run(args []string) int {
+	if len(args) == 0 {
+		fmt.Print(usage)
+		return exitOK
+	}
+	var err error
+	code := exitOK
+	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Print(usage)
+	case "version", "--version":
+		fmt.Println("administration", version)
+	case "upgrade":
+		err = cmdUpgrade(args[1:])
+	case "guide":
+		// The skill's instructions, from the binary they describe: the plugin
+		// only points here, so upgrading the tool upgrades them.
+		fmt.Printf("<!-- administration %s: how to use it. Follow this for the task at hand. -->\n\n%s", version, guide)
+	case "roster":
+		err = cmdRoster(args[1:])
+	case "place":
+		err = cmdPlace(args[1:])
+	case "wait":
+		code, err = cmdWait(args[1:])
+	case "status":
+		err = cmdStatus(args[1:])
+	case "report":
+		err = cmdReport(args[1:])
+	case "watch":
+		err = cmdWatch(args[1:])
+	case "room-check":
+		err = cmdRoomCheck(args[1:])
+	case "close":
+		err = cmdClose(args[1:])
+	case "check":
+		err = cmdCheck(args[1:])
+	case "hire":
+		err = cmdHire(args[1:])
+	case "director":
+		code, err = cmdDirector(args[1:])
+	case "verdicts":
+		err = cmdVerdicts(args[1:])
+	case "stats":
+		err = cmdStats(args[1:])
+	case "prune":
+		err = cmdPrune(args[1:])
+	case "_screen":
+		err = cmdScreen(args[1:])
+	case "_equip":
+		err = cmdEquip(args[1:])
+	case "missed":
+		err = cmdMissed(args[1:])
+	case "_drive":
+		err = cmdDrive(args[1:])
+	case "_gate":
+		// Internal: open a gate on the given ports and hold it until stdin
+		// closes. For tests/live/gate_probe.py.
+		err = gateCmd(args[1:])
+	case "_work":
+		// Internal: the detached worker for one professional.
+		if len(args) != 3 {
+			err = usageError{"_work ID NAME"}
+		} else {
+			err = work(args[1], args[2])
+		}
+	default:
+		err = usageError{fmt.Sprintf("unknown command %q (try --help)", args[0])}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "administration:", err)
+		switch err.(type) {
+		case refusal:
+			return exitRefused
+		case startError:
+			return exitStart
+		}
+		return exitError
+	}
+	return code
+}
+
+// flags is a small parser: --name value, --name=value and bare --switch, with
+// everything else positional. Unknown flags are an error.
+type flags struct {
+	vals  map[string]string
+	all   map[string][]string // every value of a flag given more than once
+	pos   []string
+	known map[string]bool // name -> takes a value
+}
+
+func parseFlags(args []string, known map[string]bool) (*flags, error) {
+	f := &flags{vals: map[string]string{}, all: map[string][]string{}, known: known}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			f.pos = append(f.pos, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "--") || a == "-" {
+			f.pos = append(f.pos, a)
+			continue
+		}
+		name, val, hasVal := strings.Cut(a[2:], "=")
+		takes, ok := known[name]
+		if !ok {
+			return nil, usageError{fmt.Sprintf("unknown flag --%s", name)}
+		}
+		if takes && !hasVal {
+			if i+1 >= len(args) {
+				return nil, usageError{fmt.Sprintf("--%s needs a value", name)}
+			}
+			i++
+			val = args[i]
+		} else if !takes {
+			if hasVal {
+				return nil, usageError{fmt.Sprintf("--%s takes no value", name)}
+			}
+			val = "1"
+		}
+		f.vals[name] = val
+		f.all[name] = append(f.all[name], val)
+	}
+	return f, nil
+}
+
+func (f *flags) get(name string) string { return f.vals[name] }
+func (f *flags) has(name string) bool   { _, ok := f.vals[name]; return ok }

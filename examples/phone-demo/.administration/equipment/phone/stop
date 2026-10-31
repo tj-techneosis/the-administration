@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The room's phone off, and its port given back. (Anything left running is
+# cleared with the room anyway.)
+here=$ADMINISTRATION_EQUIPMENT_DIR
+[ -f "$here/serial" ] && "$ANDROID_HOME/platform-tools/adb" -s "$(cat "$here/serial")" emu kill >/dev/null 2>&1
+sleep 2
+[ -f "$here/claim" ] && rmdir "$(cat "$here/claim")" 2>/dev/null
+exit 0

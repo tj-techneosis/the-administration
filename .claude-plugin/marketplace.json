@@ -1,0 +1,16 @@
+{
+  "name": "tj-techneosis",
+  "owner": {
+    "name": "tj-techneosis"
+  },
+  "metadata": {
+    "description": "Tools for Claude Code, from tj-techneosis."
+  },
+  "plugins": [
+    {
+      "name": "the-administration",
+      "source": "./plugin",
+      "description": "Contracts for persona agents: place a contract on the running app or on your changes, and the professionals on your project's roster take it, each in a walled room."
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+/administration
+*.test
+__pycache__/
+/cmd/administration/administration

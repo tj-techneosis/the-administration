@@ -1,0 +1,18 @@
+#!/bin/sh
+# slugify: turn titles into URL slugs.
+#   slugify "Some Title"            prints some-title
+#   slugify --file IN -o OUT        one slug per line of IN, into OUT
+# Slugs are lowercase letters, digits and single dashes, at most 60
+# characters, with no dash at either end. Blank lines are skipped.
+slug() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-*$//' | cut -c1-60
+}
+if [ "${1:-}" = "--file" ]; then
+  in=$2 out=$4
+  : > "$out"
+  [ -f "$in" ] || exit 0
+  while IFS= read -r line; do slug "$line" >> "$out"; echo >> "$out"; done < "$in"
+  exit 0
+fi
+[ $# -eq 1 ] || { echo "usage: slugify TITLE | slugify --file IN -o OUT" >&2; exit 2; }
+slug "$1"; echo

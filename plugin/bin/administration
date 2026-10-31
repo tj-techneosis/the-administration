@@ -1,0 +1,15 @@
+#!/bin/sh
+# The plugin puts this on the Bash tool's PATH (in VS Code as well, where a
+# shell profile's PATH may not reach). It runs the installed binary, or says
+# how to install it.
+for b in "${ADMINISTRATION_REAL:-}" "$HOME/.local/bin/administration" /opt/homebrew/bin/administration /usr/local/bin/administration; do
+  if [ -n "$b" ] && [ -x "$b" ] && [ "$b" != "$0" ]; then
+    exec "$b" "$@"
+  fi
+done
+cat >&2 <<'MSG'
+administration: not installed. Once, in a terminal:
+  git clone https://github.com/tj-techneosis/the-administration ~/.local/share/the-administration
+  ~/.local/share/the-administration/install.sh
+MSG
+exit 1

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Builds the tool into the room for its sandboxed equipment: the tool as it
+# is in MAIN. No server, no data.
+set -e
+cp -R "$ADMINISTRATION_MAIN/bin" "$ADMINISTRATION_EQUIPMENT_DIR/bin"

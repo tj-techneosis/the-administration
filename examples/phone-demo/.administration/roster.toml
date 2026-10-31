@@ -1,0 +1,16 @@
+[project]
+name = "phone-demo"
+
+# The hooks reach the person's own Android SDK and AVD: the Administration
+# ships no emulator.
+[setup]
+pass_env = ["ANDROID_HOME", "ANDROID_AVD_HOME", "ADMINISTRATION_AVD"]
+
+[equipment.phone]
+about = "An Android phone (an emulator, fresh for you) with the Notes app open in its browser. You see its screen and touch it: tap, swipe, type on its keyboard, and its Back and Home keys."
+setup = ".administration/equipment/phone/start"
+teardown = ".administration/equipment/phone/stop"
+server = "screen"
+driver = ".administration/equipment/phone/driver"
+args = ["{SERIAL}"]
+keys = ["Back", "Home", "Enter", "Tab", "Backspace", "AppSwitch"]

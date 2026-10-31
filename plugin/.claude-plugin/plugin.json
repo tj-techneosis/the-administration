@@ -1,0 +1,9 @@
+{
+  "name": "the-administration",
+  "description": "Manages your specialised agents: place a contract, the professionals on your roster take it, each walled in its own room, and the Director casts, trains and keeps the roster.",
+  "version": "0.3.0",
+  "author": {
+    "name": "tj-techneosis"
+  },
+  "license": "MIT"
+}

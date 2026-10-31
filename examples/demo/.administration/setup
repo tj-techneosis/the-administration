@@ -1,0 +1,12 @@
+#!/bin/sh
+# Builds a room for the demo: a copy of the app, its server on the room's web
+# port, and the manifest. A real project does the same with its own stack.
+set -e
+cp -R "$ADMINISTRATION_MAIN/app" "$ADMINISTRATION_APP/app"
+cd "$ADMINISTRATION_APP/app"
+python3 server.py "$ADMINISTRATION_PORT_WEB" >"$ADMINISTRATION_APP/server.log" 2>&1 </dev/null &
+cat > "$ADMINISTRATION_MANIFEST" <<JSON
+{"url": "http://127.0.0.1:$ADMINISTRATION_PORT_WEB/", "origins": [], "data": "seed",
+ "roles": {"member": {"email": "member@example.com", "password": "pw-member"},
+           "staff": {"email": "staff@example.com", "password": "pw-staff"}}}
+JSON

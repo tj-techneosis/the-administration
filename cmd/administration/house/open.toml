@@ -1,0 +1,34 @@
+# The rooms every roster starts with open. The framework hires nobody: each
+# project trains its own professionals (the Director, /hire) and these are
+# the first suggestions. A room closes once someone on the roster holds a
+# professional of that name.
+
+[[open]]
+name = "first-timer"
+says = "a newcomer on a phone who has read nothing"
+knows = ["onboarding", "mobile", "copy"]
+
+[[open]]
+name = "every-screen"
+says = "every device, size and orientation"
+knows = ["mobile", "responsive", "layout"]
+
+[[open]]
+name = "keyboard-and-reader"
+says = "keyboard only, then a screen reader"
+knows = ["accessibility"]
+
+[[open]]
+name = "staff-under-pressure"
+says = "the people who run the place, busy and interrupted"
+knows = ["admin", "workflow"]
+
+[[open]]
+name = "failure-path"
+says = "slow networks, double submits, timeouts, partners that don't answer"
+knows = ["errors", "resilience", "forms"]
+
+[[open]]
+name = "change-reader"
+says = "reads a diff for what it breaks around it"
+knows = ["code-review", "diff"]
