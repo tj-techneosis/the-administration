@@ -419,7 +419,7 @@ func writeSummary(c *contract, dir string) (string, error) {
 	if len(c.Kept) > 0 {
 		fmt.Fprintf(&b, "\nOn the roster now, for the next contract (one-off specialists who found something; commit their files to share them, delete one to let it go):\n")
 		for _, n := range c.Kept {
-			fmt.Fprintf(&b, "- %s: .administration/professionals/%s.md\n", n, n)
+			fmt.Fprintf(&b, "- %s: %s\n", n, houseFile(c.Project, "professionals", n+".md"))
 		}
 	}
 	if len(c.NotKept) > 0 {

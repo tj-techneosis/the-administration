@@ -41,8 +41,8 @@ func cmdEquipmentCheck(args []string) error {
 		return err
 	}
 	if eq.NeedsApp {
-		if st, err := os.Stat(filepath.Join(project, ".administration", "setup")); err != nil || st.Mode()&0o111 == 0 {
-			return usageError{fmt.Sprintf("%s reads the app's room (needs_app), and %s has no executable .administration/setup to build one (see the README, A House of Your Own)", eqName, project)}
+		if _, _, err := houseSetup(project, false); err != nil {
+			return usageError{fmt.Sprintf("%s reads the app's room (needs_app), and %v", eqName, err)}
 		}
 	}
 	books, err := booksDir()

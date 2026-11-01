@@ -17,7 +17,7 @@ import (
 // review tunes the professional who should have caught it, so the kind of
 // thing is a finding next time, and apply files the miss away as tuned.
 
-func missedDir(project string) string { return filepath.Join(project, ".administration", "missed") }
+func missedDir(project string) string { return filepath.Join(houseDir(project), "missed") }
 
 var missedName = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9]+)?\.md$`)
 
@@ -83,7 +83,7 @@ func cmdMissed(args []string) error {
 		return err
 	}
 	fmt.Printf("Noted %s. The Director tunes for it on its next review: administration director review\n",
-		filepath.Join(".administration", "missed", name))
+		houseFile(project, "missed", name))
 	return nil
 }
 

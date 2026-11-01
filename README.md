@@ -233,13 +233,37 @@ that persona a regular.
   candidates/      the Director's trainees, waiting for /hire
 ```
 
+**A house kept off the premises.** Some projects can't carry
+`.administration/` in their repo. Keep the same folder on the machine
+instead, under `~/.config/administration/projects/` at the path of the
+checkout's `origin` remote: `git@github.com:acme/shop.git` (or
+`https://github.com/acme/shop`) lives at
+`~/.config/administration/projects/github.com/acme/shop/`.
+`$ADMINISTRATION_PROJECTS` moves the whole shelf. Every clone and
+worktree of that remote finds the same house; one with its own
+`.administration/` always uses that. `administration roster` says which
+house a checkout lives in, and room-check and place, finding neither,
+name both places they looked. A kept house is the person's to back up or
+share: nothing commits it.
+
+Paths in `roster.toml` (handout files, equipment programs, a critic's
+`file`) follow one rule wherever the house is: one that starts with
+`.administration/` is in the house; any other is the project's, or the
+house's when the project has nothing there. So a roster written for the
+repo works unchanged when the house moves, and `equipment/phone/driver`
+works in both.
+
 **`setup MAIN APP`** runs as you, outside every wall, with a short
 environment: `PATH`, `HOME`, your locale, mise's settings, and only the extra
 variables the project names in `roster.toml` (`[setup] pass_env =
 ["DOCKER_HOST"]`). Your tokens don't reach it unless you pass them. It must:
 
 - build a working copy of MAIN at APP (`$ADMINISTRATION_APP`; the room it's in
-  is `$ADMINISTRATION_ROOM`) without touching MAIN;
+  is `$ADMINISTRATION_ROOM`) without touching MAIN. The house itself is
+  `$ADMINISTRATION_HOUSE`, for setup, teardown and equipment alike: reach
+  the files beside the hook (a seed script, a helper) through it, never
+  through `$ADMINISTRATION_MAIN/.administration`, so the hook works
+  wherever the house is kept;
 - start the app on the ports it's given, never on the defaults:
   `ADMINISTRATION_PORT_WEB`, `_API`, `_DB` and `_AUX` (all four are also in
   `ADMINISTRATION_PORTS`). Anything it leaves running stays in its process

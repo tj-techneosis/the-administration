@@ -130,7 +130,7 @@ func shellQuote(s string) string {
 }
 
 // cmdHire puts a professional on the project's roster: a file the Director
-// wrote (by name, from .administration/candidates/) or any path. It must pass
+// wrote (by name, from the house's candidates/) or any path. It must pass
 // the same checks the roster applies, tags included.
 func cmdHire(args []string) error {
 	f, err := parseFlags(args, map[string]bool{"project": true, "replace": false, "from": true})
@@ -160,17 +160,21 @@ func cmdHire(args []string) error {
 		}
 		src = filepath.Join(dir, src, "hire.md")
 	} else if !strings.ContainsAny(src, "/.") {
-		src = filepath.Join(project, ".administration", "candidates", src+".md")
+		src = filepath.Join(houseDir(project), "candidates", src+".md")
 	}
 	p, dst, err := hireFile(project, src, f.has("replace"))
 	if err != nil {
 		return err
 	}
-	if within(src, filepath.Join(project, ".administration", "candidates")) {
+	if within(src, filepath.Join(houseDir(project), "candidates")) {
 		_ = os.Remove(src)
 	}
-	fmt.Printf("%s is on the roster (%s). Knows: %s. Commit the file to share them with the team.\n",
-		p.Name, rel(project, dst), strings.Join(p.Knows, ", "))
+	share := "Commit the file to share them with the team."
+	if !within(dst, project) {
+		share = "The house is kept on this machine, so it's not in the repo to commit."
+	}
+	fmt.Printf("%s is on the roster (%s). Knows: %s. %s\n",
+		p.Name, shown(project, dst), strings.Join(p.Knows, ", "), share)
 	fireHooks("hired", project, map[string]any{"name": p.Name, "file": dst, "kind": p.Kind, "knows": p.Knows})
 	return nil
 }
@@ -180,15 +184,15 @@ func cmdHire(args []string) error {
 func hireFile(project, src string, replace bool) (*professional, string, error) {
 	b, err := os.ReadFile(src)
 	if err != nil {
-		return nil, "", fmt.Errorf("no candidate at %s (the Director writes them to .administration/candidates/)", src)
+		return nil, "", fmt.Errorf("no candidate at %s (director apply puts them in %s)", src, houseFile(project, "candidates"))
 	}
 	p, err := parseProfessional(b, src, "project", false)
 	if err != nil {
 		return nil, "", fmt.Errorf("%s isn't ready to hire: %v", src, err)
 	}
-	dst := filepath.Join(project, ".administration", "professionals", p.Name+".md")
+	dst := filepath.Join(houseDir(project), "professionals", p.Name+".md")
 	if _, err := os.Stat(dst); err == nil && !replace {
-		return nil, "", fmt.Errorf("%s is already on the roster (%s); pass --replace to retrain them", p.Name, rel(project, dst))
+		return nil, "", fmt.Errorf("%s is already on the roster (%s); pass --replace to retrain them", p.Name, shown(project, dst))
 	}
 	v, err := loadRoster(project)
 	if err != nil {

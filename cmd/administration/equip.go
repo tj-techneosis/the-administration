@@ -253,6 +253,7 @@ func equipmentEnv(c *contract, ci *castItem, name string, s *status, v map[strin
 		"ADMINISTRATION_CONTRACT="+c.ID,
 		"ADMINISTRATION_PROFESSIONAL="+ci.Name,
 		"ADMINISTRATION_MAIN="+c.Project,
+		"ADMINISTRATION_HOUSE="+houseDir(c.Project),
 		"ADMINISTRATION_ROOM="+s.Room,
 		"ADMINISTRATION_EQUIPMENT="+name,
 		// Where a sandboxed equipment's setup puts the build its commands run.
@@ -378,6 +379,7 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 				}
 			}
 			// Where it says the device is lost, for the worker to record.
+			env["ADMINISTRATION_HOUSE"] = houseDir(c.Project)
 			env["ADMINISTRATION_EQUIPMENT_LOST"] = filepath.Join(room, "equipment-lost")
 			servers[key] = map[string]any{"command": self, "args": dargs, "env": env}
 			tools = driveToolNames()

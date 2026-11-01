@@ -294,7 +294,21 @@ their findings as tested.
    `room-check --changes --data <name>`: it also builds the app without
    the changes, as the contract's users get, and a set that needs the new
    code fails there in a minute instead of in the contract.
-6. Remind them to commit `.administration/`.
+6. Remind them to commit `.administration/`. When it can't go in the repo
+   (the person says so), keep the same folder on the machine instead:
+   `~/.config/administration/projects/<host>/<owner>/<repo>/`, named by
+   the checkout's `origin` remote (`github.com/acme/shop`;
+   `$ADMINISTRATION_PROJECTS` moves the shelf). Every clone and worktree of
+   that remote finds it, and a project's own `.administration/` always
+   comes first. Everything the steps above write goes there once the
+   folder exists, so make it before the first `director apply`, and
+   `administration roster` names the house a checkout uses. A hook reaches
+   the files beside it through `$ADMINISTRATION_HOUSE` (the house's
+   absolute path, given to setup, teardown and equipment wherever the house
+   is), never `$ADMINISTRATION_MAIN/.administration`. In `roster.toml`, a
+   path starting `.administration/` is the house's; any other is the
+   project's, or the house's when the project has no such file. There's
+   nothing to commit for a kept house.
 
 ## Training and hiring (the Director)
 

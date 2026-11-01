@@ -43,8 +43,9 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	}
 	// The hook and the files beside it are the project's current ones (a
 	// seed script, a helper): an older checkout has none or old ones.
+	// It's copied in where the project's own would be, wherever the house is.
 	_ = os.RemoveAll(filepath.Join(src, ".administration"))
-	if out, err := exec.Command("cp", "-a", filepath.Join(c.Project, ".administration"), filepath.Join(src, ".administration")).CombinedOutput(); err != nil {
+	if out, err := exec.Command("cp", "-a", houseDir(c.Project), filepath.Join(src, ".administration")).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("the before checkout's .administration: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	s.BeforeSrc = src
@@ -72,7 +73,7 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	defer cancel()
 	// The hook is the project's current one: an older checkout may not have
 	// it, and it's the person's to trust either way.
-	cmd := exec.Command(filepath.Join(c.Project, ".administration", "setup"), src, app)
+	cmd := exec.Command(filepath.Join(houseDir(c.Project), "setup"), src, app)
 	cmd.Dir = src
 	cmd.Env = append(beforeEnv(roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name)), src), "ADMINISTRATION_SIDE=before")
 	cmd.Stdout, cmd.Stderr = logf, logf
@@ -127,7 +128,7 @@ func teardownBefore(c *contract, dir, name string, s *status) {
 		return
 	}
 	pd := filepath.Join(dir, name)
-	hook := filepath.Join(c.Project, ".administration", "teardown")
+	hook := filepath.Join(houseDir(c.Project), "teardown")
 	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 {
 		ports, _ := os.ReadFile(filepath.Join(pd, "ports-before"))
 		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)

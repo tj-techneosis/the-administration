@@ -17,7 +17,7 @@ import (
 const dossierLimit = 6 << 10
 
 func dossierPath(project, name string) string {
-	return filepath.Join(project, ".administration", "dossiers", name+".md")
+	return filepath.Join(houseDir(project), "dossiers", name+".md")
 }
 
 // readDossier is the dossier, cut at the limit (the Director's job is to stay

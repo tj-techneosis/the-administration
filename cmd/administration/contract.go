@@ -407,9 +407,8 @@ func cmdPlace(args []string) error {
 		}
 	}
 	if webUsers > 0 {
-		setup := filepath.Join(project, ".administration", "setup")
-		if st, err := os.Stat(setup); err != nil || st.Mode()&0o111 == 0 {
-			return usageError{fmt.Sprintf("browser professionals need a room, and %s has no executable .administration/setup (see the README, A House of Your Own)", project)}
+		if _, _, err := houseSetup(project, false); err != nil {
+			return usageError{"browser professionals need a room, and " + err.Error()}
 		}
 	}
 	// The books' lock is held until the workers are started, so two
@@ -940,7 +939,7 @@ func keepOneOffs(c *contract, dir string) (kept, notKept []string) {
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
-		dst := filepath.Join(c.Project, ".administration", "professionals", p.Name+".md")
+		dst := filepath.Join(houseDir(c.Project), "professionals", p.Name+".md")
 		if _, err := os.Stat(dst); err == nil {
 			notKept = append(notKept, p.Name+": already on the roster")
 			continue
@@ -1063,7 +1062,7 @@ func dataSet(project, name, with string) (string, error) {
 		}
 		sort.Strings(names)
 		if len(names) == 0 {
-			return "", usageError{fmt.Sprintf("--data %s: the project declares no data sets ([data.<name>] in .administration/roster.toml)", name)}
+			return "", usageError{fmt.Sprintf("--data %s: the project declares no data sets ([data.<name>] in %s)", name, houseFile(project, "roster.toml"))}
 		}
 		return "", usageError{fmt.Sprintf("--data %s: not one of the project's data sets (%s)", name, strings.Join(names, ", "))}
 	}
@@ -1081,9 +1080,9 @@ func handoutRules(project string) string {
 	b.WriteString("\n## The project's own rules\n\nThese are the project's rules, whole: work by them. A finding that breaks one is a finding, whatever it looks like; name the rule. Where your persona above and these rules disagree (a screen size, a device, a name for something), the rules are the project's current word: follow them, and say in your report that they disagreed.\n")
 	total := 0
 	for _, f := range files {
-		abs := filepath.Join(project, f)
+		abs := housePath(project, f)
 		st, err := os.Lstat(abs)
-		if err != nil || !st.Mode().IsRegular() || !within(abs, project) || secret(filepath.Base(f)) {
+		if err != nil || !st.Mode().IsRegular() || filepath.IsAbs(f) || !inProject(project, abs) || secret(filepath.Base(f)) {
 			continue
 		}
 		body, err := os.ReadFile(abs)

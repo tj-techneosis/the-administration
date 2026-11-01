@@ -209,6 +209,9 @@ func roomEnv(c *contract, name, room, ports, mf, tag string) []string {
 		// The project itself, even when MAIN is the release check's before
 		// clone (where a shared install like node_modules isn't).
 		"ADMINISTRATION_PROJECT="+c.Project,
+		// The project's house, where the hook's own files are (a seed
+		// script, a helper): in the project or kept on the machine.
+		"ADMINISTRATION_HOUSE="+houseDir(c.Project),
 		// The room, and the folder in it the app goes in (the room's app/,
 		// or before/ for a release check's other side).
 		"ADMINISTRATION_ROOM="+filepath.Dir(room),
@@ -279,7 +282,7 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	defer logf.Close()
 	sctx, cancel := context.WithTimeout(ctx, setupTimeout())
 	defer cancel()
-	cmd := exec.Command(filepath.Join(c.Project, ".administration", "setup"), c.Project, app)
+	cmd := exec.Command(filepath.Join(houseDir(c.Project), "setup"), c.Project, app)
 	cmd.Dir = c.Project
 	cmd.Env = roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name))
 	cmd.Stdout, cmd.Stderr = logf, logf
@@ -473,7 +476,7 @@ func teardown(c *contract, dir, name string, s *status) {
 		stopEquipment(c, ci, pd, readTag(dir, name), s)
 	}
 	teardownBefore(c, dir, name, s)
-	hook := filepath.Join(c.Project, ".administration", "teardown")
+	hook := filepath.Join(houseDir(c.Project), "teardown")
 	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 && (ci == nil || !ci.NoBrowser && ci.Kind != "critic") {
 		ports, _ := os.ReadFile(filepath.Join(pd, "ports"))
 		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -504,7 +507,7 @@ func teardown(c *contract, dir, name string, s *status) {
 		open = listening(open)
 	}
 	if len(open) > 0 {
-		s.Leftovers = fmt.Sprintf("still listening after teardown: %v (check .administration/teardown)", open)
+		s.Leftovers = fmt.Sprintf("still listening after teardown: %v (check %s)", open, houseFile(c.Project, "teardown"))
 	}
 	s.TornDown = true
 }
