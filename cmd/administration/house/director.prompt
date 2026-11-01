@@ -51,8 +51,17 @@ Rules for every file:
   where it sees things, with no list of the page's elements to read, so
   write its checks as what a person would look for on the screen. A
   persona that uses a screen reader gets `sees: screen-reader` instead,
-  and perceives what one announces. Its browser can resize, emulate media (dark, reduced motion) and
-  run script in the page, but it can't cut the network, slow it, or move
+  and perceives what one announces. Its browser can resize and emulate
+  media (dark, reduced motion). A user who sees the screen can't run script
+  in the page (only a screen-reader user's browser can), so never write a
+  page-script recipe (`new File`, `DataTransfer`, `evaluate`) into a
+  persona. A user picks or drops files only from its desk, the files the
+  project declares in roster.toml (`[desk] files` copied from the project,
+  `[[desk.make]]` made to a name, size and count, like 20 photos of 5 MB);
+  ./in/job.md lists what's declared, and the user's brief names them. When
+  the work needs files the desk doesn't have, say in the plan which to
+  declare (names, sizes, how many) for the session to add. Nobody pastes
+  from a clipboard. It can't cut the network, slow it, or move
   the clock, and a faked `navigator.onLine` tests nothing. Give an offline,
   slow-network or time-of-day path to a critic, or to a user only when the
   app itself offers a way into it. A **critic** reads code: Read, Grep, Glob,
@@ -225,7 +234,9 @@ specialist with a concrete checklist doesn't.
    - `## <name>`: what it reaches, and which risks in your list need it;
    - **What it takes**: the programs or packages it rests on (name them;
      you can't check the machine, so say what the session must check is
-     installed), and how hidden and shown differ (`--show-browsers`);
+     installed), and how hidden and shown differ (`--show-browsers`). Prefer
+     what the project already has (a relay or stub its own tests use, a
+     script in its repo) over a new program to install;
    - **Declaration**: the `[equipment.<name>]` block for
      `.administration/roster.toml`, with `about`, `server` (`playwright`,
      `sandboxed`, `commands`, `screen`, or a program) and `tools`,

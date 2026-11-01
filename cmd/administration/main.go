@@ -15,6 +15,8 @@ const (
 	exitError   = 1 // bad usage, unknown names, a broken file
 	exitStart   = 2 // a room or a professional failed to start, or failed at the work (a user whose browser never worked)
 	exitRefused = 3 // refused by the Rules
+	exitBusy    = 4 // not enough rooms free now: place it again once other contracts' users are back
+	exitNewer   = 5 // upgrade --check: a newer release (or upstream commit) is out
 )
 
 const usage = `administration: contracts for persona agents.
@@ -22,10 +24,12 @@ const usage = `administration: contracts for persona agents.
   administration guide
       how a Claude session uses the Administration (the plugin's skill
       reads it from here, so it always matches this version)
-  administration upgrade [--no-browser]
-      install the latest release, or pull and rebuild your checkout
+  administration upgrade [--no-browser] | upgrade --check
+      install the latest release (with the installer your release came
+      with), or pull and rebuild your checkout
       (~/.local/share/the-administration, or $ADMINISTRATION_SRC); open
-      sessions use the new version from their next task
+      sessions use the new version from their next task. --check only
+      asks: exit 0 up to date, 5 a newer one is out, 1 couldn't tell
   administration roster [--json] [--project DIR] [--match tag,tag]
       who's hired, where from, and the open rooms; --match is the Director's
       first draft of a cast, and the tags nobody knows
@@ -40,7 +44,10 @@ const usage = `administration: contracts for persona agents.
       ADMINISTRATION_WATCH=off, doesn't); --show-browsers opens users'
       browsers as windows on your screen. --with brings a Director cast's
       specialists; --brief gives one their own task on top of their
-      persona's checks, --only instead of them
+      persona's checks, --only instead of them. Exits 4 when the rooms it
+      needs are taken (it names who holds them): place it again once
+      they're back. Exits 2 when someone fails in its first seconds (3 if
+      any was refused); the contract is placed all the same
   administration hire NAME|FILE [--replace] | hire --from CONTRACT NAME
       put a professional the Director trained on the project's roster, or
       keep a one-off specialist from a contract
@@ -50,9 +57,14 @@ const usage = `administration: contracts for persona agents.
       while others still work
   administration resume ID NAME [--coins 10m]
       a new contract for one professional on what contract ID left undone:
-      what they couldn't reach and the steps of their plan never answered
+      what they couldn't reach and the steps of their plan never answered,
+      or their whole part when they wrote nothing down. Places it as
+      place does, so it exits 2, 3 or 4 as place would. A part is resumed
+      once: again, it names the contract that picked it up, to resume
+      from that one
   administration status [ID] [--json]
-      who's working, who's back
+      who's working, who's back; with no ID, every open contract and how
+      many rooms are free
   administration close ID [--keep]
       stop anyone still working, merge the reports, clear the rooms;
       prints the summary's path
@@ -68,11 +80,13 @@ const usage = `administration: contracts for persona agents.
   administration watch ID [NAME] [--panes]
       follow what each professional does as they do it; --panes gives each
       one a pane in Herdr or tmux, or wherever the watch hook puts them
-  administration director cast TARGET... [--changes [--base REF]] | train WHO... [--contract ID]
+  administration director cast TARGET... [--changes [--base REF]] [--amend RUN] | train WHO... [--contract ID]
                          | onboard [--agents DIR] | review
                          [--project DIR] [--model M] [--coins 10m]
       cast: specialists for one contract, from reading the code in scope;
-      place them with --with RUN
+      place them with --with RUN. --amend RUN starts from an earlier cast,
+      keeps what it got right and changes only what's new (equipment it
+      asked for, now declared), for a fraction of a new one
       the Director, walled like a professional: writes only into its run folder
   administration director show RUN | apply RUN
       what a run wrote (a cast's plan in full) and the checks it passed;
@@ -80,17 +94,21 @@ const usage = `administration: contracts for persona agents.
   administration missed WHAT... [--contract ID] [--by NAME] [--project DIR]
       something a professional saw and passed over; the Director's next
       review tunes whoever should have caught it (apply puts the tuning in)
-  administration verify ID [--batch 12] [--coins 10m] [--model M]
+  administration verify ID [--batch 12 (1 to 50)] [--coins 10m] [--model M]
       check a closed contract's unchecked findings in the house: walled
       verifiers read the project's code (nothing else) and record confirmed,
-      likely or false for each, with the line that decided it; your own
-      verdicts replace theirs
+      likely or false for each, with the line that decided it, and a
+      corrected mark where one's wrong (an OLD marked NEW); it also decides
+      the links the matcher proposed, also or not_also. Your own verdicts
+      replace theirs
   administration verdicts ID FILE|-
       record each finding's check, adding to earlier ones:
       {"name": [{"finding": 1, "verdict": "confirmed|likely|false", "why": "...",
-                 "also": ["ID NAME #N"], "not_also": ["ID NAME #N"]}]}
-      also/not_also confirm or reject a link to the same bug in another
-      contract
+                 "tag": "NEW|CHANGE|OLD|UNMARKED", "also": ["ID NAME #N"], "not_also": ["ID NAME #N"]}]}
+      tag corrects a finding's mark and files it there (left out, an
+      earlier one stands; UNMARKED for none; a false finding keeps its
+      own); also/not_also confirm or reject a link to the same bug in
+      another contract
   administration stats [--project DIR] [--json]
       each professional's record: runs, findings, how many held up, coins used
   administration prune [--keep 10] [--older 30d] [--dry-run]
@@ -100,7 +118,9 @@ const usage = `administration: contracts for persona agents.
   administration version
 
 Exit codes: 0 done, 1 error, 2 a room or professional failed (to start,
-or a user whose browser never worked), 3 refused by the Rules.
+or a user whose browser never worked), 3 refused by the Rules, 4 not enough
+rooms free for it now (place it again once other contracts' users are back),
+5 upgrade --check: a newer version is out.
 `
 
 type usageError struct{ msg string }
@@ -111,6 +131,12 @@ func (e usageError) Error() string { return e.msg }
 type refusal struct{ msg string }
 
 func (e refusal) Error() string { return e.msg }
+
+// busy is a contract that would fit, but not now: other contracts hold too
+// many of the rooms. It exits 4, so a script can wait and place it again.
+type busy struct{ msg string }
+
+func (e busy) Error() string { return e.msg }
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -133,11 +159,15 @@ func run(args []string) int {
 	case "version", "--version":
 		fmt.Println("administration", version)
 	case "upgrade":
-		err = cmdUpgrade(args[1:])
+		code, err = cmdUpgrade(args[1:])
 	case "guide":
 		// The skill's instructions, from the binary they describe: the plugin
 		// only points here, so upgrading the tool upgrades them.
-		fmt.Printf("<!-- administration %s: how to use it. Follow this for the task at hand. -->\n\n%s", version, guide)
+		// Where its README is on this machine, so "the README's" section is
+		// a file to open, not one to search the disk for.
+		readme := readmePath()
+		g := strings.NewReplacer("the README's ", "the README's ("+readme+") ", "(README, ", "(the README, "+readme+", ").Replace(guide)
+		fmt.Printf("<!-- administration %s: how to use it. Follow this for the task at hand. -->\n\n%s", version, g)
 	case "roster":
 		err = cmdRoster(args[1:])
 	case "place":
@@ -176,6 +206,9 @@ func run(args []string) int {
 		err = cmdScreen(args[1:])
 	case "_equip":
 		err = cmdEquip(args[1:])
+	case "_house":
+		// Internal: the record's tools for a professional (record.go).
+		err = cmdHouse(args[1:])
 	case "missed":
 		err = cmdMissed(args[1:])
 	case "_drive":
@@ -201,6 +234,8 @@ func run(args []string) int {
 			return exitRefused
 		case startError:
 			return exitStart
+		case busy:
+			return exitBusy
 		}
 		return exitError
 	}

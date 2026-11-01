@@ -47,7 +47,12 @@ changes" into CLI calls, and checks findings against the code afterwards.
   output, the persona as an appended system prompt, and a generated settings
   file. Users: no built-in tools, Playwright only (an allowlist of its
   tools), working directory = the room. Critics: `Read,Grep,Glob`, working
-  directory = the project, the diff handed in with `--add-dir`.
+  directory = the project, the diff handed in with `--add-dir`: whole, and
+  split by file with an index (`changes/INDEX.md`, each file's lines added
+  and removed), since every turn re-reads all that came before it and the
+  whole diff read once was the largest single thing critics re-read. The
+  brief also has them batch the reads they already know they need into one
+  turn. Verifiers and the Director get the same split.
 - **Cleanup** (`procs.go`): signals only processes in the room's recorded
   process groups that work in or name the room, plus anything whose command
   line names the room or the professional's books. Marks must be paths
@@ -87,7 +92,13 @@ changes" into CLI calls, and checks findings against the code afterwards.
   Critics have a third mark, `CHANGE:`, for the change's own text being
   wrong (a comment, document or test) with nothing behaving differently;
   NEW needs the before shown. The summary leads with NEW, then CHANGE,
-  then OLD.
+  then OLD. A mark counts in upper case as its own word, or in any case
+  with a colon ("New:"); a check that finds it wrong gives the right one
+  (`tag` in the verdict, UNMARKED for none) and the finding moves there,
+  saying so. A later verdict without a tag keeps it; a session's
+  correction outranks a verifier's; a finding checked false shows the mark
+  it was written with; on a contract not on changes there are no marks to
+  correct.
 - **Handout**: `[handout] files` in `roster.toml` are copied into each
   user's desk (inside the project, regular files, no secret names, 256 KB
   in all), and the user gets `Read`, allowed for its desk only; anything
@@ -95,16 +106,46 @@ changes" into CLI calls, and checks findings against the code afterwards.
   refused (live probe 2026-10-25: the app's `.env.local`, its source,
   `/etc`, the books and other rooms were all refused).
 - **Coins**: a wall-clock limit. At the limit the professional's process
-  group gets SIGTERM, then SIGKILL after 10 s. Findings are parsed from the
-  stream as they arrive (`FINDING:` and `UNREACHED:` lines), so a kill loses
-  only the closing prose.
+  group gets SIGTERM, then SIGKILL after 10 s. Findings are taken from the
+  stream as they arrive, so a kill loses only the closing prose.
+- **The record** (`record.go`): every professional has the house's own
+  tools for it, `record_finding` (what, where, a mark, evidence),
+  `record_plan`, `record_step` and `record_unreached`, from a server that
+  only acknowledges. The worker reads each call's parts from the stream and
+  makes them the lines they stand for, so they're folded and counted
+  exactly as written ones are; a `FINDING:`, `PLAN 1:`, `COVERED 1` or
+  `UNREACHED:` line is still read the same way. Either way it keeps one
+  record, `findings.jsonl` beside the report, a line per finding,
+  unreachable thing or one not counted, in the order filed, with its
+  number, mark, whether it came from a tool or the text, and when. It's
+  written as findings come in. The summary, verify, verdicts and links go
+  by it (a finding is "name #n", its number there); a contract from before
+  it was kept is read from its report, as it always was.
 - **The brief** names everyone else on the contract, with their own task if
   they have one, and asks each to keep to their part: the target is shared,
   the work isn't. `--brief` adds a task to the persona's own checks;
   `--only` replaces them, for a smoke test that shouldn't grow into a run.
   `resume` is `place` with `--only` the professional's unreached items and
-  unanswered plan steps, and the persona exactly as it was placed (not as
-  its file says today).
+  unanswered plan steps (or their whole part, when they wrote nothing
+  down), and the persona exactly as it was placed (not as its file says
+  today). A part is resumed once: a second resume names the contract that
+  picked it up, and what that one leaves is resumed from it. A part the
+  Rules refused isn't resumed; it would be refused again.
+- **Desk files** (`desk.go`): a user uploads only what a person would
+  have on their computer, and only what the project put there: `[desk]
+  files` copied from the project or its house, or `[[desk.make]]` made to
+  a size (real images, PDFs, text, padded after the format's end, each
+  one different). Each room has its own copies in `desk/files`. The
+  screen's `browser_choose_file` and `browser_drop_file` take names only;
+  the screen turns a name into that copy (no path, no link out) and calls
+  Playwright's upload, or drops it at a point with the files in the drag
+  event, so the tools that read any path stay off.
+- **Send-backs**: a professional that says it's done with its plan
+  unanswered, or done early, is sent back (at most four times). Across
+  this house's own contracts the answers after a send-back used about a
+  third of the tokens and found about a third of the findings, confirmed
+  as often, so they stay; `status` says how many times each one was sent
+  back, as each is another answer paid for.
 - **Lost equipment**: the screen's server counts screenshots that fail or
   aren't a picture (a bad tap or an unknown key is the professional's, not
   the device's). At three in a row it answers every call with "lost: stop,
@@ -114,7 +155,10 @@ changes" into CLI calls, and checks findings against the code afterwards.
   when one fails or is refused while others work, so a room that broke in
   a second is heard of then, even one that happened before it started. A
   failure it has returned for once (kept in the contract's `.told`) doesn't
-  end a later wait again.
+  end a later wait again. `place` itself watches for two seconds when
+  there's a room to build, and says who failed in that time the same way
+  (recording them in `.told` too), so a setup hook that exits at once is
+  heard of from the command that started it.
 - **Watch**: reads the same streams from the books and prints each action,
   the first line of what was said, and every marked line, until everyone
   is back. It only reads, so watching can't change the work. `--panes`
@@ -142,7 +186,12 @@ changes" into CLI calls, and checks findings against the code afterwards.
   once: the same claim from several
   professionals (or one, twice) is folded into one line naming each, when
   most of the words match, or more than half do and they cite the same lines
-  of a file. The reports follow without their lists, except for findings
+  of a file. A professional's closing message (where the brief asks for
+  every finding again, and a send-back's answer) keeps a finding out of the
+  count when it shares at least three words and 55% of the shorter one's
+  with one filed along the way, under the same mark, as does a line that
+  says it's a repeat ("already reported", "same as #3"): kept under "Not
+  counted", where a reader still sees it. The reports follow without their lists, except for findings
   folded into another's, kept in their own words so a wrong fold loses
   nothing; their closing prose loses what it restates (the plan and its
   answers, findings marked or under a heading like "What broke"), which
@@ -161,12 +210,20 @@ changes" into CLI calls, and checks findings against the code afterwards.
   trace each finding in the code and answer confirmed, likely or false with
   the line that decided it. The verdicts go into each professional's
   `verdicts.json` marked `by: verifier`, under every name a folded finding
-  carries; a verdict the session recorded is never replaced, and one it
-  records later replaces the verifier's. A verifier that fails keeps its
+  carries, batch by batch as each verifier finishes, so a verify stopped
+  part way keeps what was done; a verdict the session recorded is never
+  replaced, and one it records later replaces the verifier's. The ledger
+  counts a finding folded into another's checked one as checked the same
+  way. A verifier that fails keeps its
   folder (`.verify/N`) and its findings stay unchecked for the next run.
   One verify runs at a time per contract (a lock in its folder). `stats`
   says how many of its checks are a verifier's that nobody has reviewed
-  since, so the numbers don't pass for a person's.
+  since, so the numbers don't pass for a person's. Each finding goes with
+  the text of any finding in another contract the matcher proposed as the
+  same bug, and the verifier says also or not_also from the code; a
+  finding already checked goes back for that alone. Those decisions are
+  recorded like the session's, marked the verifier's, and a session's
+  decision is never replaced by one.
 - **Links between contracts** (`links.go`): at close, contracts on the same
   work (the same project and merge base, or the same target, within a
   week) are found, and one small model call (Haiku, read-only) proposes
@@ -177,15 +234,38 @@ changes" into CLI calls, and checks findings against the code afterwards.
   into both contracts and the decision, with both findings' words, into the
   project's log in the books. The matcher's next call gets the latest of
   those as examples, so it learns the project's vocabulary, and `stats`
-  shows how many of its proposals held. `ADMINISTRATION_MATCH=off` skips
-  it.
+  shows how many of its proposals held; a proposal with no real reason (one
+  word, or the model thinking aloud: "Hmm", "maybe") is dropped. Until a proposal is decided the matcher
+  learns nothing from it, so the summary and `stats` count the undecided.
+  `ADMINISTRATION_MATCH=off` skips it.
 - **Findings that aren't**: a `FINDING:` line that opens with "Held:",
   "Plan 3:", "No issue -" and the like is kept under "Not counted" in the
   report, not counted and never dropped; the word needs a colon or dash
   after it, so "the OK button" and "the plan page" still count. Halfway
   through the purse (if nothing's written yet) and near its end, the
   professional is asked to write down what it has, without being told why:
-  the limit throws away findings kept for the end.
+  the limit throws away findings kept for the end. Each of these, and each
+  send-back, goes in the report under "Told along the way" with when, so a
+  reader can see what it was told; one that ran out, failed or lost its
+  equipment with work left is pointed at `resume`.
+- **Worktrees**: `.administration` isn't committed, so a linked git
+  worktree has none of its own (or only the part a team committed).
+  Wherever it's looked up (`adminDir`), a linked worktree uses its main
+  checkout's when that has one, and one that's a link is followed; every
+  Director job is told where it is and given it to read, and paths shown
+  to the person name where the file really is. The setup hook runs from
+  there with the worktree as `$1` and its working folder. A contract keeps
+  where its house was (`house`), so its teardown still runs after the
+  worktree is removed. A project in a subfolder of a worktree uses the same
+  subfolder of the main checkout. Git knows a main checkout only as the
+  folder its `.git` is in, so the worktrees of a bare repository or one
+  with `--separate-git-dir` keep their own.
+- **Rooms**: at most `ADMINISTRATION_MAX_ROOMS` at once. A contract that
+  needs more than that can never fit, so `place` stops with an error (exit
+  1: split it). One that would fit once other contracts' users are back
+  exits 4, naming the contracts that hold the rooms (a room is free when
+  its user is back and it's torn down, before anyone closes the contract),
+  and `status` says how many rooms are free. A dry run never waits.
 - **Workers**: started directly by `place`, each in a session of its own,
   so they outlive the shell or tool call that placed the contract. The
   worker resets PATH to the placer's.
@@ -252,9 +332,10 @@ changes" into CLI calls, and checks findings against the code afterwards.
   that can't carry it keeps it under `projects/<host>/<owner>/<repo>/` in
   the config folder, found by the checkout's `origin` remote, so a fresh
   clone or a new worktree finds it where a path-keyed one would be lost.
-  The project's own folder always wins, so nothing changes for a project
-  that has one. Every reader and writer goes through one lookup
-  (`houseOf`), hooks get the result as `ADMINISTRATION_HOUSE`, and
+  The project's own folder (or a worktree's main checkout's) always wins,
+  so nothing changes for a project that has one. Every reader and writer
+  goes through one lookup (`adminDir`; `houseOf` says which kind it
+  found), hooks get the result as `ADMINISTRATION_HOUSE`, and
   `roster.toml` paths keep one rule (`.administration/...` is the house;
   anything else the project's, then the house's), so a roster moves without
   edits. The wall doesn't move: the house is read and run by the
@@ -267,16 +348,22 @@ Every professional's `status.json`, every ledger line and every Director
 run's `run.json` keep what claude reports at the end of a session: `turns`,
 `tokens_in`, `tokens_out` and `cost_usd` (Claude Code's estimate at list
 prices; absent when a professional was shown out before it could report).
-Nothing shows them: the budget a person sees is coins, which are time. Anyone
-who wants to track usage can read them from `status --json`, `stats --json`
-or the ledgers in `ledgers/`.
+A session ends once for its brief and once more for each send-back: the
+cost each end reports is the session's so far, but its turns and tokens
+are only that answer's, so those are added up over every end. The
+verifiers and the matcher, whose folders go once they answer, keep theirs
+in the contract's `spend.jsonl`, one line a run; `stats --json` sums them
+under `checking`. Nothing shows them: the budget a person sees is coins,
+which are time. Anyone who wants to track usage can read them from
+`status --json`, `stats --json`, `spend.jsonl` or the ledgers in
+`ledgers/`.
 
 ## Environment
 
 | variable | default | for |
 |---|---|---|
 | `ADMINISTRATION_HOME` | `~/.local/share/administration` | the books |
-| `ADMINISTRATION_ROOMS` | `/Users/Shared/administration`, `/var/tmp/administration-<uid>` | rooms; must be outside home |
+| `ADMINISTRATION_ROOMS` | `/Users/Shared/administration-<uid>` (macOS), `/var/tmp/administration-<uid>` | rooms; must be outside home, and the account's own |
 | `ADMINISTRATION_CLAUDE` | `claude` | the claude binary |
 | `ADMINISTRATION_MAX_ROOMS` | 4 | browser rooms at once |
 | `ADMINISTRATION_SETUP_TIMEOUT` | 15m | the setup hook's limit |

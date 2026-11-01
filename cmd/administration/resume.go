@@ -6,12 +6,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
 // cmdResume places a new contract for one professional on what an earlier
 // one left undone: the things they wrote down as unreached, and the steps
-// of their plan they never answered (equipment lost, out of coins). Same
+// of their plan they never answered (equipment lost, out of coins), or
+// their whole part when they wrote nothing down (failed). Same
 // target, same project, the same changes and data; the task is only those,
 // so they don't spend the new purse on what's already done.
 func cmdResume(args []string) error {
@@ -36,6 +38,25 @@ func cmdResume(args []string) error {
 	if ci == nil {
 		return usageError{fmt.Sprintf("%s isn't on contract %s", name, c.ID)}
 	}
+	if !isDir(c.Project) {
+		return usageError{fmt.Sprintf("contract %s's project, %s, is gone (a worktree removed since?); place a new contract where the work is now", c.ID, c.Project)}
+	}
+	// Twice would put two professionals on the same leftovers: a part is
+	// resumed once, and what that leaves is resumed from it. The books'
+	// resume lock keeps two at once from both getting past this; it's let
+	// go once the new contract is in the books.
+	unlock, err := lockFile(filepath.Join(filepath.Dir(dir), ".resume.lock"))
+	if err != nil {
+		return err
+	}
+	once := sync.OnceFunc(unlock)
+	defer once()
+	if r, working := resumedIn(c.ID, name); r != "" {
+		if working {
+			return usageError{fmt.Sprintf("contract %s already picks up %s's part of %s; wait for it (administration wait %s), then resume from it for whatever it leaves: administration resume %s %s", r, name, c.ID, r, r, name)}
+		}
+		return usageError{fmt.Sprintf("contract %s already picked up %s's part of %s; resume from it for whatever it left: administration resume %s %s", r, name, c.ID, r, name)}
+	}
 	v, err := loadRoster(c.Project)
 	if err != nil {
 		return err
@@ -47,12 +68,18 @@ func cmdResume(args []string) error {
 	if !onRoster {
 		return usageError{fmt.Sprintf("%s isn't on the roster (a one-off of contract %s); keep them first: administration hire --from %s %s", name, c.ID, c.ID, name)}
 	}
-	rp, err := os.ReadFile(filepath.Join(dir, name, "report.md"))
-	if err != nil {
-		return usageError{fmt.Sprintf("%s has no report on contract %s yet; wait for it, or close it", name, c.ID)}
-	}
-	left := append(reportSection(string(rp), "## Could not reach"), reportSection(string(rp), "## Not covered")...)
+	// No report from one still working: wait for it. None from one that
+	// failed (its room never came up) is its whole part again, below.
 	st := readStatus(dir, name)
+	if st.State == "refused" {
+		return usageError{fmt.Sprintf("the Rules refused %s on contract %s (%s); resuming would be refused the same way: fix what was refused, then place it again", name, c.ID, st.Reason)}
+	}
+	rp, err := os.ReadFile(filepath.Join(dir, name, "report.md"))
+	if err != nil && !st.terminal() {
+		return usageError{fmt.Sprintf("%s has no report on contract %s yet; wait for it (administration wait %s)", name, c.ID, c.ID)}
+	}
+	noReport := err != nil
+	left := append(unreachedOf(dir, name), reportSection(string(rp), "## Not covered")...)
 	coins := f.get("coins")
 	if coins == "" {
 		coins = (time.Duration(ci.CoinsMin * float64(time.Minute))).Round(time.Second).String()
@@ -65,7 +92,7 @@ func cmdResume(args []string) error {
 		}
 		task := fmt.Sprintf("Pick up contract %s where you left off. What you did then is done; this is what you couldn't reach, and all of your work now: %s", c.ID, strings.Join(left, "; "))
 		pargs = append(pargs, "--only", name+"="+task)
-	case st.EquipmentLost != "" || st.State == "failed" || st.State == "out":
+	case st.EquipmentLost != "" || st.State == "failed" || st.State == "out" || noReport:
 		// Lost, broken or out of coins before it wrote anything down:
 		// nothing to pick up from, so its whole part again, with its own
 		// task if it had one.
@@ -102,8 +129,14 @@ func cmdResume(args []string) error {
 	if c.ShowBrowsers {
 		pargs = append(pargs, "--show-browsers")
 	}
-	fmt.Printf("Resuming %s from contract %s: %s left undone.\n", name, c.ID, map[bool]string{true: "all of their part", false: fmt.Sprint(len(left))}[left[0] == "all of it"])
-	return cmdPlace(pargs)
+	// Said once it's placed, even when someone failed at once (its error
+	// follows); on a refusal or a full house before that, nothing was.
+	var placed string
+	err = placeContract(pargs, c.ID+" "+name, func(id string) { placed = id; once() })
+	if placed != "" {
+		fmt.Printf("Resumed %s from contract %s: %s left undone.\n", name, c.ID, map[bool]string{true: "all of their part", false: fmt.Sprint(len(left))}[left[0] == "all of it"])
+	}
+	return err
 }
 
 // leadNum is a number a professional put on an item themselves ("2. ...").
@@ -126,4 +159,26 @@ func reportSection(rp, heading string) []string {
 		}
 	}
 	return out
+}
+
+// resumedIn is the contract that resumes name's part of contract id, if
+// one does, and whether name is still working on it there.
+func resumedIn(id, name string) (string, bool) {
+	books, err := booksDir()
+	if err != nil {
+		return "", false
+	}
+	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
+	found := ""
+	for _, f := range files {
+		c, rdir, err := loadContract(filepath.Base(filepath.Dir(f)))
+		if err != nil || c.Resumes != id+" "+name {
+			continue
+		}
+		if c.ClosedAt == nil && !readStatus(rdir, name).terminal() {
+			return c.ID, true
+		}
+		found = c.ID
+	}
+	return found, false
 }

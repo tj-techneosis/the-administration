@@ -26,5 +26,7 @@ for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
   tar -C "$work" -czf "$out/$name.tar.gz" "$name"
   echo "packaged $name.tar.gz"
 done
+# What upgrade --check reads to learn the latest release.
+echo "$version" >"$out/VERSION"
 (cd "$out" && { if command -v sha256sum >/dev/null 2>&1; then sha256sum administration-*.tar.gz; else shasum -a 256 administration-*.tar.gz; fi; } >SHA256SUMS)
 echo "wrote $out/SHA256SUMS"

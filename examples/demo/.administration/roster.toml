@@ -1,0 +1,8 @@
+# Files a user can attach, as from their own computer: made to a size.
+[[desk.make]]
+name = "photo.jpg"
+size = "300KB"
+
+[[desk.make]]
+name = "scan.pdf"
+size = "2MB"

@@ -109,6 +109,9 @@ func TestATagIsAWordOfItsOwn(t *testing.T) {
 		"NEW: the total is wrong": "NEW", "NEW — the total": "NEW", "**NEW** `cart.ts:88`": "NEW", "OLD (both)": "OLD",
 		"CHANGE: the comment": "CHANGE", "NEWLINE at end of file is missing": "", "New users see a blank page": "",
 		"OLDER browsers get nothing": "", "CHANGES to the cart": "",
+		// Any case, with a colon: a "New:" restatement lands with its "NEW:" twin.
+		"New: no word that it worked": "NEW", "**New:** the total": "NEW", "old: both": "OLD", "Change: the comment": "CHANGE",
+		"New users: a blank page": "", "Changed: the cart": "", "Older: both": "",
 	} {
 		if got := findingTag(in); got != want {
 			t.Errorf("findingTag(%q) = %q, want %q", in, got, want)
@@ -129,6 +132,105 @@ func TestTheSummaryKeepsWhatHeldAndDropsRestatements(t *testing.T) {
 	for _, drop := range []string{"PLAN 1", "All findings", "tax is added twice", "the logo", "UNREACHED"} {
 		if strings.Contains(got, drop) {
 			t.Errorf("kept %q:\n%s", drop, got)
+		}
+	}
+}
+
+func TestRepeatsAtTheCloseAreFoldedButNewOnesKept(t *testing.T) {
+	var r report
+	r.scan("FINDING: the upload panel covers the save button\n" +
+		"FINDING: NEW: the save button does nothing on /settings")
+	// The closing message: one paraphrase, one that says it's a repeat in
+	// words no match would catch, one close in words but under another
+	// mark, and one new.
+	r.closing = true
+	r.scan("FINDING: the docked panel hides the save button\n" +
+		"FINDING: the refund note (already reported)\n" +
+		"FINDING: OLD: Help and README disagree on the timeout\n" +
+		"FINDING: the export button downloads an empty file")
+	r.closing = false
+	// The paraphrase and the self-declared repeat are kept, not counted.
+	if len(r.findings) != 4 || len(r.notCounted) != 2 || r.notCounted[0] != "the docked panel hides the save button" {
+		t.Fatalf("counted %q, not counted %q", r.findings, r.notCounted)
+	}
+	// A one-word finding doesn't swallow every finding that uses its word,
+	// and two findings on different things aren't one.
+	var w report
+	w.scan("FINDING: Crash\nFINDING: the save button is hidden")
+	w.closing = true
+	w.scan("FINDING: Crash when exporting a report\nFINDING: the export button is hidden")
+	if len(w.findings) != 4 {
+		t.Fatalf("counted %q, not counted %q", w.findings, w.notCounted)
+	}
+	// Along the way, the same paraphrase is a finding of its own.
+	var s report
+	s.scan("FINDING: the upload panel covers the save button")
+	s.scan("FINDING: the docked panel hides the save button")
+	if len(s.findings) != 2 {
+		t.Fatalf("along the way: %q", s.findings)
+	}
+}
+
+func TestAResumeIsSizedToThePlanLeft(t *testing.T) {
+	r := report{plan: map[int]string{1: "a", 2: "b", 3: "c", 4: "d"}, answered: map[int]bool{1: true, 2: true}, covered: map[int]bool{1: true, 2: false}}
+	if got := r.coinsFor(10); !strings.Contains(got, "--coins 30m") || !strings.Contains(got, "covered 1 of their 4 plan steps in 10 coins") {
+		t.Fatalf("one of four in 10: %q", got)
+	}
+	r.answered, r.covered = map[int]bool{}, map[int]bool{}
+	if got := r.coinsFor(10); !strings.Contains(got, "--coins 20m") {
+		t.Fatalf("none answered: %q", got)
+	}
+	if got := (&report{}).coinsFor(10); got != "" {
+		t.Fatalf("no plan: %q", got)
+	}
+}
+
+func TestALeadingBacktickIsKeptAndNoneIsNothingLeft(t *testing.T) {
+	var r report
+	r.scan("FINDING:`unchecked` is never shown on the summary\n" +
+		"`FINDING:` the save button does nothing\n" +
+		"UNREACHED: None\n" +
+		"UNREACHED: n/a\n" +
+		"UNREACHED: billing, no link to it")
+	want := []string{"`unchecked` is never shown on the summary", "the save button does nothing"}
+	if strings.Join(r.findings, "|") != strings.Join(want, "|") || len(r.unreached) != 1 {
+		t.Fatalf("findings %q, unreached %q", r.findings, r.unreached)
+	}
+}
+
+func TestACoveredLineAnswersEveryStepItNames(t *testing.T) {
+	var r report
+	r.scan("PLAN 1: a\nPLAN 2: b\nPLAN 3: c\nPLAN 4: d\nPLAN 5: e\nPLAN 6: f\n" +
+		"COVERED 1, 2 and 4-5\nUNREACHED: 3 of the forms never loaded")
+	if done, steps := r.planDone(); done != 4 || steps != 6 || len(r.unanswered()) != 1 {
+		t.Fatalf("done %d of %d, unanswered %q", done, steps, r.unanswered())
+	}
+}
+
+func TestMarksAndAnswersAreReadOnlyWhereTheyAreMeant(t *testing.T) {
+	var r report
+	r.scan("PLAN 1: a\nPLAN 2: b\nPLAN 3: c\nPLAN 4: d\n" +
+		"**COVERED 1, 2 and 3.**\n" +
+		"Covered 4 pages of the site, all fine\n" +
+		"FINDING: none\n" +
+		"FINDING: Import skips rows already listed in the sheet\n" +
+		"FINDING: the refund note is wrong (already reported)")
+	if done, steps := r.planDone(); done != 3 || steps != 4 {
+		t.Fatalf("covered %d of %d", done, steps)
+	}
+	if len(r.findings) != 1 || !strings.HasPrefix(r.findings[0], "Import skips rows") || len(r.notCounted) != 1 {
+		t.Fatalf("counted %q, not counted %q", r.findings, r.notCounted)
+	}
+}
+
+func TestAPatchPartIsNamedForItsFile(t *testing.T) {
+	for head, want := range map[string]string{
+		"diff --git a/dir b/f.txt b/dir b/f.txt\n--- a/dir b/f.txt\n+++ b/dir b/f.txt\n@@ -1 +1 @@\n-x\n+y": "dir b/f.txt",
+		"diff --git \"a/caf\\303\\251.png\" \"b/caf\\303\\251.png\"\nBinary files differ":          "café.png",
+		"diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x": "gone.txt",
+	} {
+		if got := partName(head); got != want {
+			t.Errorf("%q: got %q, want %q", head, got, want)
 		}
 	}
 }

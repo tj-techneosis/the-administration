@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"bufio"
 	"context"
 	"encoding/base64"
@@ -65,7 +64,7 @@ func cmdEquipmentCheck(args []string) error {
 	defer os.RemoveAll(dir)
 	// Killed outright, it can't clean up; this says it's still running, and
 	// sweepChecks clears it once it isn't.
-	_ = os.WriteFile(filepath.Join(dir, "check.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	writeCheckPid(dir)
 	c := &contract{ID: id, Target: "equipment check", Project: project, PlacedAt: time.Now().UTC(), PlacedBy: placedBy(),
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house", Uses: []string{eqName}, NoBrowser: !eq.NeedsApp}}}
 	ci := &c.Professionals[0]

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -180,6 +181,44 @@ func freePorts(n int) ([]int, error) {
 
 var portNames = []string{"web", "api", "db", "aux"}
 
+// roomPorts is the names a project's room gets ports for: the house's four
+// and any more its roster.toml names ([setup] ports), each once.
+// badPorts are the [setup] ports names roomPorts leaves out, to say so:
+// not a name, the house's own or a repeat, or past the limit.
+func badPorts(project string) []string {
+	var bad []string
+	seen := append([]string{}, portNames...)
+	for _, n := range loadProjectConfig(project).Setup.Ports {
+		switch {
+		case !portNameRE.MatchString(n):
+			bad = append(bad, fmt.Sprintf("%q (not a name)", n))
+		case slices.Contains(seen, n):
+			bad = append(bad, fmt.Sprintf("%q (already given)", n))
+		case len(seen) >= 16:
+			bad = append(bad, fmt.Sprintf("%q (16 ports at most)", n))
+		default:
+			seen = append(seen, n)
+		}
+	}
+	return bad
+}
+
+func portWarning(bad []string) {
+	fmt.Fprintf(os.Stderr, "administration: roster.toml's [setup] ports left out: %s. A port's name is lowercase letters, digits and _, up to 16, starting with a letter.\n", strings.Join(bad, ", "))
+}
+
+func roomPorts(project string) []string {
+	out := append([]string{}, portNames...)
+	for _, n := range loadProjectConfig(project).Setup.Ports {
+		if portNameRE.MatchString(n) && !slices.Contains(out, n) && len(out) < 16 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+var portNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,15}$`)
+
 // setupEnv is what the setup and teardown hooks get: enough to build a
 // stack, plus whatever the project names in roster.toml ([setup] pass_env).
 // Not the person's whole environment: a token in it would be one debug page
@@ -210,8 +249,9 @@ func roomEnv(c *contract, name, room, ports, mf, tag string) []string {
 		// clone (where a shared install like node_modules isn't).
 		"ADMINISTRATION_PROJECT="+c.Project,
 		// The project's house, where the hook's own files are (a seed
-		// script, a helper): in the project or kept on the machine.
-		"ADMINISTRATION_HOUSE="+houseDir(c.Project),
+		// script, a helper): in the project, a worktree's main checkout,
+		// or kept on the machine.
+		"ADMINISTRATION_HOUSE="+contractHouse(c),
 		// The room, and the folder in it the app goes in (the room's app/,
 		// or before/ for a release check's other side).
 		"ADMINISTRATION_ROOM="+filepath.Dir(room),
@@ -261,12 +301,13 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		}
 	}
 	app := filepath.Join(room, "app")
-	ps, err := freePorts(len(portNames))
+	names := roomPorts(c.Project)
+	ps, err := freePorts(len(names))
 	if err != nil {
 		return nil, err
 	}
 	var kv []string
-	for i, n := range portNames {
+	for i, n := range names {
 		kv = append(kv, fmt.Sprintf("%s=%d", n, ps[i]))
 	}
 	ports := strings.Join(kv, ",")
@@ -282,7 +323,7 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	defer logf.Close()
 	sctx, cancel := context.WithTimeout(ctx, setupTimeout())
 	defer cancel()
-	cmd := exec.Command(filepath.Join(houseDir(c.Project), "setup"), c.Project, app)
+	cmd := exec.Command(filepath.Join(contractHouse(c), "setup"), c.Project, app)
 	cmd.Dir = c.Project
 	cmd.Env = roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name))
 	cmd.Stdout, cmd.Stderr = logf, logf
@@ -476,14 +517,14 @@ func teardown(c *contract, dir, name string, s *status) {
 		stopEquipment(c, ci, pd, readTag(dir, name), s)
 	}
 	teardownBefore(c, dir, name, s)
-	hook := filepath.Join(houseDir(c.Project), "teardown")
+	hook := filepath.Join(contractHouse(c), "teardown")
 	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 && (ci == nil || !ci.NoBrowser && ci.Kind != "critic") {
 		ports, _ := os.ReadFile(filepath.Join(pd, "ports"))
 		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		ctx, cancel := context.WithTimeout(context.Background(), teardownLimit)
 		app := filepath.Join(s.Room, "app")
 		cmd := exec.Command(hook, c.Project, app)
-		cmd.Dir = c.Project
+		cmd.Dir = hookDir(c)
 		cmd.Env = roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room.json"), readTag(dir, name))
 		cmd.Stdout, cmd.Stderr = logf, logf
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -700,13 +741,13 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 	if len(others) > 0 {
 		fmt.Fprintf(&b, "Also on this contract, each with their own part: %s. Keep to yours: the target is shared, the work isn't. Something in their part that you meet on the way is still a finding; don't go looking for it.\n\n", strings.Join(others, "; "))
 	}
-	fmt.Fprintf(&b, "You are %s, working alone. Write as you go:\n", ci.Name)
-	fmt.Fprintf(&b, "- First write your plan: one line for each thing you'll check, numbered, as PLAN 1: ..., PLAN 2: ... %s When one is done, write COVERED 3 (after any FINDING: lines it gave); one you can't do is UNREACHED: 3 and why. There's no clock for you to watch: you'll be stopped if you take too long, and everything you've written is kept.\n", from)
-	fmt.Fprintf(&b, "- The moment you find something, write one line starting FINDING: with what happened, where (the URL and the steps, or the file and line), and what you expected instead.\n")
-	fmt.Fprintf(&b, "- For anything you meant to try and could not reach, write one line starting UNREACHED: and why.\n")
-	fmt.Fprintf(&b, "- A FINDING: line is only for something wrong. A check that held, or a comparison you ruled out, goes in your report under what held, never on a FINDING: line.\n")
-	fmt.Fprintf(&b, "- Something wrong that you can excuse is still a FINDING: text cut off whose full version shows elsewhere, a control that's only a scroll away, a task that takes more steps than before. Put the excuse in the line and let the reader weigh it; don't drop it.\n")
-	fmt.Fprintf(&b, "- End with a short report: what you tried, what held, what broke. Under what broke, give every finding again as its own FINDING: line (repeats are merged): only FINDING: lines are counted, and a problem written any other way is lost.\n\n")
+	fmt.Fprintf(&b, "You are %s, working alone. Keep your record as you go, with the record's tools (mcp__house__…):\n", ci.Name)
+	fmt.Fprintf(&b, "- First record_plan: each thing you'll check, in order. %s When one is done, record_step it done (after any findings it gave); one you can't do is record_step done false, and why. There's no clock for you to watch: you'll be stopped if you take too long, and everything you've recorded is kept.\n", from)
+	fmt.Fprintf(&b, "- The moment you find something, record_finding: what happened and what you expected instead, where (the URL and the steps, or the file and line), and what showed it. One call per finding.\n")
+	fmt.Fprintf(&b, "- For anything you meant to try and could not reach, record_unreached, and why.\n")
+	fmt.Fprintf(&b, "- A finding is only for something wrong. A check that held, or a comparison you ruled out, goes in your report under what held, never in a finding.\n")
+	fmt.Fprintf(&b, "- Something wrong that you can excuse is still a finding: text cut off whose full version shows elsewhere, a control that's only a scroll away, a task that takes more steps than before. Put the excuse in it and let the reader weigh it; don't drop it.\n")
+	fmt.Fprintf(&b, "- End with a short report: what you tried, what held, what broke. Your findings are already recorded; don't record them again. (Without the tools, a line starting FINDING:, PLAN 1:, COVERED 1 or UNREACHED: is read the same way.)\n\n")
 	if ci.Kind == "user" && len(ci.Uses) > 0 {
 		fmt.Fprintf(&b, "You work through the project's equipment, started fresh for you:\n")
 		for _, u := range ci.Uses {
@@ -775,7 +816,7 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 			fmt.Fprintf(&b, "Its data is the project's %q set: %s\n", c.Data, strings.TrimSpace(loadProjectConfig(c.Project).Data[c.Data].About))
 		}
 		if before != nil {
-			fmt.Fprintf(&b, "This is a release check. The same app as it was before these changes is running at %s, with its own data and logins (below), in a browser of its own: its tools are named mcp__before__… and work the same as this app's (mcp__playwright__…). Signing in or out in one never touches the other. Do every flow you test on both, the same way, at the same width: a regression is only visible next to what came before, so never skip the before side, and use your coins for it. Report what's different: something that worked before and doesn't now, looks different, or goes somewhere else. Start each such finding with NEW: (the change caused it) after the FINDING: mark, and say what the before app did. Broken on both but worse on the new one (cut off further, on more screens or more days, more steps, a new case that hits it) is NEW: say what each app shows. Only something the same on both is old: write it as a FINDING: starting OLD:, once, briefly. What's the same on both and fine is what held.\n", before.URL)
+			fmt.Fprintf(&b, "This is a release check. The same app as it was before these changes is running at %s, with its own data and logins (below), in a browser of its own: its tools are named mcp__before__… and work the same as this app's (mcp__playwright__…). Signing in or out in one never touches the other. Do every flow you test on both, the same way, at the same width: a regression is only visible next to what came before, so never skip the before side, and use your coins for it. Report what's different: something that worked before and doesn't now, looks different, or goes somewhere else. Mark each such finding NEW (the change caused it), and say what the before app did. Broken on both but worse on the new one (cut off further, on more screens or more days, more steps, a new case that hits it) is NEW: say what each app shows. Only something the same on both is old: record it marked OLD, once, briefly. What's the same on both and fine is what held.\n", before.URL)
 		}
 		fmt.Fprintf(&b, "If the contract or your persona names a device or a screen width (a phone, 320px, a Chromebook, large text), resize the browser to it before anything else, and test there; say in your report which sizes you used.\n")
 		if seesScreen(ci) {
@@ -826,13 +867,20 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 		fmt.Fprintf(&b, "You read code only: Read, Grep and Glob, in the project at your working directory. Cite file and line for every finding.\n")
 	}
 	if ci.Kind == "critic" {
+		fmt.Fprintf(&b, "Every turn re-reads everything you've read so far, so: make the reads and searches you already know you need together, in one turn; Grep for where something is before you Read; read the lines you need (offset and limit), not a whole long file.\n")
+	}
+	if ci.Kind == "critic" {
 		fmt.Fprintf(&b, "Use your time. A first read finds the obvious; the bugs that ship are in how pieces meet. For each path in scope, follow the data from where it comes in (a form, a request, a stored row, an offline queue) through every function that touches it to where it is shown, stored or charged, across files, and ask at each step what happens on the second time, the empty case, the other branch, the retry. Only stop when you have followed every path, or your coins are nearly gone.\n")
 	}
 	if ch := c.Changes; ch != nil {
 		fmt.Fprintf(&b, "\nThe contract is on these changes: everything since %s (merge base %.8s), working tree included.\n", ch.Base, ch.MergeBase)
 		if ci.Kind == "critic" {
-			fmt.Fprintf(&b, "The diff is %s. Read it first, then the code around it.\n", ch.Patch)
-			fmt.Fprintf(&b, "This is a release check: start each finding, after the FINDING: mark, with one of three, and say where as the file and its line in the working tree (src/cart.ts:412), never the diff's own lines or hunk: the diff shows what changed, the files are what a reader opens.\n- NEW: these changes make the app behave differently for the worse: something that worked before doesn't, or now goes wrong. Say what the code did before (the old lines, or that the path didn't exist) and what it does now; a risk you can't trace to lines the diff added or changed isn't NEW.\n- CHANGE: the change's own text is wrong but nothing that ran before behaves differently: a comment or document that misstates the code, a test that can fail or tests the wrong thing, a check that's missing.\n- OLD: it was already so before these changes.\n")
+			if ch.Split != "" {
+				fmt.Fprintf(&b, "The diff is split by file in %s: INDEX.md there lists each changed file, its lines added and removed, and the file holding its part. Read the index, then the parts for the files in your part, then the code around them; the whole diff (%s) only if your part needs all of it.\n", ch.Split, ch.Patch)
+			} else {
+				fmt.Fprintf(&b, "The diff is %s. Read it first, then the code around it.\n", ch.Patch)
+			}
+			fmt.Fprintf(&b, "This is a release check: give each finding a mark (record_finding's mark, or right after a FINDING: mark), one of three, and say where as the file and its line in the working tree (src/cart.ts:412), never the diff's own lines or hunk: the diff shows what changed, the files are what a reader opens.\n- NEW: these changes make the app behave differently for the worse: something that worked before doesn't, or now goes wrong. Say what the code did before (the old lines, or that the path didn't exist) and what it does now; a risk you can't trace to lines the diff added or changed isn't NEW.\n- CHANGE: the change's own text is wrong but nothing that ran before behaves differently: a comment or document that misstates the code, a test that can fail or tests the wrong thing, a check that's missing.\n- OLD: it was already so before these changes.\n")
 		}
 		fmt.Fprintf(&b, "Changed files:\n")
 		for i, f := range append(ch.Files, ch.Untracked...) {
@@ -896,6 +944,22 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 		return "failed", err.Error()
 	}
 	b := brief(c, ci, m, before, s.Room)
+	// The files a person would have on their own computer, for the page's
+	// upload and drop: the room's own copies, by name only (desk.go).
+	files := ""
+	if hasFileTools(c, ci) && s.Room != "" {
+		desk, err := fillDesk(c.Project, s.Room)
+		if err != nil {
+			return "failed", err.Error()
+		}
+		if len(desk) > 0 {
+			if err := writeDeskList(s.Room, desk); err != nil {
+				return "failed", err.Error()
+			}
+			files = deskDir(s.Room)
+			b += "\n" + deskNote(desk, !seesScreen(ci))
+		}
+	}
 	_ = os.WriteFile(filepath.Join(pd, "brief.md"), []byte(b), 0o600)
 	// The brief goes in on stdin, as the first of the session's messages: when
 	// the professional thinks it's done, the Administration may send it back.
@@ -936,6 +1000,8 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 			}
 			if seesScreen(ci) {
 				tools = screenToolNames()
+			} else if files != "" {
+				tools = append(tools, "browser_choose_file", "browser_drop_file")
 			}
 			// One browser per app, each with a profile of its own: the two
 			// apps share a host, and cookies don't care about ports, so in
@@ -956,7 +1022,13 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 				}
 				srv := mcpFor(node, cfg)["mcpServers"].(map[string]any)["playwright"]
 				if seesScreen(ci) {
-					if srv, err = screenServer(node, cfg); err != nil {
+					if srv, err = screenServer(node, cfg, files); err != nil {
+						return "failed", err.Error()
+					}
+				} else if files != "" {
+					// A screen reader's browser, behind the screen only for
+					// the desk's files.
+					if srv, err = readerServer(node, cfg, files); err != nil {
 						return "failed", err.Error()
 					}
 				}
@@ -974,6 +1046,13 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 			servers[k] = v
 		}
 		allowed = append(allowed, eqAllowed...)
+		// The record's tools: where its findings, plan and answers go.
+		hs, err := houseServer()
+		if err != nil {
+			return "failed", err.Error()
+		}
+		servers["house"] = hs
+		allowed = append(allowed, houseAllowed()...)
 		mcp := filepath.Join(pd, "mcp.json")
 		if err := writeJSON(mcp, map[string]any{"mcpServers": servers}); err != nil {
 			return "failed", err.Error()
@@ -1027,18 +1106,29 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 		if c.Changes != nil {
 			args = append(args, "--add-dir", filepath.Dir(c.Changes.Patch))
 		}
+		// The record's tools, and its equipment's commands: nothing else
+		// it can run.
+		servers, allowed := map[string]any{}, houseAllowed()
+		hs, err := houseServer()
+		if err != nil {
+			return "failed", err.Error()
+		}
+		servers["house"] = hs
 		if len(ci.Uses) > 0 {
-			// Its commands, and nothing else it can run.
 			eqs, eqAllowed, err := equipmentServers(c, ci, s.Room, vars, "")
 			if err != nil {
 				return "failed", err.Error()
 			}
-			mcp := filepath.Join(pd, "mcp.json")
-			if err := writeJSON(mcp, map[string]any{"mcpServers": eqs}); err != nil {
-				return "failed", err.Error()
+			for k, v := range eqs {
+				servers[k] = v
 			}
-			args = append(args, "--mcp-config", mcp, "--allowedTools", strings.Join(eqAllowed, ","))
+			allowed = append(allowed, eqAllowed...)
 		}
+		mcp := filepath.Join(pd, "mcp.json")
+		if err := writeJSON(mcp, map[string]any{"mcpServers": servers}); err != nil {
+			return "failed", err.Error()
+		}
+		args = append(args, "--mcp-config", mcp, "--allowedTools", strings.Join(allowed, ","))
 	}
 	if ci.Model != "" && ci.Model != "inherit" {
 		args = append(args, "--model", ci.Model)
@@ -1065,10 +1155,26 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 	if err != nil {
 		return "failed", err.Error()
 	}
-	say := func(text string) {
+	say := func(text string) error {
 		msg, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user",
 			"content": []any{map[string]any{"type": "text", "text": text}}}})
-		_, _ = stdin.Write(append(msg, '\n'))
+		_, err := stdin.Write(append(msg, '\n'))
+		return err
+	}
+	// Every word the Administration says to it after its brief goes in its
+	// report, so whoever reads it knows what it was told and when.
+	var told []string
+	var started time.Time
+	stdinDone := false // it said it's done and was let go: nothing more reaches it
+	nudge := func(what, text string) {
+		if stdinDone {
+			return
+		}
+		line := fmt.Sprintf("%s in: %s", time.Since(started).Round(time.Second), what)
+		if err := say(text); err != nil {
+			line += fmt.Sprintf(" (it didn't reach them: %v)", err)
+		}
+		told = append(told, line)
 	}
 	// A pipe of our own, not StdoutPipe: Wait mustn't depend on every
 	// descendant letting go of stdout, and the reader is closed if one holds
@@ -1086,7 +1192,7 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 	w.Close()
 	s.Groups = append(s.Groups, cmd.Process.Pid)
 	save()
-	say(b)
+	_ = say(b)
 
 	rep := &report{}
 	var repMu sync.Mutex
@@ -1103,6 +1209,8 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 			if rep.add(sc.Bytes()) {
 				s.Findings, s.Unreached = len(rep.findings), len(rep.unreached)
 				save()
+				// The record, as it's filed: findings.jsonl is live.
+				_ = rep.writeRecord(pd)
 			}
 			after := rep.results
 			repMu.Unlock()
@@ -1134,7 +1242,7 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 	half, late := time.NewTimer(coins/2), time.NewTimer(coins*85/100)
 	defer half.Stop()
 	defer late.Stop()
-	started := time.Now()
+	started = time.Now()
 	state, reason := "back", ""
 	rounds, secondPass := 0, false
 wait:
@@ -1150,14 +1258,14 @@ wait:
 			none := len(rep.findings) == 0
 			repMu.Unlock()
 			if none {
-				say(writeDownText)
+				nudge("halfway, with nothing written down, asked to write down what they had", writeDownText)
 			}
 		case <-late.C:
 			repMu.Lock()
 			finished := rep.results > 0
 			repMu.Unlock()
 			if !finished {
-				say(writeDownText)
+				nudge("near the limit, asked to write down what they had", writeDownText)
 			}
 		case <-limit.C:
 			state, reason = "out", "stopped at the limit"
@@ -1175,19 +1283,24 @@ wait:
 			switch {
 			case failed || rounds >= maxSendBacks:
 			case !planned && rounds == 0:
-				msg = "Before you finish: you wrote no plan. Write it now (PLAN 1: ..., one line for each thing to check, from your task, your persona and every surface the contract names), then do each and mark it COVERED n or UNREACHED: n and why."
+				msg = "Before you finish: you wrote no plan. Record it now (record_plan: each thing to check, from your task, your persona and every surface the contract names), then do each and record_step it: done, or not and why."
 			case len(open) > 0:
 				msg = "Not done yet. These from your plan have no answer:\n- " + strings.Join(open, "\n- ") +
-					"\nDo each now, as the person you are, and mark it COVERED n (after any FINDING: lines) or UNREACHED: n and why."
+					"\nDo each now, as the person you are, and record_step it: done (after any findings it gave), or not, and why."
 			case !secondPass && time.Since(started) < coins*6/10:
 				secondPass = true
 				msg = secondPassText
 			}
 			if msg == "" {
 				stdin.Close()
+				stdinDone = true
 			} else {
 				rounds++
-				say(msg)
+				nudge(sendBackWhat(msg), msg)
+				// Each send-back is another answer to pay for: said in
+				// status as it happens.
+				s.SentBack = rounds
+				save()
 			}
 		}
 	}
@@ -1202,6 +1315,13 @@ wait:
 		<-readDone
 	}
 	s.Findings, s.Unreached = len(rep.findings), len(rep.unreached)
+	s.PlanDone, s.PlanSteps = rep.planDone()
+	// A record that can't be written leaves the report to read from, as
+	// for a contract from before there was one; the work isn't lost.
+	if err := rep.writeRecord(pd); err != nil {
+		_ = os.Remove(filepath.Join(pd, "findings.jsonl"))
+		fmt.Fprintf(os.Stderr, "writing the record: %v; its report stands instead\n", err)
+	}
 	s.CostUSD, s.Turns, s.TokensIn, s.TokensOut = rep.cost, rep.turns, rep.tokensIn, rep.tokensOut
 	if state == "back" && rep.final == "" {
 		state = "failed"
@@ -1227,15 +1347,32 @@ wait:
 			reason = "the browser never loaded a page (its calls got no answer)"
 		}
 	}
+	rep.told = told
+	if s.Room != "" {
+		if b, err := os.ReadFile(filepath.Join(s.Room, "equipment-lost")); err == nil {
+			rep.equipLost = strings.TrimSpace(string(b))
+		}
+	}
 	if err := os.WriteFile(filepath.Join(pd, "report.md"), []byte(rep.markdown(c, ci, state, reason)), 0o600); err != nil {
 		return "failed", err.Error()
 	}
 	return state, reason
 }
 
+// sendBackWhat says, for its report, why a professional was sent back.
+func sendBackWhat(msg string) string {
+	switch {
+	case msg == secondPassText:
+		return "finished early, sent back for a second pass"
+	case strings.HasPrefix(msg, "Before you finish"):
+		return "finished with no plan, sent back to write one and do it"
+	}
+	return "finished with parts of its plan unanswered, sent back to them"
+}
+
 // writeDownText asks a professional to put what it has on record, so a stop
 // at the limit loses nothing; it doesn't say why.
-const writeDownText = "Write down what you've found so far, now, before anything else: each as its own FINDING: line, and anything you can't reach as UNREACHED: and why. Then carry on where you were."
+const writeDownText = "Write down what you've found so far, now, before anything else: record_finding each one not yet recorded, and record_unreached anything you can't reach, and why. Then carry on where you were."
 
 func exitCode(err error) *int {
 	code := 0
@@ -1254,7 +1391,7 @@ const maxSendBacks = 4
 
 // secondPassText sends a professional whose plan is all answered back over
 // the same ground the way a careful person checks their own work.
-const secondPassText = "Your plan is answered. Now a careful person's second pass over the same screens and code: do each flow a second time; take the other branch (cancel instead of save, the wrong input, the empty one, the second tap); leave and come back; go back after an error; try the smallest size your rules name. Number what you try as more PLAN lines and mark them the same way. Add a FINDING: for anything that would trip up the person you are, however small."
+const secondPassText = "Your plan is answered. Now a careful person's second pass over the same screens and code: do each flow a second time; take the other branch (cancel instead of save, the wrong input, the empty one, the second tap); leave and come back; go back after an error; try the smallest size your rules name. Add what you try to your plan (record_plan again) and record_step each the same way. Record a finding for anything that would trip up the person you are, however small."
 
 // coinUnit is what one coin buys: a minute. The tests shrink it.
 func coinUnit() time.Duration {

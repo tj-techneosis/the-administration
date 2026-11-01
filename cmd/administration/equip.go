@@ -41,12 +41,13 @@ func makeRoom(c *contract, ci *castItem, pd string, s *status, save func()) erro
 			return err
 		}
 	}
-	ps, err := freePorts(len(portNames))
+	names := roomPorts(c.Project)
+	ps, err := freePorts(len(names))
 	if err != nil {
 		return err
 	}
 	var kv []string
-	for i, n := range portNames {
+	for i, n := range names {
 		kv = append(kv, fmt.Sprintf("%s=%d", n, ps[i]))
 	}
 	s.Room, s.Ports = room, ps
@@ -253,7 +254,7 @@ func equipmentEnv(c *contract, ci *castItem, name string, s *status, v map[strin
 		"ADMINISTRATION_CONTRACT="+c.ID,
 		"ADMINISTRATION_PROFESSIONAL="+ci.Name,
 		"ADMINISTRATION_MAIN="+c.Project,
-		"ADMINISTRATION_HOUSE="+houseDir(c.Project),
+		"ADMINISTRATION_HOUSE="+contractHouse(c),
 		"ADMINISTRATION_ROOM="+s.Room,
 		"ADMINISTRATION_EQUIPMENT="+name,
 		// Where a sandboxed equipment's setup puts the build its commands run.
@@ -356,7 +357,13 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 				if err != nil {
 					return nil, nil, err
 				}
-				servers[key] = map[string]any{"command": self, "args": append([]string{"_screen", node, playwrightCLI(), "--config", cfg}, filled...)}
+				// The same desk files as the browser's, for a window's own
+				// file picker.
+				files := ""
+				if isDir(deskDir(room)) {
+					files = deskDir(room)
+				}
+				servers[key] = map[string]any{"command": self, "args": append([]string{"_screen", "--files", files, node, playwrightCLI(), "--config", cfg}, filled...)}
 				tools = windowScreenTools(eq.Tools)
 			}
 		case "screen":
@@ -379,8 +386,8 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 				}
 			}
 			// Where it says the device is lost, for the worker to record.
-			env["ADMINISTRATION_HOUSE"] = houseDir(c.Project)
 			env["ADMINISTRATION_EQUIPMENT_LOST"] = filepath.Join(room, "equipment-lost")
+			env["ADMINISTRATION_HOUSE"] = contractHouse(c)
 			servers[key] = map[string]any{"command": self, "args": dargs, "env": env}
 			tools = driveToolNames()
 		case "commands":

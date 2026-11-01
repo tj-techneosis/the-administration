@@ -13,7 +13,7 @@ import (
 )
 
 // Hooks are how the Administration ties into the rest of someone's work: an
-// executable named after an event, in the project's house (hooks/) or
+// executable named after an event, in the project's .administration/hooks/ or
 // in the machine's config (~/.config/administration/hooks/), hears the event
 // as JSON on stdin and in ADMINISTRATION_* variables. Post the summary to a
 // chat, open issues from confirmed findings, book a follow-up in the
@@ -50,7 +50,7 @@ func fireHooks(event, project string, payload map[string]any) {
 	body, _ := json.Marshal(payload)
 	var paths []string
 	if project != "" {
-		paths = append(paths, filepath.Join(houseDir(project), "hooks", event))
+		paths = append(paths, filepath.Join(adminDir(project), "hooks", event))
 	}
 	paths = append(paths, filepath.Join(configDir(), "hooks", event))
 	books, _ := booksDir()
@@ -130,7 +130,7 @@ func runHook(path, project, event string, body []byte, payload map[string]any, l
 func watchHook(project string) string {
 	paths := []string{filepath.Join(configDir(), "hooks", "watch")}
 	if project != "" {
-		paths = append(paths, filepath.Join(houseDir(project), "hooks", "watch"))
+		paths = append(paths, filepath.Join(adminDir(project), "hooks", "watch"))
 	}
 	for _, path := range paths {
 		st, err := os.Stat(path)

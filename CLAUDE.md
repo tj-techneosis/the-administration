@@ -41,7 +41,7 @@ skill's own file only to change when it triggers.
 - **The Playwright pin** lives in two places: `playwrightMCP` in `work.go`
   and `mcp=` in `install.sh`. Change them together, and re-run the live
   probe.
-- **Exit codes are a contract** with the skill: 0, 1, 2, 3 as in `main.go`.
+- **Exit codes are a contract** with the skill: 0, 1, 2, 3, 4, 5 as in `main.go`.
 - **The framework hires nobody.** No professional ships in `house/` or in
   the plugin; projects train their own. The Director's and the verifier's
   prompts are the only persona writing that ships.

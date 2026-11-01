@@ -63,6 +63,10 @@ def write(path, text, mode=None):
         os.chmod(path, mode)
 
 
+# The record's tools, which every professional has.
+HOUSE = ["mcp__house__record_finding", "mcp__house__record_plan", "mcp__house__record_step", "mcp__house__record_unreached"]
+
+
 def professional(name, kind="user", knows=("forms",), coins="1m", signs_in_as=None, fake="ok", extra=""):
     lines = ["---", f"name: {name}", f"description: {name} takes contracts on {', '.join(knows)}.",
              "administration:", f"  kind: {kind}", f"  coins: {coins}", f"  knows: [{', '.join(knows)}]"]
@@ -148,8 +152,13 @@ class Base(unittest.TestCase):
         write(os.path.join(self.project, ".administration", "roster.toml"),
               '[setup]\npass_env = ["ROOM_DATA", "ROOM_ORIGIN"]\n')
 
-    def place(self, *args, check=0, env=None):
-        p = self.cli("place", *args, check=check, env=env)
+    def place(self, *args, check=0, env=None, early=None):
+        # early: placed, but place says at once that someone failed (2) or
+        # was refused (3); the contract's id all the same.
+        p = self.cli("place", *args, check=early or check, env=env)
+        if early:
+            self.assertIn("failed at once", p.stderr)
+            return p.stdout.split()[1]
         if check == 0:
             return p.stdout.split()[1]
         return p
@@ -411,6 +420,27 @@ class Upgrade(Base):
         p = self.cli("upgrade", check=1, env={"ADMINISTRATION_INSTALLER": "file://" + os.path.join(self.tmp, "none.sh")})
         self.assertIn("installing the latest release", p.stderr)
 
+    def test_check_only_asks(self):
+        # A checkout: behind its upstream is 5, level is 0.
+        g = lambda cwd, *a: subprocess.run(["git", *a], cwd=cwd, check=True, env=self.env, capture_output=True, text=True)
+        up = self.copy("0.2.0")
+        g(up, "init", "-q"); g(up, "add", "."); g(up, "commit", "-qm", "0.2.0")
+        mine = os.path.join(self.home, ".local", "share", "the-administration")
+        g(self.tmp, "clone", "-q", up, mine)
+        self.assertIn("Up to date", self.cli("upgrade", "--check").stdout)
+        write(os.path.join(up, "v.txt"), "0.3.0\n"); g(up, "commit", "-qam", "0.3.0")
+        p = self.cli("upgrade", "--check", check=5)
+        self.assertIn("1 commit behind", p.stdout)
+        self.assertNotIn("installing", p.stdout)  # only asked
+        # No checkout: the latest release's VERSION, and this build isn't one.
+        shutil.rmtree(mine)
+        rel = os.path.join(self.tmp, "releases")
+        write(os.path.join(rel, "latest", "download", "VERSION"), "v0.5.0\n")
+        p = self.cli("upgrade", "--check", check=1, env={"ADMINISTRATION_RELEASES": "file://" + rel})
+        self.assertIn("The latest release is v0.5.0; this build (dev) isn't a release", p.stdout)
+        p = self.cli("upgrade", "--check", check=1, env={"ADMINISTRATION_RELEASES": "file://" + os.path.join(self.tmp, "none")})
+        self.assertIn("couldn't find out the latest release", p.stderr)
+
     def test_upgrade_says_where_it_looked(self):
         self.env["ADMINISTRATION_SRC"] = os.path.join(self.tmp, "nowhere")
         self.assertIn("no copy of the Administration", self.cli("upgrade", check=1).stderr)
@@ -473,7 +503,9 @@ class Critic(Base):
         self.assertIn("--strict-mcp-config", argv)
         self.assertIn("--no-session-persistence", argv)
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
-        self.assertNotIn("--mcp-config", argv)
+        # Its only server is the record's (no browser, no equipment).
+        self.assertEqual(list(json.load(open(argv[argv.index("--mcp-config") + 1]))["mcpServers"]), ["house"])
+        self.assertEqual(argv[argv.index("--allowedTools") + 1].split(","), HOUSE)
         self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.project))
         self.assertNotIn("CLAUDE_CODE_SESSION_ID", call["env"])
         self.assertNotIn("SOME_API_TOKEN", call["env"])
@@ -493,7 +525,8 @@ class Critic(Base):
         self.assertIn("the save button does nothing", text)
         self.assertIn("Open rooms", text)
         self.assertIn("none checked yet", text)
-        self.assertEqual(self.cli("status", "--json").stdout.strip(), "null")
+        self.assertEqual(self.cli("status", "--json").stdout.strip(), "[]")
+        self.assertEqual(json.loads(self.cli("stats", "--json", "--project", self.tmp).stdout)["professionals"], [])
 
     def test_each_brief_names_the_others_and_only_replaces_the_checks(self):
         for n in ("a", "b"):
@@ -529,7 +562,7 @@ class Critic(Base):
         f = os.path.join(self.project, ".administration", "professionals", "reader.md")
         write(f, open(f).read().replace("You are reader.", "You are reader, edited since."))
         out = self.cli("resume", cid, "reader").stdout
-        self.assertIn(f"Resuming reader from contract {cid}: 2 left undone", out)
+        self.assertIn(f"Resumed reader from contract {cid}: 2 left undone", out)
         new = out.split("Contract ")[1].split()[0]
         self.assertNotEqual(new, cid)
         self.cli("wait", new)
@@ -543,6 +576,70 @@ class Critic(Base):
         self.assertEqual(open(os.path.join(self.pdir(new, "reader"), "persona.md")).read(),
                          open(os.path.join(self.pdir(cid, "reader"), "persona.md")).read())
         self.assertIn("isn't on contract", self.cli("resume", cid, "nobody", check=1).stderr)
+        # A part is resumed once; what that leaves is resumed from it.
+        self.cli("close", new)
+        self.assertIn(f"contract {new} already picked up reader's part of {cid}; resume from it for whatever it left: administration resume {new} reader",
+                      self.cli("resume", cid, "reader", check=1).stderr)
+        self.assertIn(f"Resumed reader from contract {new}", self.cli("resume", new, "reader").stdout)
+
+    def test_the_record_is_kept_from_the_houses_tools(self):
+        self.hire_file("keeper", kind="critic", fake="record")
+        cid = self.place("these changes", "--cast", "keeper")
+        self.cli("wait", cid)
+        rec = [json.loads(l) for l in open(os.path.join(self.pdir(cid, "keeper"), "findings.jsonl"))]
+        # Numbered in the order filed, whichever way: the fake writes one
+        # FINDING: line before anything else.
+        self.assertEqual([e["n"] for e in rec if e["kind"] == "finding"], list(range(1, 1 + len([e for e in rec if e["kind"] == "finding"]))))
+        findings = [e for e in rec if e["kind"] == "finding" and e["source"] == "tool"]
+        self.assertEqual(len(findings), 2)
+        self.assertEqual(findings[0]["text"], "NEW: the export downloads an empty file; expected the orders in it (at /orders, Export) "
+                                              "Evidence: orders.csv is 0 bytes")
+        self.assertEqual(findings[0]["mark"], "NEW")
+        self.assertEqual(findings[1]["text"], "the photo upload hangs at 99 percent (at /profile)")
+        self.assertIn({"kind": "unreached", "text": "billing (no link to it)", "source": "tool"},
+                      [{k: e[k] for k in ("kind", "text", "source")} for e in rec])
+        st = self.status(cid)["status"]["keeper"]
+        self.assertEqual((st["plan_done"], st["plan_steps"]), (1, 2))
+        # The prose restatement at the end isn't another finding.
+        self.assertNotIn("NEW: the export downloads an empty file; expected the orders in it (at /orders, Export)",
+                         [e["text"] for e in rec if e["kind"] == "finding"])
+        self.cli("close", cid)
+        out = self.cli("report", cid).stdout
+        self.assertIn("the export downloads an empty file; expected the orders in it (at /orders, Export) Evidence:", out)
+        # A step not done keeps what the step was, for a resume.
+        self.assertIn("step 2 (the profile screen): the profile page needs a photo", [e["text"] for e in rec if e["kind"] == "unreached"])
+        # The record's server lists its tools and only acknowledges.
+        reqs = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "record_finding", "arguments": {"what": "x"}}}]
+        p = subprocess.run([binary(), "_house"], input="".join(json.dumps(r) + "\n" for r in reqs), capture_output=True, text=True, timeout=10)
+        out = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
+        self.assertEqual(sorted(t["name"] for t in out[1]["result"]["tools"]), ["record_finding", "record_plan", "record_step", "record_unreached"])
+        self.assertEqual(out[2]["result"]["content"][0]["text"], "Recorded.")
+        # It answers what a client sends first, and says why a call can't be recorded.
+        reqs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "record_finding", "arguments": {"what": ""}}},
+                {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "record_step", "arguments": {"step": "3", "done": False}}},
+                {"jsonrpc": "2.0", "id": 5, "method": "nonsense"}]
+        p = subprocess.run([binary(), "_house"], input="".join(json.dumps(r) + "\n" for r in reqs), capture_output=True, text=True, timeout=10)
+        out = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
+        self.assertEqual(sorted(out), [1, 2, 3, 4, 5])  # the notification gets no answer
+        self.assertEqual(out[1]["result"]["capabilities"], {"tools": {}})
+        self.assertEqual(out[2]["result"], {})
+        for i in (3, 4):
+            self.assertTrue(out[i]["result"]["isError"])
+            self.assertIn("not recorded", out[i]["result"]["content"][0]["text"])
+        self.assertEqual(out[5]["error"]["code"], -32601)
+
+    def test_back_with_most_of_the_plan_undone_is_said(self):
+        self.hire_file("uploader", kind="critic", fake="partial")
+        cid = self.place("x", "--cast", "uploader")
+        w = self.cli("wait", cid).stdout
+        self.assertIn("only 1 of 4 plan steps done", w)
+        self.cli("close", cid)
+        self.assertIn("only 1 of 4 plan steps done: most of their part is untested", self.cli("report", cid).stdout)
+        self.assertEqual((self.status(cid)["status"]["uploader"]["plan_done"], self.status(cid)["status"]["uploader"]["plan_steps"]), (1, 4))
 
     def test_a_professional_is_asked_to_write_down_what_it_has(self):
         # Models keep findings for the end; the limit throws the end away.
@@ -554,6 +651,12 @@ class Critic(Base):
         self.assertTrue(all(m.startswith("Write down what you've found so far") for m in sent))
         self.assertTrue(all("minute" not in m and "time" not in m for m in sent))  # no clock
         self.assertEqual(self.status(cid)["status"]["hoarder"]["state"], "out")
+        # What it was told is on record, and the way to finish its part.
+        report = open(os.path.join(self.pdir(cid, "hoarder"), "report.md")).read()
+        told = report[report.index("## Told along the way"):report.index("## Their report")]
+        self.assertRegex(told, r"- [\dhms]+ in: halfway, with nothing written down, asked to write down what they had")
+        self.assertIn("near the limit, asked to write down what they had", told)
+        self.assertIn(f"`administration resume {cid} hoarder`", report)
 
     def test_wait_returns_when_one_fails_while_others_work(self):
         # A room that broke in a second is news now, not when the rest are back.
@@ -598,6 +701,9 @@ class SentBack(Base):
         self.assertIn("second pass", sent[1])  # then once over the same ground
         self.assertEqual(len(sent), 2)
         report = open(os.path.join(pd, "report.md")).read()
+        self.assertIn("in: finished with parts of its plan unanswered, sent back to them", report)
+        self.assertIn("in: finished early, sent back for a second pass", report)
+        self.assertNotIn("administration resume", report)  # it came back
         self.assertNotIn("Not covered", report)
         self.assertIn("Nothing more.", report)  # what it said when sent back is kept
         self.assertEqual(self.status(cid)["status"]["planner"]["state"], "back")
@@ -680,23 +786,74 @@ for line in sys.stdin:
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "browser_evaluate", "arguments": {"function": "() => document.body.innerText"}}},
                 {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "browser_type_text", "arguments": {"text": "hi\n", "submit": True}}},
                 {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "browser_look", "arguments": {}}},
-                {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "browser_mouse_click_xy", "arguments": {"x": 1, "y": 2}}}]
-        p = subprocess.run([binary(), "_screen", sys.executable, fake],
+                {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "browser_mouse_click_xy", "arguments": {"x": 1, "y": 2}}},
+                # Files go in from the desk, by name, and nothing else does.
+                {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "browser_choose_file", "arguments": {"names": ["photo.jpg"]}}},
+                {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "browser_choose_file", "arguments": {"names": ["../secret.txt"]}}},
+                {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": [os.path.join(self.tmp, "secret.txt")], "x": 5, "y": 5}}},
+                {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "x": 5, "y": 6}}}]
+        desk = os.path.join(self.tmp, "room", "desk", "files")
+        write(os.path.join(desk, "photo.jpg"), "a photo\n")
+        write(os.path.join(self.tmp, "room", "desk-files.json"), '["photo.jpg"]')
+        write(os.path.join(self.tmp, "room", "desk", "secret.txt"), "not for the page\n")
+        write(os.path.join(self.tmp, "secret.txt"), "not for the page\n")
+        p = subprocess.run([binary(), "_screen", "--files", desk, sys.executable, fake],
                            input="".join(json.dumps(r) + "\n" for r in reqs), capture_output=True, text=True, timeout=20)
         out = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
         names = [t["name"] for t in out[1]["result"]["tools"]]
-        self.assertEqual(sorted(names), ["browser_layout_check", "browser_look", "browser_mouse_click_xy", "browser_press_key",
-                                         "browser_take_screenshot", "browser_type_text"])
+        self.assertEqual(sorted(names), ["browser_choose_file", "browser_drop_file", "browser_layout_check", "browser_look",
+                                         "browser_mouse_click_xy", "browser_press_key", "browser_take_screenshot", "browser_type_text"])
         for i in (2, 3):
             self.assertTrue(out[i]["result"]["isError"])
             self.assertIn("isn't something a person at a screen has", out[i]["result"]["content"][0]["text"])
         sent = [json.loads(l) for l in open(calls)]
         self.assertEqual([c["arguments"].get("key") for c in sent if c["name"] == "browser_press_key"], ["h", "i", "Enter", "Enter"])
-        look = [c for c in sent if c["name"] == "browser_evaluate"]
+        look = [c for c in sent if c["name"] == "browser_evaluate" and "DataTransfer" not in c["arguments"]["function"]]
         self.assertEqual(len(look), 1)
         self.assertIn("__administrationLook", look[0]["arguments"]["function"])  # only the house's own script runs
         self.assertIn({"name": "browser_mouse_click_xy", "arguments": {"x": 1, "y": 2}}, sent)
         self.assertEqual(out[6]["result"]["content"][0]["text"], "done browser_mouse_click_xy")
+        self.assertIn({"name": "browser_file_upload", "arguments": {"paths": [os.path.join(desk, "photo.jpg")]}}, sent)
+        for i in (8, 9):
+            self.assertTrue(out[i]["result"]["isError"], out[i])
+            self.assertIn("isn't a file on your desk", out[i]["result"]["content"][0]["text"])
+        self.assertNotIn("not for the page", open(calls).read())
+        drop = [c for c in sent if c["name"] == "browser_evaluate" and "DataTransfer" in c["arguments"]["function"]]
+        self.assertEqual(len(drop), 1)
+        self.assertIn('"name":"photo.jpg"', drop[0]["arguments"]["function"])
+
+    def test_a_screen_reader_user_gets_the_desk_too(self):
+        # Every browser tool passes but the ones that read any path; the
+        # desk's tools are added, the drop aimed by the page's ref.
+        fake = os.path.join(self.tmp, "fake_browser.py")
+        calls = os.path.join(self.tmp, "browser-calls")
+        write(fake, f"""import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m: continue
+    if m["method"] == "tools/list":
+        r = {{"tools": [{{"name": n}} for n in ("browser_snapshot", "browser_click", "browser_file_upload", "browser_drop", "browser_run_code_unsafe")]}}
+    else:
+        open({calls!r}, "a").write(json.dumps(m["params"]) + "\\n")
+        r = {{"content": [{{"type": "text", "text": "done " + m["params"]["name"]}}]}}
+    print(json.dumps({{"jsonrpc": "2.0", "id": m["id"], "result": r}}), flush=True)
+""")
+        desk = os.path.join(self.tmp, "room", "desk", "files")
+        write(os.path.join(desk, "photo.jpg"), "a photo\n")
+        write(os.path.join(self.tmp, "room", "desk-files.json"), '["photo.jpg"]')
+        reqs = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "browser_snapshot", "arguments": {}}},
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "browser_file_upload", "arguments": {"paths": ["/etc/hosts"]}}},
+                {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "element": "Drop area", "ref": "e12"}}}]
+        p = subprocess.run([binary(), "_screen", "--reader", "--files", desk, sys.executable, fake],
+                           input="".join(json.dumps(r) + "\n" for r in reqs), capture_output=True, text=True, timeout=20)
+        out = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
+        self.assertEqual(sorted(t["name"] for t in out[1]["result"]["tools"]), ["browser_choose_file", "browser_click", "browser_drop_file", "browser_snapshot"])
+        self.assertEqual(out[2]["result"]["content"][0]["text"], "done browser_snapshot")
+        self.assertTrue(out[3]["result"]["isError"])
+        sent = [json.loads(l) for l in open(calls)]
+        self.assertNotIn("browser_file_upload", [c["name"] for c in sent])
+        self.assertIn({"name": "browser_drop", "arguments": {"element": "Drop area", "ref": "e12", "paths": [os.path.join(desk, "photo.jpg")]}}, sent)
 
     def test_a_user_works_in_a_walled_room(self):
         self.house()
@@ -715,13 +872,14 @@ for line in sys.stdin:
         self.assertEqual(argv[argv.index("--tools") + 1], "")
         allowed = argv[argv.index("--allowedTools") + 1]
         self.assertIn("mcp__playwright__browser_navigate", allowed)
-        for bad in ("file_upload", "browser_drop", "run_code"):
-            self.assertNotIn(bad, allowed)
+        for bad in ("mcp__playwright__browser_file_upload", "mcp__playwright__browser_drop", "mcp__playwright__browser_run_code_unsafe"):
+            self.assertNotIn(bad, allowed.split(","))
         brief = call["prompt"]
         self.assertIn("member@example.com", brief)
-        self.assertIn("A FINDING: line is only for something wrong", brief)
-        self.assertIn("Something wrong that you can excuse is still a FINDING", brief)
-        self.assertIn("only FINDING: lines are counted", brief)
+        self.assertIn("A finding is only for something wrong", brief)
+        self.assertIn("record_finding", brief)
+        self.assertIn("Something wrong that you can excuse is still a finding", brief)
+        self.assertIn("Your findings are already recorded", brief)
         self.assertIn("There's no clock for you to watch", brief)
         self.assertNotIn("coins", brief)
         self.assertIn("PLAN 1:", brief)
@@ -730,8 +888,8 @@ for line in sys.stdin:
         mcp = json.load(open(os.path.join(self.pdir(cid, "member"), "mcp.json")))
         args = mcp["mcpServers"]["playwright"]["args"]
         # The screen in front of the pinned browser server.
-        self.assertEqual(args[0], "_screen")
-        self.assertEqual(args[2], os.path.join(self.env["ADMINISTRATION_TOOLS"], "node_modules", "@playwright", "mcp", "cli.js"))
+        self.assertEqual(args[:2], ["_screen", "--files"])  # no desk files here: an empty name
+        self.assertEqual(args[4], os.path.join(self.env["ADMINISTRATION_TOOLS"], "node_modules", "@playwright", "mcp", "cli.js"))
         cfg = json.load(open(args[args.index("--config") + 1]))
         self.assertTrue(cfg["browser"]["isolated"])
         self.assertTrue(cfg["browser"]["launchOptions"]["chromiumSandbox"])
@@ -856,14 +1014,14 @@ for line in sys.stdin:
         self.assertEqual(s["state"], "back", s)  # no browser, so no "never used the browser"
         pd = self.books_of(cid, "tinkerer")
         servers = json.load(open(os.path.join(pd, "mcp.json")))["mcpServers"]
-        self.assertEqual(list(servers), ["eq_gadget"])  # no web browser
+        self.assertEqual(sorted(servers), ["eq_gadget", "house"])  # no web browser
         args = servers["eq_gadget"]["args"]
         self.assertEqual(args[0], "--endpoint")
         self.assertRegex(args[1], r"^http://127\.0\.0\.1:\d+$")
         self.assertEqual(args[3], s["room"])
         argv = json.load(open(os.path.join(pd, "fake-call.json")))["argv"]
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
-        self.assertEqual(sorted(allowed), ["mcp__eq_gadget__look", "mcp__eq_gadget__poke"])
+        self.assertEqual(sorted(allowed), sorted(["mcp__eq_gadget__look", "mcp__eq_gadget__poke"] + HOUSE))
         brief = open(os.path.join(pd, "brief.md")).read()
         self.assertIn("The gadget's own screen.", brief)
         self.assertNotIn("You read code only", brief)
@@ -891,7 +1049,7 @@ for line in sys.stdin:
                               ("API=postgres://db.example.com:5432/app", "isn't on this machine"),
                               ("DATA=prod\necho API=x", "never production")):
             self.equipment(toml, {**self.GADGET, ".administration/equipment/gadget/start": f"#!/bin/sh\necho {printed}\n"})
-            cid = self.place("x", "--cast", "tinkerer")
+            cid = self.place("x", "--cast", "tinkerer", early=3)
             self.cli("wait", cid, check=3)  # refused by the Rules
             self.assertIn(want, self.status(cid)["status"]["tinkerer"]["reason"])
             self.cli("close", cid)
@@ -910,7 +1068,7 @@ for line in sys.stdin:
             tools = ["poke"]
             ''', self.GADGET)
         self.hire_file("tinkerer", extra="  browser: false\n  uses: [gadget]")
-        cid = self.place("x", "--cast", "tinkerer")
+        cid = self.place("x", "--cast", "tinkerer", early=2)
         self.cli("wait", cid, check=2)
         self.assertIn("didn't print NOPE=", self.status(cid)["status"]["tinkerer"]["reason"])
 
@@ -973,8 +1131,8 @@ for line in sys.stdin:
         pd = self.books_of(cid, "prober")
         argv = json.load(open(os.path.join(pd, "fake-call.json")))["argv"]
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")  # still no Bash
-        self.assertEqual(argv[argv.index("--allowedTools") + 1], "mcp__eq_vm__run_run")
-        self.assertEqual(list(json.load(open(os.path.join(pd, "mcp.json")))["mcpServers"]), ["eq_vm"])
+        self.assertEqual(sorted(argv[argv.index("--allowedTools") + 1].split(",")), sorted(HOUSE + ["mcp__eq_vm__run_run"]))
+        self.assertEqual(sorted(json.load(open(os.path.join(pd, "mcp.json")))["mcpServers"]), ["eq_vm", "house"])
         self.assertIn("Bash", json.load(open(os.path.join(pd, "settings.json")))["permissions"]["deny"])
         brief = open(os.path.join(pd, "brief.md")).read()
         self.assertIn("Runs the project's code on an input.", brief)
@@ -989,7 +1147,7 @@ for line in sys.stdin:
         cid = self.place("x", "--cast", "reader")
         self.cli("wait", cid)
         pd = self.books_of(cid, "reader")
-        self.assertFalse(os.path.exists(os.path.join(pd, "mcp.json")))
+        self.assertEqual(list(json.load(open(os.path.join(pd, "mcp.json")))["mcpServers"]), ["house"])  # its record, nothing to run
         self.assertIn("You read code only", open(os.path.join(pd, "brief.md")).read())
 
     def test_the_command_server_runs_only_what_was_declared(self):
@@ -1007,7 +1165,7 @@ for line in sys.stdin:
         self.assertEqual(srv["args"][0], "_equip")
         self.assertEqual(srv["env"]["EQ_VM_ROOM"], self.status(cid)["status"]["linux-user"]["room"])
         argv = json.load(open(os.path.join(pd, "fake-call.json")))["argv"]
-        self.assertEqual(argv[argv.index("--allowedTools") + 1], "mcp__eq_vm__run_run")
+        self.assertEqual(sorted(argv[argv.index("--allowedTools") + 1].split(",")), sorted(HOUSE + ["mcp__eq_vm__run_run"]))
         # Speak MCP to it as claude would.
         desk = srv["args"][1]
         os.makedirs(desk, exist_ok=True)
@@ -1171,7 +1329,7 @@ for line in sys.stdin:
             tools = ["poke"]
             ''', {**self.GADGET, ".administration/equipment/gadget/start": "#!/bin/sh\necho DB=db.example.com:5432\n"})
         self.hire_file("auditor", kind="critic", extra="  uses: [gadget]")
-        cid = self.place("x", "--cast", "auditor")
+        cid = self.place("x", "--cast", "auditor", early=3)
         self.cli("wait", cid, check=3)
         self.assertEqual(self.status(cid)["status"]["auditor"]["state"], "refused")
         self.assertEqual(self.cli("equipment-check", "gadget", check=3).returncode, 3)
@@ -1197,7 +1355,7 @@ for line in sys.stdin:
         self.assertIn("(seen against the shared server staging.example.test: it could be the server, not the app)", self.cli("report", cid).stdout)
         # Anything it didn't declare is still refused, and production can't be declared.
         self.equipment(toml % '"other.example.test"', {**self.GADGET, ".administration/equipment/gadget/start": start})
-        cid = self.place("x", "--cast", "tinkerer")
+        cid = self.place("x", "--cast", "tinkerer", early=3)
         self.cli("wait", cid, check=3)
         self.assertIn("the shared servers it declares (other.example.test)", self.status(cid)["status"]["tinkerer"]["reason"])
         self.cli("close", cid)
@@ -1245,7 +1403,9 @@ for line in sys.stdin:
         cid = self.place("x", "--cast", "tinkerer")
         self.assertIn("equipment lost at 12:34 device offline", self.cli("wait", cid).stdout)
         self.cli("close", cid)
-        self.assertIn("equipment lost at 12:34 device offline, so part of their work wasn't done", self.cli("report", cid).stdout)
+        out = self.cli("report", cid).stdout
+        self.assertIn("equipment lost at 12:34 device offline, so part of their work wasn't done", out)
+        self.assertIn(f"Their equipment was lost at 12:34 device offline, so part of their work wasn't done. `administration resume {cid} tinkerer`", out)
 
     def test_a_window_is_seen_through_the_screen_unless_read_out(self):
         self.equipment('''
@@ -1315,7 +1475,7 @@ for line in sys.stdin:
         port = s["before_url"].rstrip("/").rsplit(":", 1)[1]
         self.assertIn(f"http://127.0.0.1:{port}", json.load(open(os.path.join(pd, "browser-before.json")))["network"]["allowedOrigins"])
         self.assertNotIn(f"http://127.0.0.1:{port}", json.load(open(os.path.join(pd, "browser.json")))["network"]["allowedOrigins"])
-        self.assertEqual(sorted(json.load(open(os.path.join(pd, "mcp.json")))["mcpServers"]), ["before", "playwright"])
+        self.assertEqual(sorted(json.load(open(os.path.join(pd, "mcp.json")))["mcpServers"]), ["before", "house", "playwright"])
         argv = json.load(open(os.path.join(pd, "fake-call.json")))["argv"]
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
         for k in ("playwright", "before"):
@@ -1367,12 +1527,29 @@ for line in sys.stdin:
         self.assertEqual(os.listdir(self.rooms) if os.path.isdir(self.rooms) else [], [])
         self.assertEqual(len(g("worktree", "list").stdout.strip().splitlines()), 1)
 
+    def test_a_room_gets_the_ports_its_roster_names(self):
+        self.house()
+        write(os.path.join(self.project, ".administration", "roster.toml"),
+              '[setup]\npass_env = ["ROOM_DATA", "ROOM_ORIGIN"]\nports = ["idp", "s3", "web", "Bad Name"]\n')
+        self.hire_file("member")
+        p = self.cli("place", "x", "--cast", "member")
+        self.assertIn('ports left out: "web" (already given), "Bad Name" (not a name)', p.stderr)
+        cid = p.stdout.split()[1]
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]["member"]
+        self.assertEqual(len(st["ports"]), 6)  # web, api, db, aux, idp, s3: once each, a bad name left out
+
     def test_room_check_shows_why_a_room_failed(self):
         self.house()
         write(os.path.join(self.project, ".administration", "setup"), "#!/bin/sh\necho building the app\necho npm ERR! missing script: demo >&2\nexit 1\n", 0o755)
         p = self.cli("room-check", check=2)
-        self.assertIn("didn't come up", p.stdout)
+        self.assertIn("The room's setup failed at once", p.stdout)
         self.assertIn("npm ERR! missing script: demo", p.stdout)
+        # The log it names outlives the check's folder.
+        kept = p.stdout.split("The full setup log is kept at ")[1].split(".log")[0] + ".log"
+        self.assertIn(os.path.join(self.books, "checks"), kept)
+        self.assertIn("building the app", open(kept).read())
+        self.assertIn("see " + kept, p.stdout)
         self.assertIn("no .administration/setup", self.cli("room-check", "--project", self.tmp, check=1).stderr)
 
     def test_watch_stops_when_its_contract_is_closed_or_gone(self):
@@ -1605,20 +1782,49 @@ else:
     def test_a_missing_role_fails_the_room(self):
         self.house()
         self.hire_file("ghost", signs_in_as="ghost")
-        cid = self.place("x", "--cast", "ghost")
+        cid = self.place("x", "--cast", "ghost", early=2)
         self.cli("wait", cid, check=2)
         self.assertIn("no such login", self.status(cid)["status"]["ghost"]["reason"])
+
+    def test_place_says_who_failed_at_once_and_the_others_carry_on(self):
+        self.house()
+        self.hire_file("ghost", signs_in_as="ghost")
+        self.hire_file("reader", kind="critic", fake="slow")
+        p = self.cli("place", "x", "--cast", "ghost,reader", check=2)
+        cid = p.stdout.split()[1]
+        self.assertIn(f"contract {cid} is placed, but 1 of 2 failed at once (ghost: ", p.stderr)
+        self.assertIn(f"the others are still working: administration wait {cid}", p.stderr)
+        # The wait it points to isn't cut short by the failure place told of:
+        # it waits for the reader to be back.
+        w = self.cli("wait", cid, check=2)
+        self.assertNotIn("didn't make it", w.stdout)
+        self.assertIn("everyone is back", w.stdout)
+        # Alone, there's nobody to wait for. Resumed, it gets its whole part
+        # again (it left no report), and the resume is said even though it
+        # failed at once once more.
+        p = self.cli("place", "y", "--cast", "ghost", check=2)
+        alone = p.stdout.split()[1]
+        self.assertIn(f"nobody else is still working on it; see why with administration status {alone}, then administration close {alone}", p.stderr)
+        r = self.cli("resume", alone, "ghost", check=2)
+        self.assertIn(f"Resumed ghost from contract {alone}: all of their part left undone", r.stdout)
+        self.assertIn("failed at once", r.stderr)
+        self.assertNotIn("Check in with", r.stdout)  # nobody to wait for
+        # That resume is open but nobody works on it: resume from it now.
+        again = r.stdout.split("Contract ")[1].split()[0]
+        self.assertIn(f"resume from it for whatever it left: administration resume {again} ghost",
+                      self.cli("resume", alone, "ghost", check=1).stderr)
 
     def test_anything_but_seed_or_local_data_is_refused(self):
         self.house()
         self.hire_file("member")
-        cid = self.place("x", "--cast", "member", env={"ROOM_DATA": "thaw"})
+        cid = self.place("x", "--cast", "member", env={"ROOM_DATA": "thaw"}, early=3)
         self.cli("wait", cid, check=3)
         s = self.status(cid)["status"]["member"]
         self.assertEqual(s["state"], "refused")
         self.assertIn('"seed" or "local"', s["reason"])
         self.assertFalse(os.path.exists(os.path.join(self.pdir(cid, "member"), "fake-call.json")))
         # A local copy the project's own tooling made is fine.
+        self.assertIn("resuming would be refused the same way", self.cli("resume", cid, "member", check=1).stderr)
         ok = self.place("x", "--cast", "member", env={"ROOM_DATA": "local"})
         self.cli("wait", ok)
         self.assertEqual(self.status(ok)["status"]["member"]["state"], "back")
@@ -1653,7 +1859,7 @@ else:
         self.house()
         self.hire_file("member")
         for origin in ("https://example.com", "http://127.0.0.1:5432"):
-            cid = self.place("x", "--cast", "member", env={"ROOM_ORIGIN": origin})
+            cid = self.place("x", "--cast", "member", env={"ROOM_ORIGIN": origin}, early=3)
             self.cli("wait", cid, check=3)
             self.assertEqual(self.status(cid)["status"]["member"]["state"], "refused", origin)
 
@@ -1662,9 +1868,15 @@ else:
         self.hire_file("slow", fake="slow", coins="30m")
         self.hire_file("other", fake="slow", coins="30m")
         cid = self.place("x", "--cast", "slow,other", env={"ADMINISTRATION_MAX_ROOMS": "2"})
-        p = self.place("y", "--cast", "slow", check=3, env={"ADMINISTRATION_MAX_ROOMS": "2"})
-        self.assertIn("rooms are in use", p.stderr)
+        p = self.place("y", "--cast", "slow", check=4, env={"ADMINISTRATION_MAX_ROOMS": "2"})
+        self.assertIn(f"2 of 2 rooms are in use (contract {cid}) and this contract needs 1: place it again once its users are back (administration wait {cid})", p.stderr)
+        self.place("y", "--cast", "slow", "--dry-run", env={"ADMINISTRATION_MAX_ROOMS": "2"}, check=0)  # a preview waits for nobody
+        self.assertIn("Rooms: 2 of 2 in use, 0 free.", self.cli("status", env={"ADMINISTRATION_MAX_ROOMS": "2"}).stdout)
+        # More users than rooms never fits, whatever closes: split it.
+        p = self.place("z", "--cast", "slow,other", check=1, env={"ADMINISTRATION_MAX_ROOMS": "1"})
+        self.assertIn("needs 2 rooms and there are 1", p.stderr)
         self.cli("close", cid)
+        self.assertIn("No open contracts. Rooms: 0 of 4 in use, 4 free.", self.cli("status").stdout)
 
 
 class Changes(Base):
@@ -1692,6 +1904,13 @@ class Changes(Base):
         self.assertEqual([d for d in os.listdir(os.path.join(self.books, "contracts", cid)) if not d.startswith(".") and os.path.isdir(os.path.join(self.books, "contracts", cid, d))], ["reader"])
         self.assertIn("+two", patch)
         self.assertNotIn("hunter2", patch)
+        # Split by file too, with an index, so a critic reads its own part.
+        index = open(os.path.join(handout, "changes", "INDEX.md")).read()
+        self.assertIn("- app.txt (+1 -0): 001-app.txt.patch", index)
+        self.assertIn("new.txt (+1 -0)", index)
+        self.assertNotIn(".env", index)
+        self.assertIn("+two", open(os.path.join(handout, "changes", "001-app.txt.patch")).read())
+        self.assertIn("INDEX.md there lists each changed file", self.call(cid, "reader")["prompt"])
         brief = self.call(cid, "reader")["prompt"]
         self.assertIn("app.txt", brief)
         self.assertIn("new.txt", brief)
@@ -1720,6 +1939,155 @@ class Changes(Base):
         # Each finding is listed once, not again in the report below it.
         self.assertEqual(out.count("the logo is blurry on both"), 1)
 
+    def test_a_linked_worktree_uses_its_main_checkouts_house(self):
+        # .administration isn't committed, so a new worktree has none: it
+        # shares the main checkout's roster, not a copy or a link.
+        self.hire_file("reader", kind="critic")
+        wt = os.path.join(os.path.dirname(self.project), "a lane")  # a space in the path
+        subprocess.run(["git", "worktree", "add", "-q", wt, "-b", "lane"], cwd=self.project, check=True, env=self.env, capture_output=True)
+        self.assertFalse(os.path.exists(os.path.join(wt, ".administration")))
+        cid = self.cli("place", "the lane", "--cast", "reader", "--project", wt, cwd=wt).stdout.split()[1]
+        self.cli("wait", cid)
+        self.assertEqual(self.status(cid)["status"]["reader"]["state"], "back")
+        self.assertFalse(os.path.exists(os.path.join(wt, ".administration")))
+        # The Director is told where it is, and let in to read it.
+        out = self.cli("director", "cast", "the lane", cwd=wt, check=None).stdout
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        rd = os.path.join(self.books, "director", run)
+        main = os.path.realpath(os.path.join(self.project, ".administration"))
+        self.assertIn(f"The project's .administration folder is {main}", open(os.path.join(rd, "in", "job.md")).read())
+        argv = json.load(open(os.path.join(rd, "fake-call.json")))["argv"]
+        self.assertIn(main, [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"])
+        # A hire from the worktree joins the one roster, and says where.
+        write(os.path.join(self.project, ".administration", "candidates", "lane-critic.md"), professional("lane-critic", kind="critic"))
+        out = self.cli("hire", "lane-critic", cwd=wt).stdout
+        self.assertIn(os.path.join(main, "professionals", "lane-critic.md"), out)
+        self.assertTrue(os.path.exists(os.path.join(self.project, ".administration", "professionals", "lane-critic.md")))
+        self.assertFalse(os.path.exists(os.path.join(wt, ".administration")))
+
+    def test_a_mark_in_any_case_counts_and_a_check_can_correct_it(self):
+        self.hire_file("reader", kind="critic", fake="retag")
+        cid = self.place("these changes", "--cast", "reader", "--changes")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        out = self.cli("report", cid).stdout
+        broke = out[out.index("## What these changes broke"):out.index("## Not marked either way")]
+        self.assertIn("New: the receipt prints twice", broke)  # "New:" is NEW, not unmarked
+        self.assertIn("$5 too high", broke)
+        self.cli("verify", cid)
+        out = self.cli("report", cid).stdout
+        broke = out[out.index("## What these changes broke"):out.index("## Already so")]
+        self.assertNotIn("$5 too high", broke)  # the verifier says it was already so
+        self.assertIn("prints twice", broke)
+        self.assertNotIn("written as", broke)  # "new" agreed with its own mark
+        old = out[out.index("## Already so"):]
+        self.assertRegex(old, r"NEW: the total on /cart is \$5 too high.*\(written as NEW; the check says OLD\)")
+        v = {x["finding"]: x for x in json.load(open(os.path.join(self.pdir(cid, "reader"), "verdicts.json")))}
+        self.assertEqual(v[2]["tag"], "OLD")
+        self.assertNotIn("tag", v[3])
+        # The session can correct a mark too, and only to a real one.
+        run = lambda body: subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps(body), env=self.env,
+                                          cwd=self.project, capture_output=True, text=True)
+        self.assertIn("tag is NEW, CHANGE, OLD or UNMARKED", run({"reader": [{"finding": 3, "verdict": "confirmed", "tag": "BAD"}]}).stderr)
+        # Nothing in it, or a second object after the first, isn't recorded as if it were.
+        self.assertIn("there are none in it to record", run({"reader": []}).stderr)
+        two = subprocess.run([binary(), "verdicts", cid, "-"], input='{"reader": [{"finding": 3, "verdict": "false"}]} {"reader": []}',
+                             env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(two.returncode, 1, two.stderr)
+        self.assertIn("one JSON object", two.stderr)
+        v = {x["finding"]: x for x in json.load(open(os.path.join(self.pdir(cid, "reader"), "verdicts.json")))}
+        self.assertNotEqual(v.get(3, {}).get("verdict"), "false")  # nothing of it was recorded
+        empty = subprocess.run([binary(), "verdicts", cid, "-"], input="", env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertIn("there are none in it to record", empty.stderr)
+        # Agreeing without the tag keeps the correction.
+        self.assertEqual(run({"reader": [{"finding": 2, "verdict": "confirmed", "why": "agreed"}]}).returncode, 0)
+        out = self.cli("report", cid).stdout
+        self.assertIn("(written as NEW; the check says OLD)", out[out.index("## Already so"):])
+        # Corrected to no mark at all, then back to its own.
+        self.assertEqual(run({"reader": [{"finding": 2, "verdict": "confirmed", "tag": "unmarked"}]}).returncode, 0)
+        out = self.cli("report", cid).stdout
+        self.assertIn("(written as NEW; the check says unmarked)", out[out.index("## Not marked either way"):])
+        self.assertEqual(run({"reader": [{"finding": 2, "verdict": "confirmed", "tag": "new"}]}).returncode, 0)
+        out = self.cli("report", cid).stdout
+        self.assertIn("$5 too high", out[out.index("## What these changes broke"):out.index("## Not marked either way")])
+        self.assertNotIn("## Already so", out)
+
+    def test_a_corrected_mark_folds_it_with_the_same_finding_under_that_mark(self):
+        self.hire_file("reader", kind="critic", fake="retag")
+        self.hire_file("elder", kind="critic", fake="old")
+        cid = self.place("these changes", "--cast", "reader,elder", "--changes")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        rp = open(os.path.join(self.pdir(cid, "reader"), "report.md")).read()
+        fs = [l for l in rp[rp.index("## Findings"):].split("\n") if l.startswith("- ")]
+        n = next(i + 1 for i, l in enumerate(fs) if "$5 too high" in l)
+        p = subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps({"reader": [{"finding": n, "verdict": "confirmed", "tag": "OLD"}]}),
+                           env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = self.cli("report", cid).stdout
+        old = out[out.index("## Already so"):out.index("## Not marked either way")]
+        self.assertEqual(old.count("$5 too high"), 1, old)
+        self.assertNotIn("$5 too high", out[out.index("## What these changes broke"):out.index("## Already so")])
+        self.assertRegex(old, r"\$5 too high[^\n]*\(reader #%d; elder #\d+\)" % n)
+
+    def test_verifiers_decide_proposed_links_and_the_matcher_learns(self):
+        self.hire_file("reader", kind="critic")
+        self.hire_file("other", kind="critic")
+        self.hire_file("other2", kind="critic")
+        first = self.place("the settings page", "--cast", "reader")
+        self.cli("wait", first)
+        p = self.cli("close", first)
+        self.assertNotIn("verify", p.stderr)  # nothing proposed, nothing to send anyone to
+        # Two who found the same things: each folded finding has the same
+        # link proposed from both, and one answer decides both.
+        second = self.place("the settings page", "--cast", "other,other2")
+        self.cli("wait", second)
+        p = self.cli("close", second)
+        self.assertIn(f"4 links proposed; `administration verify {second}` decides them", p.stderr)
+        self.assertIn(f"2 links the matcher proposed to other contracts are undecided: `administration verify {second}` decides them", self.cli("report", second).stdout)
+        self.assertIn("2 links the matcher proposed to other contracts are undecided: `administration verify ID` on each contract", self.cli("stats").stdout)
+        out = self.cli("verify", second).stdout
+        self.assertIn("Decided 4 links the matcher proposed.", out)
+        self.assertNotIn('"state": "proposed"', open(os.path.join(self.books, "contracts", second, "links.json")).read())
+        self.assertNotIn("undecided", out)
+        seen = [json.loads(l) for l in open(os.path.join(self.books, "contracts", second, "fake-verifier-seen.jsonl"))]
+        twins = [m for f in seen[0]["findings"] for m in f.get("maybe_same_as", [])]
+        self.assertEqual(sorted(m["ref"] for m in twins), [f"{first} reader #1", f"{first} reader #2"])
+        out = self.cli("report", second).stdout
+        self.assertIn(f"**also seen in contract {first} reader #1** (a verifier's call)", out)
+        self.assertNotIn("undecided", out)
+        self.assertIn(f"**also seen in contract {second} other #1** (a verifier's call)", self.cli("report", first).stdout)
+        stats = self.cli("stats").stdout
+        self.assertIn("4 held, 0 didn't (100% right)", stats)
+        self.assertNotIn("undecided", stats)
+        # The session's decision stands over the verifier's, and a verifier
+        # never changes it back.
+        subprocess.run([binary(), "verdicts", second, "-"], env=self.env, cwd=self.project, capture_output=True, text=True, check=True,
+                       input=json.dumps({"other": [{"finding": 1, "verdict": "confirmed", "not_also": [f"{first} reader #1"]}]}))
+        self.assertIn("3 held, 1 didn't", self.cli("stats").stdout)
+        links = {(l["from"], l["to"]): l for l in json.load(open(os.path.join(self.books, "contracts", second, "links.json")))}
+        l = links[("other #1", f"{first} reader #1")]
+        self.assertEqual((l["state"], l["by"]), ("rejected", "session"))
+        # The session's rejection stands in the summary over the verifier's
+        # confirmation of the same link from the finding's other finder.
+        out = self.cli("report", second).stdout
+        self.assertNotIn(f"also seen in contract {first} reader #1", out)
+        self.assertIn(f"also seen in contract {first} reader #2", out)
+        self.assertIn("checked already", self.cli("verify", second).stdout)
+        # Checked findings with a link nobody decided go back for the link
+        # alone; their verdict stands.
+        third = self.place("the settings page", "--cast", "reader")
+        self.cli("wait", third)
+        self.cli("close", third)
+        subprocess.run([binary(), "verdicts", third, "-"], env=self.env, cwd=self.project, capture_output=True, text=True, check=True,
+                       input=json.dumps({"reader": [{"finding": 1, "verdict": "likely", "why": "mine"}, {"finding": 2, "verdict": "likely", "why": "mine too"}]}))
+        out = self.cli("verify", third).stdout
+        self.assertIn("Verifying 2 findings (2 checked already, for their links)", out)
+        self.assertNotIn("Checked", out)
+        self.assertIn("links the matcher proposed", out)
+        v = json.load(open(os.path.join(self.pdir(third, "reader"), "verdicts.json")))
+        self.assertEqual([(x["verdict"], x.get("by", "")) for x in v], [("likely", ""), ("likely", "")])
+
     def test_findings_seen_in_two_contracts_are_linked_and_learned_from(self):
         # A critic's contract and a user's, on the same work: the matcher
         # proposes the same bug in both, the check confirms or rejects, and
@@ -1737,7 +2105,7 @@ class Changes(Base):
         self.assertEqual({(l["from"], l["to"], l["state"]) for l in links},
                          {("other #1", f"{first} reader #1", "proposed"), ("other #2", f"{first} reader #2", "proposed")})
         out = self.cli("report", second).stdout
-        self.assertIn(f"maybe the same as contract {first} reader #1 (proposed: same words)", out)
+        self.assertIn(f"maybe the same as contract {first} reader #1 (proposed: same words, same page)", out)
         # The check: one is the same bug, one isn't.
         p = subprocess.run([binary(), "verdicts", second, "-"], env=self.env, cwd=self.project, capture_output=True, text=True,
                            input=json.dumps({"other": [{"finding": 1, "verdict": "confirmed", "also": [f"{first} reader #1"]},
@@ -1811,8 +2179,13 @@ class Changes(Base):
         a = {v["finding"]: v for v in json.load(open(os.path.join(self.pdir(cid, "a"), "verdicts.json")))}
         self.assertEqual((a[1]["verdict"], a[1]["by"]), ("confirmed", "verifier"))
         self.assertIn("checked already", self.cli("verify", cid).stdout)
-        # The verifier's one check of the folded finding is a check under each name.
-        self.assertIn("2 of the 3 checks above are a verifier's that nobody has reviewed since", self.cli("stats").stdout)
+        # The verifier's one check of the folded finding is a check under each
+        # name, and so is the session's (a #2 is folded with b #2).
+        self.assertIn("2 of the 4 checks above are a verifier's that nobody has reviewed since", self.cli("stats").stdout)
+        # Its usage is kept, like a professional's, and shown nowhere.
+        self.assertEqual(json.loads(self.cli("stats", "--json").stdout)["checking"]["verifier"]["runs"], 1)
+        sp = [json.loads(l) for l in open(os.path.join(self.books, "contracts", cid, "spend.jsonl"))]
+        self.assertEqual([(x["who"], x["state"], x["turns"]) for x in sp if x["who"] == "verifier"], [("verifier", "done", 3)])
         # One verify at a time.
         import fcntl
         with open(os.path.join(self.books, "contracts", cid, ".verify.lock"), "a") as lk:
@@ -1842,6 +2215,27 @@ class Changes(Base):
         self.assertNotIn("zz99", self.cli("status").stdout)
         self.assertFalse(os.path.exists(d))
 
+    def test_a_check_whose_pid_went_to_another_process_is_cleared(self):
+        # The pid is alive, but it started at another time: someone else's.
+        here = str(os.getpid())
+        utc = {**os.environ, "TZ": "UTC", "LC_ALL": "C"}
+        started = " ".join(subprocess.run(["ps", "-o", "lstart=", "-p", here], capture_output=True, text=True, env=utc).stdout.split())
+        for cid, start in (("zz98", "Mon Jan  1 00:00:00 2001"), ("zz97", started)):
+            d = os.path.join(self.books, "contracts", cid)
+            write(os.path.join(d, "contract.json"), json.dumps({"id": cid, "target": "room check", "project": self.project,
+                                                               "placed_at": "2026-10-31T00:00:00Z", "placed_by": "x", "professionals": []}))
+            write(os.path.join(d, "check.pid"), f"{here} {start}\n")
+        self.cli("status", env={"TZ": "Asia/Tokyo"})  # asked from another zone, the same start
+        self.assertFalse(os.path.exists(os.path.join(self.books, "contracts", "zz98")))
+        self.assertTrue(os.path.exists(os.path.join(self.books, "contracts", "zz97")))  # still running
+        # One an older version wrote, with the pid alone, is alive while the pid is.
+        d = os.path.join(self.books, "contracts", "zz96")
+        write(os.path.join(d, "contract.json"), json.dumps({"id": "zz96", "target": "room check", "project": self.project,
+                                                           "placed_at": "2026-10-31T00:00:00Z", "placed_by": "x", "professionals": []}))
+        write(os.path.join(d, "check.pid"), here + "\n")
+        self.cli("status")
+        self.assertTrue(os.path.exists(d))
+
     def test_close_folds_the_same_finding_and_shows_each_check(self):
         # Two who found the same thing on their own are one line, and the
         # check recorded for it shows beside it.
@@ -1853,6 +2247,9 @@ class Changes(Base):
         out = self.cli("report", cid).stdout
         self.assertIn("the save button does nothing on /settings (a #1; b #1)", out)
         self.assertIn("4 findings in all, 2 once the same claim from several is folded into one, none checked yet", out)
+        p = subprocess.run([binary(), "verdicts", cid, "-"], input='{"a": [{"finding": 1, "verdict": "confirmed", "tag": "OLD"}]}',
+                           env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertIn("marks mean something only on a contract on changes", p.stderr)  # not one
         p = subprocess.run([binary(), "verdicts", cid, "-"], input='{"a": [{"finding": 1, "verdict": "confirmed", "why": "save() is never called"}]}',
                            env=self.env, cwd=self.project, capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -1893,7 +2290,10 @@ class Books(Base):
         cid = self.place("x", "--cast", "a")
         self.cli("wait", cid)
         s = self.status(cid)["status"]["a"]
-        self.assertEqual((s["cost_usd"], s["turns"], s["tokens_in"], s["tokens_out"]), (0.0125, 7, 1000, 300))
+        # Turns and tokens add up over its closing events (the brief, then
+        # two send-backs, each reporting only its own answer's); the cost
+        # each reports is the session's so far.
+        self.assertEqual((s["cost_usd"], s["turns"], s["tokens_in"], s["tokens_out"]), (0.0125, 9, 1110, 340))
         self.assertNotIn("--max-budget-usd", self.call(cid, "a")["argv"])
         for out in (self.cli("stats").stdout, self.cli("status", cid).stdout, self.cli("wait", cid).stdout,
                     open(self.cli("close", cid).stdout.strip()).read()):
@@ -2160,7 +2560,7 @@ class Sandboxed(Base):
 
     def test_a_build_that_links_out_of_the_room_is_refused(self):
         self.cli_equipment(setup='#!/bin/sh\nmkdir -p "$ADMINISTRATION_EQUIPMENT_DIR/bin"\nln -s /usr/bin/env "$ADMINISTRATION_EQUIPMENT_DIR/bin/slugify"\n')
-        cid = self.place("x", "--cast", "edge-caser")
+        cid = self.place("x", "--cast", "edge-caser", early=3)
         self.cli("wait", cid, check=3)
         self.assertIn("links out of the room", self.status(cid)["status"]["edge-caser"]["reason"])
 
@@ -2220,7 +2620,7 @@ class KeptHouse(Base):
     def test_a_clone_finds_the_house_kept_for_its_origin(self):
         self.keep_house()
         for remote in (self.ORIGIN, "https://github.com/acme/shop", "https://GitHub.com/acme/shop.git/",
-                       "ssh://git@github.com:22/acme/shop.git", "https://someone@github.com/acme/shop.git"):
+                       "ssh://git@github.com:22/acme/shop.git"):
             self.git("remote", "set-url", "origin", remote)
             v = self.roster()
             self.assertEqual(v["house"], {"dir": self.kept, "where": "machine", "origin": "github.com/acme/shop"}, remote)
@@ -2418,6 +2818,16 @@ class With(Base):
         run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
         self.assertIn("the change itself", open(os.path.join(self.books, "director", run, "in", "range.txt")).read())
         self.assertIn("the change itself", open(os.path.join(self.books, "director", run, "in", "recent.txt")).read())
+        # Amended, a cast starts from that one's plan and specialists.
+        write(os.path.join(self.books, "director", run, "out", "cast.md"), "# Cast\n- keeper: the a file\n")
+        write(os.path.join(self.books, "director", run, "out", "candidates", "keeper.md"), professional("keeper", kind="critic"))
+        out = self.cli("director", "cast", "these changes", "--changes", "--base", "main", "--amend", run, check=None).stdout
+        again = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        prev = os.path.join(self.books, "director", again, "in", "previous")
+        self.assertIn("keeper", open(os.path.join(prev, "cast.md")).read())
+        self.assertTrue(os.path.exists(os.path.join(prev, "candidates", "keeper.md")))
+        self.assertIn("This amends an earlier cast", open(os.path.join(self.books, "director", again, "in", "job.md")).read())
+        self.assertEqual(self.cli("director", "train", "someone", "--amend", run, check=1).returncode, 1)
 
 
     def test_director_is_told_the_projects_equipment(self):

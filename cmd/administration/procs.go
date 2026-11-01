@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -184,4 +186,48 @@ func listening(ports []int) []int {
 		}
 	}
 	return open
+}
+
+// procStarted is when pid started, as ps prints it (to the second, in UTC
+// and the C locale, so whoever asks gets the same text), or "" when ps
+// can't say: with the pid, it names one process, as a pid is reused, but
+// hardly within the second.
+func procStarted(pid int) string {
+	cmd := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid))
+	cmd.Env = append(os.Environ(), "TZ=UTC", "LC_ALL=C")
+	b, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(string(b)), " ")
+}
+
+// writeCheckPid says a room-check or equipment-check is still running: its
+// pid and when it started, so sweepChecks can tell it from a later process
+// that was given the same pid.
+func writeCheckPid(dir string) {
+	pid := os.Getpid()
+	// Whole or not at all: an empty file is a check still starting.
+	tmp := filepath.Join(dir, "check.pid.tmp")
+	if os.WriteFile(tmp, []byte(fmt.Sprintf("%d %s\n", pid, procStarted(pid))), 0o600) == nil {
+		_ = os.Rename(tmp, filepath.Join(dir, "check.pid"))
+	}
+}
+
+// checkAlive is whether the check that wrote a check.pid still runs.
+func checkAlive(b []byte) (alive, empty bool) {
+	pidS, started, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
+	pid, _ := strconv.Atoi(pidS)
+	if pid <= 0 {
+		return false, true
+	}
+	if syscall.Kill(pid, 0) != nil {
+		return false, false
+	}
+	// Recorded with its start (an older check wrote only the pid): a
+	// different start is someone else's process. ps failing says nothing.
+	if now := procStarted(pid); started != "" && now != "" && now != started {
+		return false, false
+	}
+	return true, false
 }

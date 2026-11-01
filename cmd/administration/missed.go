@@ -17,7 +17,7 @@ import (
 // review tunes the professional who should have caught it, so the kind of
 // thing is a finding next time, and apply files the miss away as tuned.
 
-func missedDir(project string) string { return filepath.Join(houseDir(project), "missed") }
+func missedDir(project string) string { return filepath.Join(adminDir(project), "missed") }
 
 var missedName = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9]+)?\.md$`)
 
@@ -125,7 +125,7 @@ func checkTuned(project, out string) []string {
 			problems = append(problems, fmt.Sprintf("professionals/%s: no professional %s on the roster (a new one is a candidate)", base, name))
 			continue
 		}
-		if !inside(project, old.Path) {
+		if !projectOwns(project, old.Path) {
 			problems = append(problems, fmt.Sprintf("professionals/%s: %s isn't the project's own (%s); propose the change in proposals.md", base, name, old.Path))
 			continue
 		}
@@ -142,6 +142,12 @@ func checkTuned(project, out string) []string {
 		}
 	}
 	return problems
+}
+
+// projectOwns is whether a file is the project's own: in it, or in its
+// .administration wherever that is (a worktree's main checkout, a link).
+func projectOwns(project, path string) bool {
+	return inside(project, path) || inside(adminDir(project), path)
 }
 
 func inside(dir, path string) bool {

@@ -39,3 +39,11 @@ func TestToolLabelShowsTheCommandServersArgs(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestWatchShowsARecordedFindingAsOne(t *testing.T) {
+	line := []byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__house__record_finding","input":{"what":"the total is $5 high","where":"/cart","mark":"NEW"}}]}}`)
+	got := watchLines(line)
+	if len(got) != 1 || got[0] != "★ FINDING: NEW: the total is $5 high (at /cart)" {
+		t.Fatalf("%q", got)
+	}
+}

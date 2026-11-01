@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,12 +15,13 @@ import (
 // project's .administration/ folder, committed with it. A project that
 // can't carry one keeps it on the machine instead, under projectsDir() at
 // the path of its origin remote (github.com/acme/shop), so every clone and
-// worktree of it finds the same house. The project's own always comes
-// first.
+// worktree of it finds the same house. The project's own (or, in a linked
+// worktree, its main checkout's) always comes first.
 type projectHouse struct {
 	Dir string `json:"dir"`
-	// "project" (its .administration/), "machine" (kept for it under
-	// projectsDir()), or "none" (Dir is then where one would be made).
+	// "project" (its .administration/), "checkout" (a linked worktree's
+	// main checkout's), "machine" (kept for it under projectsDir()), or
+	// "none" (Dir is then where one would be made).
 	Where string `json:"where"`
 	// The origin it was found by, as host/owner/repo.
 	Origin string   `json:"origin,omitempty"`
@@ -39,20 +39,38 @@ func projectsDir() string {
 var origins sync.Map // project → its origin as host/owner/repo, or ""
 
 // originOf is the project's origin remote as host/owner/repo, or "" when it
-// has none. A worktree's is its repository's.
+// has none. A worktree's is its repository's. It reads git through git(),
+// so the repo's own config runs nothing.
 func originOf(project string) string {
 	if v, ok := origins.Load(project); ok {
 		return v.(string)
 	}
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	cmd.Dir = project
-	out, err := cmd.Output()
 	key := ""
-	if err == nil {
-		key = remoteKey(strings.TrimSpace(string(out)))
+	if isDir(project) {
+		if out, err := git(project, "remote", "get-url", "origin"); err == nil {
+			key = remoteKey(out)
+		}
 	}
 	origins.Store(project, key)
 	return key
+}
+
+// keptHouse is where a house kept on this machine for the project would be,
+// or "" when it has no origin to key one by.
+// A project in a subfolder of its repository (apps/web in a monorepo) has
+// the subfolder's own: projects/<origin>/apps/web.
+func keptHouse(project string) string {
+	o := originOf(project)
+	if o == "" {
+		return ""
+	}
+	kept := filepath.Join(projectsDir(), filepath.FromSlash(o))
+	if sub, err := git(project, "rev-parse", "--show-prefix"); err == nil && sub != "" {
+		if clean := filepath.Clean(sub); clean != "." && !strings.HasPrefix(clean, "..") {
+			kept = filepath.Join(kept, clean)
+		}
+	}
+	return kept
 }
 
 var scpRemote = regexp.MustCompile(`^(?:[^@/]+@)?([^:/]+):(.+)$`)
@@ -68,11 +86,19 @@ func remoteKey(remote string) string {
 			return ""
 		}
 		host, path = u.Hostname(), u.Path
+		// Another port is another server; the scheme's own isn't.
+		if port := u.Port(); port != "" && port != map[string]string{"https": "443", "http": "80", "ssh": "22", "git": "9418"}[u.Scheme] {
+			host += ":" + port
+		}
 	} else if m := scpRemote.FindStringSubmatch(remote); m != nil && !strings.HasPrefix(remote, "/") && !strings.HasPrefix(remote, ".") {
 		host, path = m[1], m[2]
 	}
 	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
 	host = strings.ToLower(host)
+	// These hosts don't tell Acme/Shop from acme/shop; one house for both.
+	if host == "github.com" || host == "gitlab.com" || host == "bitbucket.org" {
+		path = strings.ToLower(path)
+	}
 	if host == "" || path == "" {
 		return ""
 	}
@@ -85,50 +111,32 @@ func remoteKey(remote string) string {
 	return strings.Join(parts, "/")
 }
 
-// houseOf finds the project's house: its .administration/, else the one
-// kept on this machine for its origin.
+// houseOf says where the project's house is (adminDir finds it) and how it
+// was found, or where it was looked for when there's none.
 func houseOf(project string) projectHouse {
 	own := filepath.Join(project, ".administration")
-	h := projectHouse{Dir: own, Where: "none", Looked: []string{own}}
-	if isDir(own) {
-		h.Where, h.Looked = "project", nil
-		return h
-	}
-	if project == "" {
-		return h
-	}
-	if h.Origin = originOf(project); h.Origin != "" {
-		kept := filepath.Join(projectsDir(), filepath.FromSlash(h.Origin))
-		if isDir(kept) {
-			return projectHouse{Dir: kept, Where: "machine", Origin: h.Origin}
+	d := adminDir(project)
+	if !isDir(d) {
+		h := projectHouse{Dir: own, Where: "none", Looked: []string{own}, Origin: originOf(project)}
+		if kept := keptHouse(project); kept != "" {
+			h.Looked = append(h.Looked, kept)
 		}
-		h.Looked = append(h.Looked, kept)
+		return h
 	}
-	return h
-}
-
-// houseDir is the folder the project's house is in (or would be).
-func houseDir(project string) string { return houseOf(project).Dir }
-
-func isDir(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && st.IsDir()
-}
-
-// houseFile names a file in the project's house for a person to read:
-// .administration/setup when it's the project's own, its full path when it's
-// kept on the machine.
-func houseFile(project string, parts ...string) string {
-	h := houseOf(project)
-	if h.Where == "machine" {
-		return filepath.Join(append([]string{h.Dir}, parts...)...)
+	switch kept := keptHouse(project); {
+	case within(d, project) || d == realPath(own):
+		// The project's own, or its own linked elsewhere.
+		return projectHouse{Dir: d, Where: "project"}
+	case kept != "" && realPath(kept) == d:
+		return projectHouse{Dir: d, Where: "machine", Origin: originOf(project)}
+	default:
+		return projectHouse{Dir: d, Where: "checkout"}
 	}
-	return filepath.Join(append([]string{".administration"}, parts...)...)
 }
 
 // noHouse says where the project's house was looked for and not found.
 func (h projectHouse) noHouse(project string) string {
-	if h.Origin == "" {
+	if len(h.Looked) < 2 {
 		return fmt.Sprintf("%s has no .administration/setup: no %s, and no origin remote to find a house kept on this machine by (in %s)", project, h.Looked[0], projectsDir())
 	}
 	return fmt.Sprintf("%s has no .administration/setup: no %s, and no house kept on this machine for %s at %s", project, h.Looked[0], h.Origin, h.Looked[1])
@@ -173,7 +181,7 @@ func housePath(project, p string) string {
 		return p
 	}
 	clean := filepath.Clean(p)
-	dir := houseDir(project)
+	dir := adminDir(project)
 	if rest, ok := strings.CutPrefix(filepath.ToSlash(clean), ".administration/"); ok {
 		return filepath.Join(dir, filepath.FromSlash(rest))
 	}
@@ -188,7 +196,8 @@ func housePath(project, p string) string {
 	return abs
 }
 
+
 // inProject says whether p is in the project or in its house.
 func inProject(project, p string) bool {
-	return within(p, project) || within(p, houseDir(project))
+	return within(p, project) || within(p, adminDir(project))
 }

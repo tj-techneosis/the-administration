@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"context"
 	"fmt"
 	"os"
@@ -45,7 +44,7 @@ func cmdRoomCheck(args []string) error {
 	}
 	// A session that wrote the hook often can't chmod it; this is the
 	// person's own file, and running it is what every room does.
-	_, fixed, err := houseSetup(project, true)
+	hook, fixed, err := houseSetup(project, true)
 	if err != nil {
 		if u, ok := err.(usageError); ok {
 			return usageError{u.msg + ". room-check checks the setup hook only; equipment-check NAME checks a piece of equipment"}
@@ -53,7 +52,7 @@ func cmdRoomCheck(args []string) error {
 		return err
 	}
 	if fixed {
-		fmt.Printf("Made %s executable.\n", houseFile(project, "setup"))
+		fmt.Printf("Made %s executable.\n", shown(project, hook))
 	}
 	books, err := booksDir()
 	if err != nil {
@@ -75,7 +74,10 @@ func cmdRoomCheck(args []string) error {
 	defer os.RemoveAll(dir)
 	// Killed outright, it can't clean up; this says it's still running, and
 	// sweepChecks clears it once it isn't.
-	_ = os.WriteFile(filepath.Join(dir, "check.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	writeCheckPid(dir)
+	if bad := badPorts(project); len(bad) > 0 {
+		portWarning(bad)
+	}
 	c := &contract{ID: id, Target: "room check", Project: project, PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Data: data,
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house"}}}
 	ci := &c.Professionals[0]
@@ -94,7 +96,7 @@ func cmdRoomCheck(args []string) error {
 	defer stop()
 	s := status{State: "setup"}
 	save := func() { _ = writeJSON(filepath.Join(pd, "status.json"), s) }
-	fmt.Printf("Building a room with %s (up to %s)...\n", houseFile(project, "setup"), setupTimeout())
+	fmt.Printf("Building a room with %s (up to %s)...\n", shown(project, hook), setupTimeout())
 	t0 := time.Now()
 	m, berr := buildRoom(ctx, c, ci, pd, &s, save)
 	took := time.Since(t0).Round(time.Second)
@@ -118,8 +120,33 @@ func cmdRoomCheck(args []string) error {
 	if s.Room != "" {
 		_ = os.RemoveAll(filepath.Dir(s.Room))
 	}
+	if berr != nil && ctx.Err() != nil {
+		if bTail != "" {
+			fmt.Println("Stopped while the before app was building (the room with the changes had come up); it's cleared away.")
+		} else {
+			fmt.Println("Stopped before the room came up; it's cleared away.")
+		}
+		return startError{"room check stopped"}
+	}
 	if berr != nil {
-		fmt.Printf("The room didn't come up after %s: %v\n", took, berr)
+		// The check's folder goes when it returns, the log with it: keep a
+		// copy where the person can open it (the before app's, when that's
+		// what failed).
+		why := berr.Error()
+		failed := "setup.log"
+		if bTail != "" {
+			failed = "setup-before.log"
+		}
+		if kept := keepCheckLogs(books, id, pd, failed); kept != "" {
+			why = strings.ReplaceAll(why, filepath.Join(pd, failed), kept)
+			why = strings.ReplaceAll(why, "see "+failed, "see "+kept)
+			fmt.Printf("The full %slog is kept at %s.\n", map[bool]string{true: "before app's setup ", false: "setup "}[bTail != ""], kept)
+		}
+		if took < time.Second {
+			fmt.Printf("The room's setup failed at once: %s\n", why)
+		} else {
+			fmt.Printf("The room didn't come up after %s: %s\n", took, why)
+		}
 		if logTail != "" {
 			fmt.Printf("\nThe end of %ssetup's output:\n%s\n", bTail, logTail)
 		}
@@ -171,4 +198,34 @@ func tail(path string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// keepCheckLogs copies a failed check's setup logs out of its folder, which
+// goes when the check returns, into the books' checks folder (the last
+// twenty logs kept), and returns where the one that failed went.
+func keepCheckLogs(books, id, pd, failed string) string {
+	out := filepath.Join(books, "checks")
+	if os.MkdirAll(out, 0o700) != nil {
+		return ""
+	}
+	// The id goes with its contract folder and may be drawn again: the time
+	// keeps one check's log from replacing another's.
+	stamp := time.Now().Format("20060102-150405")
+	kept := ""
+	for _, name := range []string{"setup.log", "setup-before.log"} {
+		b, err := os.ReadFile(filepath.Join(pd, name))
+		if err != nil {
+			continue
+		}
+		dst := filepath.Join(out, stamp+"-"+id+"-"+name)
+		if os.WriteFile(dst, b, 0o600) == nil && name == failed {
+			kept = dst
+		}
+	}
+	logs, _ := filepath.Glob(filepath.Join(out, "*.log"))
+	sort.Sort(sort.Reverse(sort.StringSlice(logs))) // newest first, by the stamp
+	for _, l := range logs[min(len(logs), 20):] {
+		_ = os.Remove(l)
+	}
+	return kept
 }

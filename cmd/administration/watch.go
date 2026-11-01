@@ -195,6 +195,13 @@ func watchLines(line []byte) []string {
 					}
 				}
 			case "tool_use":
+				// The record's tools are what was found, not an action: shown
+				// as written lines are.
+				if strings.HasPrefix(c.Name, "mcp__house__") {
+					raw, _ := json.Marshal(c.Input)
+					out = append(out, recordShown(c.Name, raw)...)
+					continue
+				}
 				out = append(out, "→ "+toolLabel(c.Name, c.Input))
 			}
 		}

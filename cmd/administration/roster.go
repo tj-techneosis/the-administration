@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -251,6 +252,12 @@ type projectConfig struct {
 	Handout struct {
 		Files []string `toml:"files"`
 	} `toml:"handout"`
+	// The files a user can put into the page, as from their own computer
+	// (desk.go): copied in, or made to a size.
+	Desk struct {
+		Files []string   `toml:"files"`
+		Make  []deskMake `toml:"make"`
+	} `toml:"desk"`
 	// The data a room can start from, besides the hook's default: the
 	// project's own ways of getting data for local testing (a seed script,
 	// a dump its tooling pulled). place --data NAME hands the name to the
@@ -263,12 +270,16 @@ type projectConfig struct {
 		// beyond PATH, HOME and the like (DOCKER_HOST, say). Never a token
 		// the app could show a professional.
 		PassEnv []string `toml:"pass_env"`
+		// More named ports for each room, beyond web, api, db and aux
+		// (an identity provider, an object store, a relay): claimed with
+		// the rest, so parallel rooms never race for one.
+		Ports []string `toml:"ports"`
 	} `toml:"setup"`
 }
 
 func loadProjectConfig(project string) projectConfig {
 	var cfg projectConfig
-	_, _ = toml.DecodeFile(filepath.Join(houseDir(project), "roster.toml"), &cfg)
+	_, _ = toml.DecodeFile(filepath.Join(adminDir(project), "roster.toml"), &cfg)
 	return cfg
 }
 
@@ -372,7 +383,7 @@ func loadRoster(project string) (*rosterView, error) {
 		v.Problems = append(v.Problems, fmt.Sprintf("%s: %v", f, err))
 	}
 
-	cont := v.House.Dir
+	cont := adminDir(project)
 	own, _ := filepath.Glob(filepath.Join(cont, "professionals", "*.md"))
 	sort.Strings(own)
 	for _, f := range own {
@@ -406,7 +417,6 @@ func loadRoster(project string) (*rosterView, error) {
 		}
 		f := filepath.Join(project, ".claude", "agents", name+".md")
 		if file := cfg.Critics[name].File; file != "" {
-			f = file
 			f = housePath(project, file)
 		}
 		b, err := os.ReadFile(f)
@@ -427,7 +437,7 @@ func loadRoster(project string) (*rosterView, error) {
 				}
 			}
 		}
-		v.Problems = append(v.Problems, fmt.Sprintf("critic %s (%s): %v", name, rel(project, f), err))
+		v.Problems = append(v.Problems, fmt.Sprintf("critic %s (%s): %v", name, shown(project, f), err))
 	}
 	// The house's rooms for the kinds of project this is: web with a setup
 	// hook, device with a screen (a phone, or a window driven by one).
@@ -435,7 +445,7 @@ func loadRoster(project string) (*rosterView, error) {
 	// neither kind fits; one with nothing set up yet sees them all.
 	kinds := map[string]bool{}
 	if project != "" {
-		if _, err := os.Stat(filepath.Join(cont, "setup")); err == nil {
+		if _, err := os.Stat(filepath.Join(adminDir(project), "setup")); err == nil {
 			kinds["web"] = true
 		}
 	}
@@ -466,19 +476,25 @@ func loadRoster(project string) (*rosterView, error) {
 	return v, nil
 }
 
-func rel(base, p string) string {
-	if r, err := filepath.Rel(base, p); err == nil {
-		return r
+// houseFile names a file in the project's .administration for the person:
+// relative to the project when it's in it, in full when it's elsewhere (a
+// worktree's main checkout), so the path they're shown is one that exists.
+func houseFile(project string, parts ...string) string {
+	return shown(project, filepath.Join(append([]string{adminDir(project)}, parts...)...))
+}
+
+// shown is a path for the person: relative to the project when it's in it,
+// in full when it isn't.
+func shown(project, p string) string {
+	if within(p, project) {
+		return rel(project, p)
 	}
 	return p
 }
 
-// shown is a path for a person to read: relative to the project when it's
-// in it (.administration/roster.toml), whole when it's in a house kept on
-// the machine.
-func shown(project, p string) string {
-	if within(p, project) {
-		return rel(project, p)
+func rel(base, p string) string {
+	if r, err := filepath.Rel(base, p); err == nil {
+		return r
 	}
 	return p
 }
@@ -509,6 +525,8 @@ func cmdRoster(args []string) error {
 	switch h := v.House; h.Where {
 	case "project":
 		fmt.Printf("House: %s (in the project)\n\n", shown(project, h.Dir))
+	case "checkout":
+		fmt.Printf("House: %s (the main checkout's, for this worktree)\n\n", h.Dir)
 	case "machine":
 		fmt.Printf("House: %s (kept on this machine for %s)\n\n", h.Dir, h.Origin)
 	default:
@@ -563,7 +581,11 @@ func cmdCheck(args []string) error {
 func oneLine(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > max {
-		return s[:max-1] + "…"
+		cut := max - 1
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut-- // never half a character
+		}
+		return s[:cut] + "…"
 	}
 	return s
 }
@@ -896,15 +918,17 @@ func checkEquipment(project, name string) (*equipment, error) {
 var toolNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // projectProgram is an executable the project declared, by a path inside
-// the project or its house (housePath): one program, no arguments, no way
-// out of either folder.
+// the project: one program, no arguments, no way out of the folder.
 func projectProgram(project, rel string) (string, error) {
 	if rel == "" || strings.ContainsAny(rel, " \t;&|<>$`'\"(){}*?[]~\\\n") || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("%q: a program's path inside the project, nothing else", rel)
 	}
+	// .administration/... is the house's, wherever it is (a worktree's main
+	// checkout's, or kept on the machine); another path is the project's,
+	// or the house's when the project has nothing there.
 	abs := housePath(project, rel)
 	if !inProject(project, abs) {
-		return "", fmt.Errorf("%q is outside the project", rel)
+		return "", fmt.Errorf("%q is outside the project and its house", rel)
 	}
 	st, err := os.Stat(abs)
 	if err != nil || st.IsDir() {
@@ -916,7 +940,7 @@ func projectProgram(project, rel string) (string, error) {
 		// file that really is in the project or its house (not a link out).
 		real, err := filepath.EvalSymlinks(abs)
 		proj, perr := filepath.EvalSymlinks(project)
-		home, herr := filepath.EvalSymlinks(houseDir(project))
+		home, herr := filepath.EvalSymlinks(adminDir(project))
 		inside := err == nil && (perr == nil && within(real, proj) || herr == nil && within(real, home))
 		if !inside || !st.Mode().IsRegular() || os.Chmod(real, st.Mode()|0o100) != nil {
 			return "", fmt.Errorf("%s isn't an executable file", rel)

@@ -20,7 +20,9 @@ curl -fsSL https://raw.githubusercontent.com/tj-techneosis/the-administration/ma
 
 When the person asks to upgrade the Administration, run `administration
 upgrade` and pass on what it says (it tells them when the plugin itself
-needs `/reload-plugins`; usually nothing does).
+needs `/reload-plugins`; usually nothing does). To only ask whether there's
+a newer one, `administration upgrade --check` (exit 5 when there is); a
+scheduler can run that weekly and tell them.
 
 Professionals run the standalone Claude Code CLI (`claude`), which the VS
 Code extension doesn't provide on its own. If `place` says `claude` isn't
@@ -77,7 +79,10 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
      `! <command>` runs it here), write the hooks and the
      `[equipment.<name>]` block into the project's `.administration/`, show
      them the hooks (they run as the person, outside every wall), run the
-     plan's "how to tell it works" check, then cast again. Or place the
+     plan's "how to tell it works" check, then cast again with `--amend <run>`
+     (the run that asked for it): it keeps the specialists that cast got
+     right and adds what the equipment makes possible, instead of a whole
+     new cast. Or place the
      cast now and add the equipment for the next contract; say which.
 3. **Propose the cast** in a few lines, and wait for a yes unless the person
    already said to go ahead:
@@ -110,7 +115,11 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    start from.
 5. **Place it**: `administration place "<target>" --with <run> [--cast a,b]
    [--changes] [--brief <name>="..."]... [--data <name>] [--coins 10m]`. It
-   prints the contract id and returns at once.
+   prints the contract id and returns within a few seconds (it waits that
+   long to see whether any room fails at once). If it exits 4, there aren't
+   enough rooms free for its users now and nothing was placed: it names the
+   contracts holding them; wait for those (`administration wait <id>`),
+   then place it again.
 6. **Wait in the background**: run `administration wait <id>` with
    `run_in_background` (a foreground wait dies at the Bash time limit). It
    prints a line as each professional's state changes, and returns early
@@ -130,7 +139,11 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    Code), give them the line place printed, `administration watch <id>`,
    to run in a terminal of their own: a live line per action and every
    finding as it's written. Watching changes
-   nothing about the work. If they don't want the panes, `--no-watch`.
+   nothing about the work. Leave them on when nobody is watching, too (a
+   run left going overnight): in Herdr or tmux each closes once its
+   professional is back, and whoever's there can look in while they work;
+   afterwards, the report says what each did. `--no-watch` only when the
+   person says they don't want the panes.
    If they want to see the browsers themselves, place it with
    `--show-browsers`: each user's browser opens as a window on their
    screen. Only when they ask.
@@ -143,10 +156,18 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    person comes back to it, read its summary (`administration report <id>`)
    and check every finding before reporting it.
 
+**Before anything ships** (a merge, a deploy, a release): if the app runs
+and no users have worked the changed flows yet, offer a persona pass first,
+in a line ("Nobody has used the new upload screen as a person would. Place
+users on it before the deploy?"). Critics read the code; only users see
+what a person sees. Offer it once; it's the person's call.
+
 A project with no `.administration/setup` can still place contracts with
 critics (code readers). Browser professionals need the setup hook; if it's
 missing, say so and offer to help write one (see the README's "A House of
-Your Own").
+Your Own"). A linked git worktree uses its main checkout's
+`.administration`: place contracts from inside the worktree (or with
+`--project` on it), and don't link or copy the folder in.
 
 ## Closing a contract
 
@@ -162,13 +183,18 @@ When the wait finishes:
    (the code agrees, but reading can't settle it) or **false** for each,
    with the line that decided it; the summary shows them as "by a
    verifier". If one didn't finish, it says so; run verify again for what
-   it left. Then **review them**, yourself, before reporting: open the line
-   behind every NEW finding and every one marked false, and a few of the
-   confirmed. Never pass a finding on unchecked, by them or by you. The
+   it left. A verifier that finds a mark wrong (an OLD marked NEW) files
+   the finding where it belongs, and says so beside it. Verify also judges
+   each link the matcher proposed (below). Then **review them**, yourself,
+   before reporting: open the line behind every NEW finding and every one
+   marked false, and a few of the confirmed. Never pass a finding on
+   unchecked, by them or by you. The
    summary lists each finding once, with who found it and its number in
    their report (`name #3`); several who found the same thing on their own
-   come first. **Record where you disagree** in the books (yours replace
-   the verifiers'): write them to a file, `{"<name>": [{"finding": 3, "verdict":
+   come first. **Record what you checked** in the books, where you agree as
+   well as where you don't (yours replace the verifiers', and the stats
+   count a verifier's verdict nobody recorded again as unreviewed): write
+   them to a file, `{"<name>": [{"finding": 3, "verdict":
    "confirmed", "why": "..."}]}` (for a folded finding, under each name
    that found it), and run `administration verdicts <id> <file>`; a later
    run adds to earlier ones, and a finding checked again takes the new
@@ -182,6 +208,16 @@ When the wait finishes:
    Check each like a finding: same defect, same cause? Add `"also":
    ["X name #n"]` to that finding's verdict when it is, `"not_also":
    [...]` when it isn't; also add an `also` for any you notice yourself.
+   `verify` decides the proposed ones first, from the code: a link it
+   confirmed shows as "a verifier's call", and one it rejected leaves the
+   summary. Check its confirmations like its verdicts; yours replace
+   them. Until someone decides them the matcher learns nothing, so the
+   summary and `stats` count the undecided. A wrong mark is corrected the
+   same way: `"tag": "OLD"` in the verdict. Recording a verdict without a
+   tag keeps a corrected mark; to undo one, give the mark it was written
+   with (`"UNMARKED"` for none). A finding checked false keeps the mark it
+   was written with. Marks, and corrections, are only for contracts on
+   changes.
    A confirmed link shows on both summaries, first, as the strongest
    evidence there is, and each decision teaches the matcher this
    project's words.
@@ -223,18 +259,40 @@ When the wait finishes:
 **Equipment lost**: a professional whose device died mid-contract (three
 failed screenshots in a row) is told to stop and write what's left as
 unreached, and marked "equipment lost at HH:MM"; their part is partial. Say so, and offer `administration resume
-<id> <name>`: a new contract for them with only what they couldn't reach.
-It also picks up after a professional ran out of coins.
+<id> <name>`: a new contract for them with only what they couldn't reach
+(their whole part again when they wrote nothing down). It also picks up
+after a professional ran out of coins or failed; their report says so
+when there's work left. Resume a part once: a second resume of the same
+part says which contract already picked it up, and you resume from that
+one for whatever it left. Each report's "Told along the way" lists
+what the Administration said to them after the brief (asked at halfway to
+write down what they had, sent back to their plan), and when.
 
 Exit codes: 0 done, 1 error, 2 a room or professional failed, 3 refused by
-the Rules. On a 2, the `wait` line and `administration status <id>` give
+the Rules, 4 not enough rooms free for it now, 5 (from `upgrade --check`
+only) a newer version is out. A 2 or 3 from `place` (or
+`resume`) itself means someone failed in its first seconds (a setup hook
+that exits at once), 3 if any of them was refused: the contract is still
+placed, its id is on the first line, and the message says whether anyone
+else is working on it (then `wait` for them) or not (then `close` it). On a 4, nothing was placed: the message
+names the contracts holding the rooms; wait for one of them
+(`administration wait <id>`), then place it again. A contract that needs
+more rooms than there are at all is an error (1): split its users across
+two. On a 2, the `wait` line and `administration status <id>` give
 each failed professional's reason; for more, read
 `~/.local/share/administration/contracts/<id>/<name>/setup.log` (the room)
 or `claude.log` (the professional) and say what broke. A user whose
 browser never worked did none of their part: say so, and don't pass on
-their findings as tested.
+their findings as tested. One back with "only N of M plan steps done" (in
+`wait`, `status` and the summary) left most of its part untested, whatever
+it found: say what it couldn't reach, and offer `resume` or a fix (a
+user that can't make the file an upload needs, say).
 
 ## Setting a project up
+
+If the project's `.administration/` can't go in its repo (the person says
+so), make the house kept on the machine first (step 7 below), so every
+step after writes there and not into the project.
 
 1. **Bring in their agents** ("set it up", "bring in my agents"): don't
    search for agents yourself. Run `administration director onboard` in the
@@ -294,7 +352,13 @@ their findings as tested.
    `room-check --changes --data <name>`: it also builds the app without
    the changes, as the contract's users get, and a set that needs the new
    code fails there in a minute instead of in the contract.
-6. Remind them to commit `.administration/`. When it can't go in the repo
+6. **Files to upload**: when the app takes uploads (or drops), users need
+   files on their desk: `[desk] files` (the project's own) or
+   `[[desk.make]]` (made to a name, size and count) in `roster.toml`, as
+   the README shows. Without them, a user can't upload anything, and the
+   Director's plan says which files it needs. Never have the app grow a
+   test-only way to make files for this.
+7. Remind them to commit `.administration/`. When it can't go in the repo
    (the person says so), keep the same folder on the machine instead:
    `~/.config/administration/projects/<host>/<owner>/<repo>/`, named by
    the checkout's `origin` remote (`github.com/acme/shop`;

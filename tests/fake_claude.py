@@ -11,6 +11,10 @@ persona's body says: a line "FAKE: <mode>" picks the mode.
   noload     the browser answers, but no page is ever loaded
   release    findings marked NEW, CHANGE and OLD, as on a release check
   plan       a plan of two, answers one; answers the other when sent back
+  retag      a NEW finding the code had before, and one marked "New:"
+  old        retag's first finding, marked OLD
+  partial    a plan of four, one covered and the rest unreached
+  record     keeps its record with the house's tools, not FINDING: lines
 
 With --input-format stream-json the brief comes as the first message on
 stdin; each later message (the Administration sending it back) is recorded
@@ -46,11 +50,29 @@ if os.path.basename(persona) == "verifier.md":
     data = json.loads(prompt)
     assert data["project"] in args, "it can read the project"
     out = []
+    with open(os.path.join(os.getcwd(), "..", "..", "fake-verifier-seen.jsonl"), "a") as seen:
+        seen.write(json.dumps(data) + "\n")
     for f in data["findings"]:
-        if "save button" in f["text"]:
-            out.append({"id": f["id"], "verdict": "confirmed", "why": "settings.js:12 never calls save()"})
+        a = None
+        if f.get("already_checked"):
+            a = {"id": f["id"], "verdict": f["already_checked"], "why": "as before"}
+        elif "save button" in f["text"]:
+            a = {"id": f["id"], "verdict": "confirmed", "why": "settings.js:12 never calls save()"}
         elif "error says" in f["text"]:
-            out.append({"id": f["id"], "verdict": "false", "why": "errors.js:4 shows the message"})
+            a = {"id": f["id"], "verdict": "false", "why": "errors.js:4 shows the message"}
+        elif "$5 too high" in f["text"]:
+            # Marked NEW, but the code was so before the changes.
+            a = {"id": f["id"], "verdict": "confirmed", "why": "cart.js:8 added it before the change", "tag": "OLD"}
+        elif "prints twice" in f["text"]:
+            a = {"id": f["id"], "verdict": "confirmed", "why": "receipt.js:3 prints in both handlers", "tag": "new"}
+        # A proposed link: the same when the words are the same.
+        for m in f.get("maybe_same_as", []):
+            if a is None:
+                continue
+            a.setdefault("also" if m["text"] == f["text"] else "not_also", []).append(m["ref"])
+            a["link_why"] = "same words, same code"
+        if a:
+            out.append(a)
     say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "result": "Checked.\n" + json.dumps(out)})
     sys.exit(0)
 
@@ -64,14 +86,20 @@ if os.path.basename(persona) == "matcher.md":
         contract = os.path.dirname(contract)
     with open(os.path.join(contract, "fake-matcher-seen.jsonl"), "a") as f:
         f.write(json.dumps(data) + "\n")
-    pairs = [{"these": t["ref"], "others": o["ref"], "why": "same words"}
+    pairs = [{"these": t["ref"], "others": o["ref"], "why": "same words, same page"}
              for t in data["these"] for o in data["others"] if t["text"] == o["text"]]
+    # A model thinking aloud: no reason, so no link.
+    pairs += [{"these": t["ref"], "others": o["ref"], "why": "Hmm"}
+              for t in data["these"] for o in data["others"] if t["text"] != o["text"]]
     pairs.append({"these": "nobody #9", "others": "zzzz nobody #9", "why": "made up"})  # refs that don't exist are dropped
     say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": json.dumps(pairs)})
     sys.exit(0)
 
 def text(t):
     say({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}})
+
+def record(tool, **inp):
+    say({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r" + tool, "name": "mcp__house__" + tool, "input": inp}]}})
 
 def browser(ok, tool="browser_navigate", id="t1"):
     say({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "mcp__playwright__" + tool, "input": {}}]}})
@@ -110,6 +138,23 @@ if mode == "error":
     sys.exit(1)
 if mode == "release":
     text("FINDING: NEW: the total on /cart is $5 too high since the change\nFINDING: OLD: the logo is blurry on both\nFINDING: CHANGE: the comment on total() still says tax is added later")
+if mode == "retag":
+    text("FINDING: NEW: the total on /cart is $5 too high since the change\nFINDING: New: the receipt prints twice after paying")
+if mode == "record":
+    record("record_plan", steps=["the settings screen", "the profile screen"])
+    record("record_finding", what="the export downloads an empty file; expected the orders in it", where="/orders, Export",
+           mark="NEW", evidence="orders.csv is 0 bytes")
+    record("record_step", step=1, done=True)
+    record("record_finding", what="the photo upload hangs at 99 percent", where="/profile")
+    record("record_step", step=2, done=False, why="the profile page needs a photo")
+    record("record_unreached", what="billing", why="no link to it")
+    # A restatement in prose at the end is folded into the recorded one.
+    text("What broke:\nFINDING: NEW: the export downloads an empty file; expected the orders in it (at /orders, Export)")
+if mode == "partial":
+    text("PLAN 1: the upload screen\nPLAN 2: a batch of files\nPLAN 3: a dropped link\nPLAN 4: a reload mid-upload\n"
+         "COVERED 1\nUNREACHED: 2 no way to make a file\nUNREACHED: 3 no file to upload\nUNREACHED: 4 no file to upload")
+if mode == "old":
+    text("FINDING: OLD: the total on /cart is $5 too high since the change")
 if mode == "plan":
     text("PLAN 1: the settings screen\nPLAN 2: the profile screen\nCOVERED 1")
 text("FINDING: the save button does nothing on /settings\nFINDING: the error says 'undefined'")
@@ -125,4 +170,6 @@ if streaming:
         with open(os.path.join(here, "fake-sent-back.jsonl"), "a") as f:
             f.write(json.dumps(sent) + "\n")
         answer = "COVERED 2" if mode == "plan" and "PLAN 2" in sent else "Nothing more."
-        say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": answer})
+        # Each answer's own usage, as claude reports it: only that answer's.
+        say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": answer,
+             "usage": {"input_tokens": 5, "cache_read_input_tokens": 50, "output_tokens": 20}})

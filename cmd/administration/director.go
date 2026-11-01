@@ -80,7 +80,7 @@ var runRE = regexp.MustCompile(`^d[0-9]{8}-[0-9]{6}-[a-z0-9]{4}$`)
 
 func directorJob(job string, args []string) (int, error) {
 	f, err := parseFlags(args, map[string]bool{"project": true, "model": true, "coins": true,
-		"contract": true, "agents": true, "changes": false, "base": true})
+		"contract": true, "agents": true, "changes": false, "base": true, "amend": true})
 	if err != nil {
 		return exitError, err
 	}
@@ -90,6 +90,25 @@ func directorJob(job string, args []string) (int, error) {
 	}
 	if (job == "train" || job == "cast") && len(f.pos) == 0 {
 		return exitError, usageError{"director " + job + " needs words: who is needed, or the contract's target"}
+	}
+	// An amended cast starts from an earlier one: what it got right stays,
+	// and the run pays only for what changed (new equipment, a gap).
+	var amend string
+	if f.has("amend") {
+		if job != "cast" {
+			return exitError, usageError{"--amend goes with director cast"}
+		}
+		prev, prd, err := loadRun(f.get("amend"))
+		if err != nil {
+			return exitError, err
+		}
+		if prev.Job != "cast" || realPath(prev.Project) != realPath(project) {
+			return exitError, usageError{fmt.Sprintf("%s isn't a cast on %s", prev.ID, project)}
+		}
+		if !isFile(filepath.Join(prd, "out", "cast.md")) {
+			return exitError, usageError{fmt.Sprintf("%s left no plan to amend (it %s); cast again without --amend", prev.ID, map[bool]string{true: prev.State, false: "wrote no cast.md"}[prev.State != "" && prev.State != "done"])}
+		}
+		amend = prd
 	}
 	coins := 10 * time.Minute
 	if f.has("coins") {
@@ -131,6 +150,9 @@ func directorJob(job string, args []string) (int, error) {
 
 	var jobText strings.Builder
 	fmt.Fprintf(&jobText, "# Job: %s\n\nProject: %s\n\n", job, project)
+	if ad := adminDir(project); !within(ad, project) && isDir(ad) {
+		fmt.Fprintf(&jobText, "The project's .administration folder is %s, outside the project (a linked worktree's main checkout's, or one kept on this machine for the project): read its files there.\n\n", ad)
+	}
 	switch job {
 	case "train":
 		fmt.Fprintf(&jobText, "Who is needed: %s\n", strings.Join(f.pos, " "))
@@ -144,6 +166,19 @@ func directorJob(job string, args []string) (int, error) {
 		}
 	case "cast":
 		fmt.Fprintf(&jobText, "The contract's target: %s\n\n", strings.Join(f.pos, " "))
+		if amend != "" {
+			if err := os.MkdirAll(filepath.Join(in, "previous"), 0o700); err != nil {
+				return exitError, err
+			}
+			for _, part := range []string{"cast.md", "equipment.md", "candidates"} {
+				if src := filepath.Join(amend, "out", part); isDir(src) || isFile(src) {
+					if out, err := exec.Command("cp", "-R", src, filepath.Join(in, "previous", part)).CombinedOutput(); err != nil {
+						return exitError, fmt.Errorf("the earlier cast's %s: %v: %s", part, err, strings.TrimSpace(string(out)))
+					}
+				}
+			}
+			fmt.Fprintf(&jobText, "This amends an earlier cast for the same contract, in ./in/previous/: its plan (cast.md), its specialists (candidates/) and any equipment it asked for (equipment.md). Keep what it got right: copy each specialist you keep into ./out/candidates/ unchanged, and its plan into ./out/cast.md. Change or add only what's different now: equipment it asked for that the project now declares (listed below), a gap it named, or what the target adds. Read the code again only where that change needs it; the earlier plan's sweep stands. Say in cast.md what you kept and what you changed.\n\n")
+		}
 		logArgs := []string{"log", "-20", "--date=short", "--format=%h %ad %s%n%b", "--stat=100", "--stat-graph-width=10"}
 		if f.has("changes") && f.get("base") != "" {
 			// The range under contract first, in full; then what came before.
@@ -161,7 +196,11 @@ func directorJob(job string, args []string) (int, error) {
 			if err != nil {
 				return exitError, err
 			}
-			fmt.Fprintf(&jobText, "The contract is on changes since %s: ./in/changes.patch (%d files).\n", ch.Base, len(ch.Files)+len(ch.Untracked))
+			fmt.Fprintf(&jobText, "The contract is on changes since %s: ./in/changes.patch (%d files).", ch.Base, len(ch.Files)+len(ch.Untracked))
+			if ch.Split != "" {
+				fmt.Fprintf(&jobText, " The same split by file is in ./in/changes/ (INDEX.md lists each file, its lines added and removed, and any changed file with no part in the diff): read the index first, and the parts you need.")
+			}
+			jobText.WriteString("\n")
 		}
 	case "onboard":
 		n, err := gatherAgents(project, f.get("agents"), filepath.Join(in, "agents"))
@@ -190,7 +229,7 @@ func directorJob(job string, args []string) (int, error) {
 				}
 			}
 			for _, p := range v.Professionals {
-				if inside(project, p.Path) {
+				if projectOwns(project, p.Path) {
 					copyFile(p.Path, filepath.Join(in, "professionals", p.Name+".md"))
 				}
 			}
@@ -203,7 +242,7 @@ func directorJob(job string, args []string) (int, error) {
 				copyContract(cdir, filepath.Join(in, "contracts", cid))
 			}
 		}
-		copyTree(filepath.Join(houseDir(project), "dossiers"), filepath.Join(in, "dossiers"))
+		copyTree(filepath.Join(adminDir(project), "dossiers"), filepath.Join(in, "dossiers"))
 		if len(ids) > 0 {
 			fmt.Fprintf(&jobText, "%d contracts to review: %s\n", len(ids), strings.Join(ids, ", "))
 		}
@@ -227,6 +266,11 @@ func directorJob(job string, args []string) (int, error) {
 		"--permission-prompts", "none", "--output-format", "stream-json", "--verbose",
 		"--tools", "Read,Grep,Glob,Write", "--allowedTools", "Edit(" + absRule(out) + "/**)",
 		"--add-dir", project, "--append-system-prompt-file", filepath.Join(rd, "director.md")}
+	// A worktree's .administration can be its main checkout's, or a link
+	// out of the project: let the Director read it where it is.
+	if ad := adminDir(project); isDir(ad) && !within(ad, project) {
+		claudeArgs = append(claudeArgs, "--add-dir", ad)
+	}
 	if m := f.get("model"); m != "" {
 		if !modelRE.MatchString(m) {
 			return exitError, usageError{"--model: a model name or alias"}
@@ -383,7 +427,7 @@ func namingSurvey(project string) string {
 		add("skills", filepath.Join(d, "skills"))
 		add("commands", filepath.Join(d, "commands"))
 	}
-	add("professionals", filepath.Join(houseDir(project), "professionals"))
+	add("professionals", filepath.Join(adminDir(project), "professionals"))
 	if b.Len() == 0 {
 		return "No agents, skills or commands found around this project.\n"
 	}
@@ -497,7 +541,7 @@ func copyContract(src, dst string) {
 		if !e.IsDir() || e.Name() == "handout" || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		for _, f := range []string{"report.md", "status.json", "verdicts.json"} {
+		for _, f := range []string{"report.md", "findings.jsonl", "status.json", "verdicts.json"} {
 			copyFile(filepath.Join(src, e.Name(), f), filepath.Join(dst, e.Name(), f))
 		}
 	}
@@ -521,6 +565,31 @@ func copyFile(src, dst string) {
 
 var patternRE = regexp.MustCompile(`(?m)^pattern:\s*(\S+)\s*$`)
 
+// pageScript is page script written into a persona for a user to run; a
+// line that forbids it ("never call evaluate(") isn't one.
+var (
+	pageScript = regexp.MustCompile(`new File\(|DataTransfer|browser_evaluate|page\.evaluate|evaluate\(`)
+	forbidding = regexp.MustCompile(`(?i)\b(never|don'?t|do not|can'?t|cannot|no|not|without|avoid)\b`)
+)
+
+// scriptLine is the first line of a persona that tells a user to run page
+// script, or "".
+func scriptLine(body string) string {
+	for _, l := range strings.Split(body, "\n") {
+		loc := pageScript.FindStringIndex(l)
+		if loc == nil {
+			continue
+		}
+		// Forbidden only by the few words just before the call: "never call
+		// evaluate(", not "if you can't find it, run evaluate(".
+		before := strings.Fields(l[:loc[0]])
+		if !forbidding.MatchString(strings.Join(before[max(0, len(before)-4):], " ")) {
+			return l[loc[0]:loc[1]]
+		}
+	}
+	return ""
+}
+
 // checkDirectorOut holds the Director's files to the same checks as a hire,
 // before anyone sees them as ready.
 func checkDirectorOut(project, job, out string) []string {
@@ -536,6 +605,7 @@ func checkDirectorOut(project, job, out string) []string {
 		nameOK = regexp.MustCompile("^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\{name\}`, `[a-z0-9-]+`) + "$")
 	}
 	cands, _ := filepath.Glob(filepath.Join(out, "candidates", "*.md"))
+	users := 0
 	for _, c := range cands {
 		b, _ := os.ReadFile(c)
 		if q := quoteColonItems(b); !bytes.Equal(q, b) {
@@ -553,6 +623,14 @@ func checkDirectorOut(project, job, out string) []string {
 		if nameOK != nil && !nameOK.MatchString(p.Name) {
 			problems = append(problems, fmt.Sprintf("candidates/%s: doesn't follow the house pattern %s", filepath.Base(c), pattern))
 		}
+		if p.Kind == "user" {
+			users++
+			// A user at a screen has no page script to run: a recipe that
+			// needs one leaves its checklist unreachable.
+			if m := scriptLine(p.Body); p.Sees != "screen-reader" && m != "" {
+				problems = append(problems, fmt.Sprintf("candidates/%s: tells a user who sees the screen to run page script (%s); it can't: only a screen-reader user's browser runs script, and files come from the desk (browser_choose_file, browser_drop_file)", filepath.Base(c), m))
+			}
+		}
 		for _, u := range p.Uses {
 			if eq, err := checkEquipment(project, u); err != nil {
 				problems = append(problems, fmt.Sprintf("candidates/%s: uses %s: %v (only the project's declared equipment)", filepath.Base(c), u, err))
@@ -560,6 +638,27 @@ func checkDirectorOut(project, job, out string) []string {
 				problems = append(problems, fmt.Sprintf("candidates/%s: uses %s: %s", filepath.Base(c), u, why))
 			}
 		}
+	}
+	// Roster users it also casts take rooms too: any roster user named on
+	// the plan's "also cast" line.
+	if b, err := os.ReadFile(filepath.Join(out, "cast.md")); err == nil && job == "cast" {
+		if v, err := loadRoster(project); err == nil {
+			named := map[string]bool{}
+			for _, l := range strings.Split(string(b), "\n") {
+				if !strings.Contains(strings.ToLower(l), "also cast") {
+					continue
+				}
+				for _, p := range v.Professionals {
+					if p.Kind == "user" && !named[p.Name] && regexp.MustCompile(`(^|[^a-z0-9-])`+regexp.QuoteMeta(p.Name)+`($|[^a-z0-9-])`).MatchString(l) {
+						named[p.Name] = true
+						users++
+					}
+				}
+			}
+		}
+	}
+	if job == "cast" && users > maxRooms() {
+		problems = append(problems, fmt.Sprintf("the cast has %d users and a contract can have %d (the room limit, ADMINISTRATION_MAX_ROOMS): cast fewer, or say how to split it", users, maxRooms()))
 	}
 	if b, err := os.ReadFile(filepath.Join(out, "roster.toml")); err == nil {
 		var cfg projectConfig
@@ -745,7 +844,10 @@ func directorApply(args []string) error {
 		return fmt.Errorf("run %s has problems; fix them or run the Director again:\n  %s", run.ID, strings.Join(problems, "\n  "))
 	}
 	out := filepath.Join(rd, "out")
-	cont := houseDir(run.Project)
+	if !isDir(run.Project) {
+		return fmt.Errorf("run %s's project, %s, is gone (a worktree removed since?); run the Director again where the work is now", run.ID, run.Project)
+	}
+	cont := adminDir(run.Project)
 	backup := filepath.Join(rd, "before")
 	moved := 0
 	for _, sub := range []string{"candidates", "dossiers"} {
@@ -842,6 +944,17 @@ func projectNote(b *strings.Builder, project string) {
 		fmt.Fprintf(b, "The project has no .administration/setup and no equipment: no users; critics only.\n")
 	}
 	equipmentNote(b, project)
+	if d := loadProjectConfig(project).Desk; len(d.Files)+len(d.Make) > 0 {
+		var on []string
+		on = append(on, d.Files...)
+		for _, mk := range d.Make {
+			on = append(on, fmt.Sprintf("%s (%s, %d made)", mk.Name, mk.Size, max(mk.Count, 1)))
+		}
+		fmt.Fprintf(b, "Files on each user's desk, to pick or drop into the page: %s.\n", strings.Join(on, ", "))
+	} else {
+		fmt.Fprintf(b, "No files are declared for users' desks ([desk] in roster.toml): a user can't upload or drop anything until some are.\n")
+	}
+	fmt.Fprintf(b, "One contract can have at most %d users: each needs a room of its own, and that's the room limit (ADMINISTRATION_MAX_ROOMS). Cast no more than that, counting the roster users you name under also cast; if the work needs more, say how to split it into contracts.\n", maxRooms())
 	if sets := loadProjectConfig(project).Data; len(sets) > 0 {
 		names := make([]string, 0, len(sets))
 		for n := range sets {
