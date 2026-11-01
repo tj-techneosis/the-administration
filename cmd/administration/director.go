@@ -203,7 +203,7 @@ func directorJob(job string, args []string) (int, error) {
 				copyContract(cdir, filepath.Join(in, "contracts", cid))
 			}
 		}
-		copyTree(filepath.Join(project, ".administration", "dossiers"), filepath.Join(in, "dossiers"))
+		copyTree(filepath.Join(houseDir(project), "dossiers"), filepath.Join(in, "dossiers"))
 		if len(ids) > 0 {
 			fmt.Fprintf(&jobText, "%d contracts to review: %s\n", len(ids), strings.Join(ids, ", "))
 		}
@@ -383,7 +383,7 @@ func namingSurvey(project string) string {
 		add("skills", filepath.Join(d, "skills"))
 		add("commands", filepath.Join(d, "commands"))
 	}
-	add("professionals", filepath.Join(project, ".administration", "professionals"))
+	add("professionals", filepath.Join(houseDir(project), "professionals"))
 	if b.Len() == 0 {
 		return "No agents, skills or commands found around this project.\n"
 	}
@@ -745,7 +745,7 @@ func directorApply(args []string) error {
 		return fmt.Errorf("run %s has problems; fix them or run the Director again:\n  %s", run.ID, strings.Join(problems, "\n  "))
 	}
 	out := filepath.Join(rd, "out")
-	cont := filepath.Join(run.Project, ".administration")
+	cont := houseDir(run.Project)
 	backup := filepath.Join(rd, "before")
 	moved := 0
 	for _, sub := range []string{"candidates", "dossiers"} {
@@ -834,7 +834,7 @@ func projectNote(b *strings.Builder, project string) {
 			hasEq = true
 		}
 	}
-	if st, err := os.Stat(filepath.Join(project, ".administration", "setup")); err == nil && st.Mode()&0o111 != 0 {
+	if _, _, err := houseSetup(project, false); err == nil {
 		fmt.Fprintf(b, "The project has .administration/setup, so browser professionals (users) can work its running app.\n")
 	} else if hasEq {
 		fmt.Fprintf(b, "The project has no .administration/setup, so no user has the web browser; users work through the equipment below (uses, browser: false).\n")

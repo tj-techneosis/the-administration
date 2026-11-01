@@ -1988,6 +1988,8 @@ class NeverWritesGit(Base):
             if line.startswith(f"-C {self.rooms}"):
                 continue
             words = [w for w in line.split() if not w.startswith("-") and "=" not in w]
+            if words[:2] == ["remote", "get-url"]:  # finding a house kept on the machine
+                continue
             self.assertIn(words[0], reads, f"git {line}")
         self.assertTrue(cloned)
 
@@ -2188,6 +2190,141 @@ class MachineRoster(Base):
         self.hire_file("helper", kind="critic", knows=("own",))
         v = {p["name"]: p for p in json.loads(self.cli("roster", "--json").stdout)["professionals"]}
         self.assertEqual((v["helper"]["source"], v["helper"]["knows"]), ("project", ["own"]))
+
+
+class KeptHouse(Base):
+    """A project that can't carry .administration/ keeps its house on the
+    machine, at its origin remote's path, and every clone and worktree of it
+    finds the same one. The project's own always comes first."""
+
+    ORIGIN = "git@github.com:acme/shop.git"
+
+    def setUp(self):
+        super().setUp()
+        self.env["ADMINISTRATION_PROJECTS"] = self.projects = os.path.join(self.tmp, "projects")
+        self.kept = os.path.join(self.projects, "github.com", "acme", "shop")
+        self.git("remote", "add", "origin", self.ORIGIN)
+
+    def git(self, *args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd or self.project, check=True, env=self.env, capture_output=True)
+
+    def keep_house(self):
+        write(os.path.join(self.kept, "setup"), SETUP, 0o755)
+        write(os.path.join(self.kept, "teardown"), TEARDOWN, 0o755)
+        write(os.path.join(self.kept, "roster.toml"), '[setup]\npass_env = ["ROOM_DATA", "ROOM_ORIGIN"]\n')
+        write(os.path.join(self.kept, "professionals", "member.md"), professional("member"))
+
+    def roster(self, project=None):
+        return json.loads(self.cli("roster", "--json", *(["--project", project] if project else [])).stdout)
+
+    def test_a_clone_finds_the_house_kept_for_its_origin(self):
+        self.keep_house()
+        for remote in (self.ORIGIN, "https://github.com/acme/shop", "https://GitHub.com/acme/shop.git/",
+                       "ssh://git@github.com:22/acme/shop.git", "https://someone@github.com/acme/shop.git"):
+            self.git("remote", "set-url", "origin", remote)
+            v = self.roster()
+            self.assertEqual(v["house"], {"dir": self.kept, "where": "machine", "origin": "github.com/acme/shop"}, remote)
+            self.assertEqual([p["name"] for p in v["professionals"]], ["member"], remote)
+        out = self.cli("roster").stdout
+        self.assertIn(f"House: {self.kept} (kept on this machine for github.com/acme/shop)", out)
+        self.assertFalse(os.path.exists(os.path.join(self.project, ".administration")))
+
+    def test_a_worktree_finds_it_too_in_the_default_place(self):
+        del self.env["ADMINISTRATION_PROJECTS"]
+        self.kept = os.path.join(self.home, ".config", "administration", "projects", "github.com", "acme", "shop")
+        self.keep_house()
+        write(os.path.join(self.project, "a.txt"), "1\n")
+        self.git("add", "."), self.git("commit", "-qm", "base")
+        wt = os.path.join(self.tmp, "wt")
+        self.git("worktree", "add", "-q", wt, "-b", "other")
+        v = self.roster(wt)
+        self.assertEqual((v["house"]["where"], v["house"]["dir"]), ("machine", self.kept))
+        self.assertEqual([p["name"] for p in v["professionals"]], ["member"])
+
+    def test_the_projects_own_house_comes_first(self):
+        self.keep_house()
+        self.hire_file("own-one")
+        v = self.roster()
+        self.assertEqual(v["house"], {"dir": os.path.join(self.project, ".administration"), "where": "project"})
+        self.assertEqual([p["name"] for p in v["professionals"]], ["own-one"])
+        self.assertIn("House: .administration (in the project)", self.cli("roster").stdout)
+
+    def test_the_hooks_get_their_house_and_run_from_it(self):
+        self.keep_house()
+        cid = self.place("x", "--cast", "member")
+        self.cli("wait", cid)
+        room = self.status(cid)["status"]["member"]["room"]
+        env = open(os.path.join(room, "app", "setup-env")).read().splitlines()
+        self.assertIn("ADMINISTRATION_HOUSE=" + self.kept, env)
+        self.assertIn("ADMINISTRATION_MAIN=" + self.project, env)
+        self.assertTrue(os.path.exists(os.path.join(room, "member.torn")))  # the kept house's teardown
+        self.cli("close", cid)
+        # And always, for a house in the project too.
+        shutil.rmtree(self.kept)
+        self.house()
+        self.hire_file("member")
+        cid = self.place("x", "--cast", "member")
+        self.cli("wait", cid)
+        room = self.status(cid)["status"]["member"]["room"]
+        env = open(os.path.join(room, "app", "setup-env")).read().splitlines()
+        self.assertIn("ADMINISTRATION_HOUSE=" + os.path.join(self.project, ".administration"), env)
+
+    def test_room_check_hire_and_missed_use_the_kept_house(self):
+        self.keep_house()
+        os.chmod(os.path.join(self.kept, "setup"), 0o644)
+        out = self.cli("room-check").stdout
+        self.assertIn(f"Made {self.kept}/setup executable", out)
+        self.assertIn("answered at http://127.0.0.1:", out)
+        write(os.path.join(self.kept, "candidates", "new-one.md"), professional("new-one"))
+        out = self.cli("hire", "new-one").stdout
+        self.assertIn("not in the repo", out)
+        self.assertTrue(os.path.exists(os.path.join(self.kept, "professionals", "new-one.md")))
+        self.cli("missed", "the checkout button is hidden on a phone")
+        self.assertEqual(len(os.listdir(os.path.join(self.kept, "missed"))), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.project, ".administration")))
+
+    def test_roster_paths_resolve_into_the_kept_house(self):
+        self.keep_house()
+        write(os.path.join(self.kept, "rules.md"), "From the house, the old way.\n")
+        write(os.path.join(self.kept, "handout", "phone.md"), "From the house, by its own path.\n")
+        write(os.path.join(self.project, "docs", "style.md"), "From the project.\n")
+        write(os.path.join(self.kept, "equipment", "gadget", "start"),
+              '#!/bin/sh\necho "$ADMINISTRATION_HOUSE" > "$ADMINISTRATION_ROOM/../gadget.house"\n'
+              'echo "ENDPOINT=http://127.0.0.1:$ADMINISTRATION_PORT"\n', 0o755)
+        write(os.path.join(self.kept, "equipment", "gadget", "server"), "#!/bin/sh\nexit 0\n", 0o755)
+        with open(os.path.join(self.kept, "roster.toml"), "a") as f:
+            f.write(
+                '[handout]\nfiles = [".administration/rules.md", "handout/phone.md", "docs/style.md"]\n\n'
+                '[equipment.gadget]\nabout = "The gadget\'s own screen."\n'
+                'setup = ".administration/equipment/gadget/start"\n'
+                'server = "equipment/gadget/server"\n'
+                'args = ["--endpoint", "{ENDPOINT}"]\ntools = ["poke"]\n')
+        write(os.path.join(self.kept, "professionals", "tinkerer.md"), professional("tinkerer", extra="  uses: [gadget]"))
+        cid = self.place("x", "--cast", "tinkerer")
+        self.cli("wait", cid)
+        s = self.status(cid)["status"]["tinkerer"]
+        self.assertEqual(s["state"], "back", s)
+        desk = os.path.join(s["room"], "desk", "handout")
+        self.assertEqual(sorted(os.listdir(desk)), ["phone.md", "rules.md", "style.md"])
+        self.assertEqual(open(os.path.join(desk, "rules.md")).read(), "From the house, the old way.\n")
+        self.assertEqual(open(os.path.join(os.path.dirname(s["room"]), "gadget.house")).read().strip(), self.kept)
+        servers = json.load(open(os.path.join(self.pdir(cid, "tinkerer"), "mcp.json")))["mcpServers"]
+        self.assertEqual(servers["eq_gadget"]["command"], os.path.join(self.kept, "equipment", "gadget", "server"))
+
+    def test_no_house_says_both_places_it_looked(self):
+        self.env["ADMINISTRATION_CONFIG"] = cfg = os.path.join(self.tmp, "config")
+        write(os.path.join(cfg, "professionals", "member.md"), professional("member"))
+        for args in (["room-check"], ["place", "x", "--cast", "member"]):
+            p = self.cli(*args, check=1)
+            self.assertIn(os.path.join(self.project, ".administration"), p.stderr, args)
+            self.assertIn(self.kept, p.stderr, args)
+            self.assertIn("github.com/acme/shop", p.stderr, args)
+        self.assertIn("House: none yet", self.cli("roster").stdout)
+        self.git("remote", "remove", "origin")
+        self.assertIn("no origin remote", self.cli("room-check", check=1).stderr)
+        # A house with no setup in it says which house.
+        write(os.path.join(self.project, ".administration", "roster.toml"), "")
+        self.assertIn("has no .administration/setup", self.cli("room-check", check=1).stderr)
 
 
 class DirectorInputs(Base):

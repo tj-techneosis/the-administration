@@ -13,8 +13,9 @@ changes" into CLI calls, and checks findings against the code afterwards.
 ## Pieces
 
 - **Roster**: agent files with a `administration:` block, read from
-  `.administration/professionals/`, plus the project's existing agents named in
-  `.administration/roster.toml`. Each has `knows` tags. `roster --match` ranks
+  the house's `professionals/` (the project's `.administration/`, or the
+  one kept on the machine for its origin), plus the project's existing
+  agents named in its `roster.toml`. Each has `knows` tags. `roster --match` ranks
   them against a contract's tags and lists the tags nobody covers, which is
   how gaps (and so hires) are found. A broken file is left off and reported,
   so one bad file doesn't stop contracts.
@@ -246,6 +247,19 @@ changes" into CLI calls, and checks findings against the code afterwards.
 - **Empty roster.** Personas are specific to a product and its people, so
   the framework ships open rooms, not professionals, and the Director trains
   them in the project.
+- **A house can be kept on the machine.** The house is normally the
+  project's `.administration/`, committed so the team shares it. A project
+  that can't carry it keeps it under `projects/<host>/<owner>/<repo>/` in
+  the config folder, found by the checkout's `origin` remote, so a fresh
+  clone or a new worktree finds it where a path-keyed one would be lost.
+  The project's own folder always wins, so nothing changes for a project
+  that has one. Every reader and writer goes through one lookup
+  (`houseOf`), hooks get the result as `ADMINISTRATION_HOUSE`, and
+  `roster.toml` paths keep one rule (`.administration/...` is the house;
+  anything else the project's, then the house's), so a roster moves without
+  edits. The wall doesn't move: the house is read and run by the
+  Administration, outside every room, as before; only a handout's copies
+  reach a desk.
 
 ## Usage data
 
@@ -267,5 +281,7 @@ or the ledgers in `ledgers/`.
 | `ADMINISTRATION_MAX_ROOMS` | 4 | browser rooms at once |
 | `ADMINISTRATION_SETUP_TIMEOUT` | 15m | the setup hook's limit |
 | `ADMINISTRATION_TOOLS` | `~/.local/share/administration/tools` | the pinned Playwright MCP, from `install.sh` |
+| `ADMINISTRATION_CONFIG` | `~/.config/administration` | the machine's own professionals and hooks |
+| `ADMINISTRATION_PROJECTS` | `$ADMINISTRATION_CONFIG/projects` | houses kept on the machine, at `<host>/<owner>/<repo>` of each project's origin |
 | `ADMINISTRATION_POLL`, `_CLOSE_GRACE`, `_COIN` | 2s, 30s, 1m | test knobs |
 | `ADMINISTRATION_TEST_ISOLATED`, `_TEST_UNSAFE` | | the suite runs only inside `tests/isolated.sh` (or in a throwaway account) |

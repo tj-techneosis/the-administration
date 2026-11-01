@@ -40,19 +40,20 @@ func cmdRoomCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	hook := filepath.Join(project, ".administration", "setup")
-	st, err := os.Stat(hook)
-	if err != nil {
-		return usageError{fmt.Sprintf("%s has no .administration/setup to check (see the README, A House of Your Own). room-check checks the setup hook only; equipment-check NAME checks a piece of equipment", project)}
+	if h := houseOf(project); h.Where == "machine" {
+		fmt.Printf("The house kept on this machine for %s: %s\n", h.Origin, h.Dir)
 	}
-	if st.Mode()&0o111 == 0 {
-		// A session that wrote the hook often can't chmod it; this is the
-		// person's own file in their own project, and running it is what
-		// every room does.
-		if err := os.Chmod(hook, st.Mode()|0o111); err != nil {
-			return err
+	// A session that wrote the hook often can't chmod it; this is the
+	// person's own file, and running it is what every room does.
+	_, fixed, err := houseSetup(project, true)
+	if err != nil {
+		if u, ok := err.(usageError); ok {
+			return usageError{u.msg + ". room-check checks the setup hook only; equipment-check NAME checks a piece of equipment"}
 		}
-		fmt.Printf("Made %s executable.\n", rel(project, hook))
+		return err
+	}
+	if fixed {
+		fmt.Printf("Made %s executable.\n", houseFile(project, "setup"))
 	}
 	books, err := booksDir()
 	if err != nil {
@@ -93,7 +94,7 @@ func cmdRoomCheck(args []string) error {
 	defer stop()
 	s := status{State: "setup"}
 	save := func() { _ = writeJSON(filepath.Join(pd, "status.json"), s) }
-	fmt.Printf("Building a room with %s (up to %s)...\n", rel(project, hook), setupTimeout())
+	fmt.Printf("Building a room with %s (up to %s)...\n", houseFile(project, "setup"), setupTimeout())
 	t0 := time.Now()
 	m, berr := buildRoom(ctx, c, ci, pd, &s, save)
 	took := time.Since(t0).Round(time.Second)

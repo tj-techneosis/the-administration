@@ -22,7 +22,10 @@ is the third way in, and it's the project's.
 
 ## Declaring it
 
-In `.administration/roster.toml`, one table per piece of equipment:
+In the house's `roster.toml` (`.administration/roster.toml`, or the one kept
+on the machine: README, A House of Your Own), one table per piece of
+equipment. Program paths starting `.administration/` are the house's,
+wherever it is:
 
 ```toml
 [equipment.desktop-app]
@@ -128,6 +131,8 @@ needs_app = true          # its setup reads the app's room: a browser user's onl
   house's setup hook: a fresh emulator, VM or app per professional, so two
   can't step on each other. Their environment has `ADMINISTRATION_ROOM`,
   `ADMINISTRATION_PORT`, `ADMINISTRATION_EQUIPMENT`, `ADMINISTRATION_EQUIPMENT_DIR`, `ADMINISTRATION_PROFESSIONAL`,
+  `ADMINISTRATION_HOUSE` (the house's folder, for reaching the files beside
+  them wherever it's kept; a screen's driver gets it too),
   and `ADMINISTRATION_SHOW=1` (with the screen's variables) when the contract
   was placed with `--show-browsers`. What they leave running is cleared
   with the room.

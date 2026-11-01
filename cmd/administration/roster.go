@@ -268,7 +268,7 @@ type projectConfig struct {
 
 func loadProjectConfig(project string) projectConfig {
 	var cfg projectConfig
-	_, _ = toml.DecodeFile(filepath.Join(project, ".administration", "roster.toml"), &cfg)
+	_, _ = toml.DecodeFile(filepath.Join(houseDir(project), "roster.toml"), &cfg)
 	return cfg
 }
 
@@ -306,6 +306,7 @@ type openRoom struct {
 
 type rosterView struct {
 	Project       string          `json:"project"`
+	House         projectHouse    `json:"house"`
 	Professionals []*professional `json:"professionals"`
 	Open          []openRoom      `json:"open"`
 	Problems      []string        `json:"problems,omitempty"`
@@ -317,14 +318,14 @@ type rosterView struct {
 // reported in Problems and left off, so one bad hire doesn't close the
 // office.
 func loadRoster(project string) (*rosterView, error) {
-	v := &rosterView{Project: project, Professionals: []*professional{}}
+	v := &rosterView{Project: project, House: houseOf(project), Professionals: []*professional{}}
 	byName := map[string]*professional{}
 	order := []string{}
 	add := func(p *professional) {
 		if prev, seen := byName[p.Name]; seen {
 			if prev.Source != "house" && prev.Source != "machine" {
 				// Two of the project's own with one name: keep the first, say so.
-				v.Problems = append(v.Problems, fmt.Sprintf("%s: the name %q is already taken by %s; left off", rel(project, p.Path), p.Name, rel(project, prev.Path)))
+				v.Problems = append(v.Problems, fmt.Sprintf("%s: the name %q is already taken by %s; left off", shown(project, p.Path), p.Name, shown(project, prev.Path)))
 				return
 			}
 		} else {
@@ -371,7 +372,7 @@ func loadRoster(project string) (*rosterView, error) {
 		v.Problems = append(v.Problems, fmt.Sprintf("%s: %v", f, err))
 	}
 
-	cont := filepath.Join(project, ".administration")
+	cont := v.House.Dir
 	own, _ := filepath.Glob(filepath.Join(cont, "professionals", "*.md"))
 	sort.Strings(own)
 	for _, f := range own {
@@ -383,14 +384,14 @@ func loadRoster(project string) (*rosterView, error) {
 				continue
 			}
 		}
-		v.Problems = append(v.Problems, fmt.Sprintf("%s: %v", rel(project, f), err))
+		v.Problems = append(v.Problems, fmt.Sprintf("%s: %v", shown(project, f), err))
 	}
 
 	var cfg projectConfig
 	cfgPath := filepath.Join(cont, "roster.toml")
 	if _, err := os.Stat(cfgPath); err == nil {
 		if _, err := toml.DecodeFile(cfgPath, &cfg); err != nil {
-			v.Problems = append(v.Problems, fmt.Sprintf("%s: %v", rel(project, cfgPath), err))
+			v.Problems = append(v.Problems, fmt.Sprintf("%s: %v", shown(project, cfgPath), err))
 		}
 	}
 	critics := make([]string, 0, len(cfg.Critics))
@@ -406,9 +407,7 @@ func loadRoster(project string) (*rosterView, error) {
 		f := filepath.Join(project, ".claude", "agents", name+".md")
 		if file := cfg.Critics[name].File; file != "" {
 			f = file
-			if !filepath.IsAbs(f) {
-				f = filepath.Join(project, f)
-			}
+			f = housePath(project, file)
 		}
 		b, err := os.ReadFile(f)
 		if err == nil {
@@ -436,7 +435,7 @@ func loadRoster(project string) (*rosterView, error) {
 	// neither kind fits; one with nothing set up yet sees them all.
 	kinds := map[string]bool{}
 	if project != "" {
-		if _, err := os.Stat(filepath.Join(project, ".administration", "setup")); err == nil {
+		if _, err := os.Stat(filepath.Join(cont, "setup")); err == nil {
 			kinds["web"] = true
 		}
 	}
@@ -474,6 +473,16 @@ func rel(base, p string) string {
 	return p
 }
 
+// shown is a path for a person to read: relative to the project when it's
+// in it (.administration/roster.toml), whole when it's in a house kept on
+// the machine.
+func shown(project, p string) string {
+	if within(p, project) {
+		return rel(project, p)
+	}
+	return p
+}
+
 func cmdRoster(args []string) error {
 	f, err := parseFlags(args, map[string]bool{"json": false, "project": true, "match": true})
 	if err != nil {
@@ -496,7 +505,15 @@ func cmdRoster(args []string) error {
 	if f.has("json") {
 		return printJSON(v)
 	}
-	fmt.Printf("The roster (%s)\n\n", project)
+	fmt.Printf("The roster (%s)\n", project)
+	switch h := v.House; h.Where {
+	case "project":
+		fmt.Printf("House: %s (in the project)\n\n", shown(project, h.Dir))
+	case "machine":
+		fmt.Printf("House: %s (kept on this machine for %s)\n\n", h.Dir, h.Origin)
+	default:
+		fmt.Printf("House: none yet (%s)\n\n", strings.TrimPrefix(h.noHouse(project), project+" has no .administration/setup: "))
+	}
 	for _, p := range v.Professionals {
 		extra := ""
 		if p.SignsInAs != "" {
@@ -795,7 +812,7 @@ func checkEquipment(project, name string) (*equipment, error) {
 	}
 	eq, ok := loadProjectConfig(project).Equipment[name]
 	if !ok {
-		return nil, fmt.Errorf("no equipment called %q in .administration/roster.toml", name)
+		return nil, fmt.Errorf("no equipment called %q in %s", name, houseFile(project, "roster.toml"))
 	}
 	if strings.TrimSpace(eq.About) == "" {
 		return nil, fmt.Errorf("equipment %s: no about (what it reaches and how to use it)", name)
@@ -879,13 +896,14 @@ func checkEquipment(project, name string) (*equipment, error) {
 var toolNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // projectProgram is an executable the project declared, by a path inside
-// the project: one program, no arguments, no way out of the folder.
+// the project or its house (housePath): one program, no arguments, no way
+// out of either folder.
 func projectProgram(project, rel string) (string, error) {
 	if rel == "" || strings.ContainsAny(rel, " \t;&|<>$`'\"(){}*?[]~\\\n") || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("%q: a program's path inside the project, nothing else", rel)
 	}
-	abs := filepath.Join(project, rel)
-	if !within(abs, project) {
+	abs := housePath(project, rel)
+	if !inProject(project, abs) {
 		return "", fmt.Errorf("%q is outside the project", rel)
 	}
 	st, err := os.Stat(abs)
@@ -895,10 +913,12 @@ func projectProgram(project, rel string) (string, error) {
 	if st.Mode()&0o111 == 0 {
 		// Declared in the person's own roster, so running it is what they
 		// asked for; a session that wrote it often can't chmod it. Only a
-		// file that really is in the project (not a link out of it).
+		// file that really is in the project or its house (not a link out).
 		real, err := filepath.EvalSymlinks(abs)
 		proj, perr := filepath.EvalSymlinks(project)
-		if err != nil || perr != nil || !within(real, proj) || !st.Mode().IsRegular() || os.Chmod(real, st.Mode()|0o100) != nil {
+		home, herr := filepath.EvalSymlinks(houseDir(project))
+		inside := err == nil && (perr == nil && within(real, proj) || herr == nil && within(real, home))
+		if !inside || !st.Mode().IsRegular() || os.Chmod(real, st.Mode()|0o100) != nil {
 			return "", fmt.Errorf("%s isn't an executable file", rel)
 		}
 	}
@@ -914,8 +934,8 @@ func copyHandout(project, desk string) ([]string, error) {
 	var names []string
 	total := int64(0)
 	for _, rel := range loadProjectConfig(project).Handout.Files {
-		src := filepath.Join(project, rel)
-		if filepath.IsAbs(rel) || !within(src, project) {
+		src := housePath(project, rel)
+		if filepath.IsAbs(rel) || !inProject(project, src) {
 			return nil, fmt.Errorf("handout %q: a file inside the project", rel)
 		}
 		for _, g := range secretGlobs {
