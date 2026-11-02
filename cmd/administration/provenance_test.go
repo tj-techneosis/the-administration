@@ -206,11 +206,11 @@ func TestABuildWithWorkIsMadeFromTheContractsCheckout(t *testing.T) {
 	if err := recordCommit(c, ""); err != nil || c.Work == "" {
 		t.Fatalf("recordCommit: %v, work %q", err, c.Work)
 	}
-	root, err := copyRoot(c, c.Commit, c.Work)
+	top, err := copyRoot(c, c.Commit, c.Work)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := makeCheckout(sub, c.Commit, c.Work, root)
+	p, err := makeCheckout(sub, c.Commit, c.Work, top)
 	if err != nil {
 		t.Fatal(err)
 	}

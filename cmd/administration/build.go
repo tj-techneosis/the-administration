@@ -199,10 +199,17 @@ func buildLocked(ctx context.Context, c *contract, hook, sha, dir, lock, recipe 
 // failedSince is the error of a build of the commit made by recipe that
 // failed since t, nil when there's none: what a room that asked for the
 // build while another was making it gets, instead of making it again.
+// failedSlack is how much older than the asking a failure can look and
+// still be the one that asking waited for.
+const failedSlack = 50 * time.Millisecond
+
 func failedSince(dir, recipe string, t time.Time) error {
 	path := filepath.Join(dir, "failed")
 	st, err := os.Stat(path)
-	if err != nil || st.ModTime().Before(t) {
+	// A file's time is stamped by a coarser clock than time.Now() (Linux's
+	// lags it by a few milliseconds), so a failure written just after a
+	// room asked can look older than the asking: it's given a little slack.
+	if err != nil || st.ModTime().Before(t.Add(-failedSlack)) {
 		return nil
 	}
 	b, err := os.ReadFile(path)
