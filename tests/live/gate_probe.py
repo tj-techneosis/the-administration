@@ -2,7 +2,8 @@
 """Live check of the browser wall: a real Chromium through the pinned
 Playwright MCP, configured the way a professional's is, against a room server
 and an "other" local server standing in for everything that isn't the room.
-Passes only if the other server never hears from the browser.
+Passes only if the other server never hears from the browser. The server is
+reached through the house's screen (`_screen --reader`), as every user's is.
   gate_probe.py ADMINISTRATION_BIN TOOLS_DIR
 Run it inside tests/isolated.sh's namespace or a throwaway account.
 """
@@ -50,7 +51,10 @@ cfg = {"browser": {"browserName": "chromium", "isolated": True,
        "outputDir": os.path.join(desk, ".shots")}
 cfgp = os.path.join(base, "browser.json")
 json.dump(cfg, open(cfgp, "w"))
-mcp = subprocess.Popen(["node", os.path.join(tools, "node_modules/@playwright/mcp/cli.js"), "--config", cfgp],
+# A file of the person's the browser must never show or overwrite.
+marker = os.path.join(base, "persons-file.txt")
+open(marker, "w").write("MARKER-7f3a\n")
+mcp = subprocess.Popen([admin, "_screen", "--reader", "--files", "", "node", os.path.join(tools, "node_modules/@playwright/mcp/cli.js"), "--config", cfgp],
                        cwd=desk, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                        env={**os.environ, "TMPDIR": tmp})
 n = 0
@@ -89,7 +93,22 @@ for ws in (f"ws://127.0.0.1:{O}/", "wss://echo.websocket.org/"):
     check(f"websocket {ws} refused", '"OPEN"' not in r, r)
 r = tool("browser_evaluate", function="() => 'pwned'", filename="../app/written.txt")
 check("no writes outside the desk", not os.path.exists(os.path.join(app, "written.txt")), r)
-r = tool("browser_navigate", url="file:///etc/hostname"); check("file: refused", "blocked" in r.lower() or "error" in r.lower(), r)
+for name, a in (("browser_evaluate", {"function": "() => 'pwned'", "filename": os.path.join(app, "abs.txt")}),
+                ("browser_take_screenshot", {"filename": os.path.join(app, "abs.png")}),
+                ("browser_take_screenshot", {"filename": marker})):
+    r = tool(name, **a)
+    wrote = open(marker).read() != "MARKER-7f3a\n" if a["filename"] == marker else os.path.exists(a["filename"])
+    check(f"{name} with an absolute filename writes nothing", not wrote, r)
+check("the person's file is untouched", open(marker).read() == "MARKER-7f3a\n")
+# Not on the web: none of these reaches a proxy, so the gate can't be what
+# stops them. The page must never show the file.
+for u in ("file://" + marker, "view-source:file://" + marker, "chrome://version", "data:text/html,<h1>data</h1>"):
+    r = tool("browser_navigate", url=u)
+    shot = tool("browser_snapshot")
+    check(f"{u.split(':')[0]}: refused", "MARKER-7f3a" not in r + shot and "Chromium" not in shot and "<h1>data" not in shot, r)
+tool("browser_navigate", url=f"http://127.0.0.1:{R}/")
+r = js("() => new Promise(res => { const w = window.open('file://%s'); setTimeout(() => { try { res(w && w.document.body.innerText) } catch (e) { res('NO') } }, 2000) })" % marker)
+check("a page can't open a file: window", "MARKER-7f3a" not in r, r)
 check("the other server heard nothing", hits["other"] == 0, f"{hits['other']} requests")
 mcp.kill(); gate.stdin.close(); gate.wait()
 print("gate log:", open(gl).read().strip().replace("\n", " | ")[:400])

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -71,5 +72,17 @@ func TestGate(t *testing.T) {
 	}
 	if n := g.close(); n < 6 {
 		t.Errorf("blocked count %d", n)
+	}
+}
+
+func TestAFilePickerHintNamesTheDesksTools(t *testing.T) {
+	in := json.RawMessage(`{"content":[{"type":"text","text":"### Modal state\n- [File chooser]: can be handled by browser_file_upload"}],"isError":true}`)
+	got := string(ownHints(in))
+	if strings.Contains(got, "browser_file_upload") || !strings.Contains(got, "browser_choose_file") {
+		t.Fatalf("hint not turned: %s", got)
+	}
+	var v map[string]any
+	if json.Unmarshal([]byte(got), &v) != nil {
+		t.Fatalf("not JSON any more: %s", got)
 	}
 }

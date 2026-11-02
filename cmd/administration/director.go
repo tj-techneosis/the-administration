@@ -120,8 +120,7 @@ func directorJob(job string, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	books, _ := booksDir()
-	id, err := newID(books)
+	id, err := randomID()
 	if err != nil {
 		return exitError, err
 	}
@@ -179,10 +178,10 @@ func directorJob(job string, args []string) (int, error) {
 			}
 			fmt.Fprintf(&jobText, "This amends an earlier cast for the same contract, in ./in/previous/: its plan (cast.md), its specialists (candidates/) and any equipment it asked for (equipment.md). Keep what it got right: copy each specialist you keep into ./out/candidates/ unchanged, and its plan into ./out/cast.md. Change or add only what's different now: equipment it asked for that the project now declares (listed below), a gap it named, or what the target adds. Read the code again only where that change needs it; the earlier plan's sweep stands. Say in cast.md what you kept and what you changed.\n\n")
 		}
-		logArgs := []string{"log", "-20", "--date=short", "--format=%h %ad %s%n%b", "--stat=100", "--stat-graph-width=10"}
+		logArgs := []string{"log", "--no-show-signature", "--no-ext-diff", "--no-textconv", "-20", "--date=short", "--format=%h %ad %s%n%b", "--stat=100", "--stat-graph-width=10"}
 		if f.has("changes") && f.get("base") != "" {
 			// The range under contract first, in full; then what came before.
-			if inRange, err := git(project, "log", "--date=short", "--format=%h %ad %s%n%b", "--stat=100", "--stat-graph-width=10", f.get("base")+"..HEAD"); err == nil && inRange != "" {
+			if inRange, err := git(project, "log", "--no-show-signature", "--no-ext-diff", "--no-textconv", "--date=short", "--format=%h %ad %s%n%b", "--stat=100", "--stat-graph-width=10", f.get("base")+"..HEAD"); err == nil && inRange != "" {
 				_ = os.WriteFile(filepath.Join(in, "range.txt"), []byte(inRange+"\n"), 0o600)
 			}
 		}
@@ -192,13 +191,16 @@ func directorJob(job string, args []string) (int, error) {
 		projectNote(&jobText, project)
 		screenUsersNote(&jobText, project)
 		if f.has("changes") {
-			ch, err := collectChanges(project, f.get("base"), in)
+			ch, err := collectChanges(project, f.get("base"), "", in)
 			if err != nil {
 				return exitError, err
 			}
 			fmt.Fprintf(&jobText, "The contract is on changes since %s: ./in/changes.patch (%d files).", ch.Base, len(ch.Files)+len(ch.Untracked))
 			if ch.Split != "" {
 				fmt.Fprintf(&jobText, " The same split by file is in ./in/changes/ (INDEX.md lists each file, its lines added and removed, and any changed file with no part in the diff): read the index first, and the parts you need.")
+			}
+			if ch.LeftOut > 0 {
+				fmt.Fprintf(&jobText, " %d more changed file(s) aren't in it: they look like secrets, and no critic is handed them.", ch.LeftOut)
 			}
 			jobText.WriteString("\n")
 		}
@@ -253,9 +255,10 @@ func directorJob(job string, args []string) (int, error) {
 	_ = os.WriteFile(filepath.Join(rd, "director.md"), prompt, 0o600)
 	settings := filepath.Join(rd, "settings.json")
 	deny := []string{"Bash", "WebFetch", "WebSearch", "NotebookEdit", "Agent"}
-	for _, g := range secretGlobs {
-		deny = append(deny, "Read(**/"+g+")")
-	}
+	deny = append(deny, secretDenies(adminDir(project))...)
+	// It reads the live project: its .git holds every secret ever committed
+	// and taken out again, and config a remote's token can be in.
+	deny = append(deny, gitDenies...)
 	_ = writeJSON(settings, map[string]any{
 		"permissions":       map[string]any{"deny": deny, "disableBypassPermissionsMode": "disable"},
 		"disableAllHooks":   true,

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -24,6 +25,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // startError is a room or a professional that failed to start; it exits 2.
@@ -93,15 +95,45 @@ func work(id, name string) error {
 		s.State, s.Reason, s.FinishedAt = state, reason, &t
 		save()
 	}
+	if ci.Kind == "user" {
+		// In line for a room until one is free (pace.go).
+		s.State, s.Queued, s.Reason = "waiting", true, "waiting for a room"
+	}
 	save()
+	// The machine's setup turn, taken by the room's first setup, is let go
+	// once the room is up, or failed; this is for a way out that misses it.
+	defer endSetupTurn()
+	if ci.Kind == "user" {
+		if err := awaitRoom(ctx, c, name, &s, save); err != nil {
+			if ctx.Err() != nil {
+				finish("closed", "closed while waiting for a room")
+			} else {
+				finish("failed", err.Error())
+			}
+			return nil
+		}
+	}
 
 	var m *manifest
 	var vars eqVars
 	var before *manifest
 	// The house's build hook builds what the room installs, once per
 	// commit (build.go); every room of the contract gets the same build.
+	if bad := buildHookUnrunnable(c); bad != "" && (ci.Kind == "user" || len(ci.Uses) > 0) {
+		// Place refuses it; this is one made so after.
+		finish("failed", bad)
+		return nil
+	}
 	if hook := buildHook(c); hook != "" && (ci.Kind == "user" || len(ci.Uses) > 0) {
-		if s.BuildArtifact, s.BuildCommit, err = ensureBuild(ctx, c, hook); err != nil {
+		var release func()
+		s.BuildArtifact, s.BuildCommit, release, err = ensureBuild(ctx, c, hook, func(why string) {
+			s.Reason = why
+			save()
+		})
+		s.Reason = ""
+		// Held while the room installs and runs it.
+		defer release()
+		if err != nil {
 			if ctx.Err() != nil {
 				finish("closed", "closed while the build was being made")
 			} else {
@@ -110,6 +142,27 @@ func work(id, name string) error {
 			return nil
 		}
 		save()
+		// The release check's before app is built the same way, once for
+		// its merge base: every room of the contract, and the next contract
+		// on the same base, installs that one build.
+		if c.Before && ci.Kind == "user" && !ci.NoBrowser {
+			var release func()
+			s.BeforeBuildArtifact, s.BeforeBuildCommit, release, err = ensureBuild(ctx, beforeBuildContract(c), hook, func(why string) {
+				s.Reason = why + " (the before app's)"
+				save()
+			})
+			s.Reason = ""
+			defer release()
+			if err != nil {
+				if ctx.Err() != nil {
+					finish("closed", "closed while the before app's build was being made")
+				} else {
+					finish("failed", "the before app's build: "+err.Error())
+				}
+				return nil
+			}
+			save()
+		}
 	}
 	if ci.Kind == "critic" && len(ci.Uses) > 0 {
 		// Its equipment needs a room: no app in it, the hooks start what the
@@ -160,7 +213,11 @@ func work(id, name string) error {
 		}
 	}
 
-	s.State = "working"
+	// The room is up: the next room on the machine sets up, and this
+	// professional's coins start now.
+	endSetupTurn()
+	ready := time.Now().UTC().Truncate(time.Second)
+	s.State, s.Reason, s.ReadyAt = "working", "", &ready
 	save()
 	state, reason := runProfessional(ctx, c, ci, pd, tag, m, before, vars, &s, save)
 	if s.Room != "" {
@@ -278,6 +335,10 @@ func roomEnv(c *contract, name, room, ports, mf, tag string) []string {
 		"ADMINISTRATION_APP="+room,
 		"ADMINISTRATION_PORTS="+ports,
 		"ADMINISTRATION_MANIFEST="+mf,
+		// Where the setup declares, as soon as it starts, how to take down
+		// what it starts outside its process group (a container stack), so
+		// teardown can, even when the setup never got to its manifest.
+		"ADMINISTRATION_CLEANUP="+cleanupFile(mf),
 	)
 	if c.Data != "" {
 		env = append(env, "ADMINISTRATION_DATA="+c.Data)
@@ -310,6 +371,13 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if err != nil {
 		return nil, err
 	}
+	// Its turn on the machine, and the memory for it, first: its ports are
+	// claimed and its time limit starts once it has them.
+	p, err := paceSetup(ctx, c, "after", s, save)
+	if err != nil {
+		return nil, err
+	}
+	defer p.done(false)
 	// A room is three folders. app is the copy of the app, built by setup and
 	// never writable by the professional. desk is the professional's working
 	// directory, where the browser may save screenshots. tmp holds the
@@ -379,7 +447,7 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("the room's manifest: %v", err)
 	}
-	if err := checkManifest(&m, ps, ci.SignsInAs); err != nil {
+	if err := checkManifest(&m, names, ps, ci.SignsInAs); err != nil {
 		return nil, err
 	}
 	// A checkout that moved while the setup ran is as far off as one that
@@ -388,9 +456,16 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		head = after
 	}
 	rb := roomBuild{From: "app", Commit: m.Build}
+	rb.withWork = hookBuildNamed(s, rb.Commit)
 	switch {
 	case rb.Commit == "" && s.BuildCommit != "":
+		// Taken on trust: the setup was handed the hook's build, and is
+		// held to have installed it. It was handed the checkout too, so a
+		// checkout that moved is said.
 		rb.From, rb.Commit, rb.withWork = "app (build hook)", c.want(), true
+		if head != "" && head != c.Commit {
+			rb.Note = fmt.Sprintf("the checkout moved to %s while the room was built; the setup was given the build hook's build of %s", short(head), short(c.want()))
+		}
 	case rb.Commit == "" && head == c.Commit && c.Build == "":
 		rb.Commit = c.Commit
 		// Built from the checkout, uncommitted work and all: the work placed,
@@ -402,6 +477,11 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		}
 	case rb.Commit == "":
 		rb.Commit = head
+		if now, _ := workHash(c.Project); now != "" && head == c.want() {
+			// A --build contract is that commit alone, and the checkout the
+			// setup built from has more.
+			rb.Note = fmt.Sprintf("built from the checkout, which has uncommitted work (%s) that isn't in the contract's %s", now, short(c.want()))
+		}
 	}
 	rb, err = checkBuild(c, rb)
 	if c.Commit != "" {
@@ -409,7 +489,12 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		save()
 	}
 	if err != nil {
-		if head != c.Commit && m.Build == "" {
+		switch {
+		case m.Build != "" || head == c.want():
+		case c.Build != "":
+			return nil, refusal{fmt.Sprintf("the setup builds the room from the checkout, which is at %s, and the contract was placed to test %s (--build): put the checkout at %s while its rooms are built, or give the house a build hook (docs/design.md, The build hook)",
+				short(head), short(c.want()), short(c.want()))}
+		case head != c.Commit:
 			return nil, refusal{fmt.Sprintf("the project has moved on since the contract was placed (HEAD is %s, the contract is on %s), and the setup builds the room from the checkout: place the contract again to test %s, or put the checkout back at %s",
 				short(head), short(c.Commit), short(head), short(c.Commit))}
 		}
@@ -420,6 +505,7 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if err := answers(ctx, m.URL, 60*time.Second); err != nil {
 		return nil, err
 	}
+	p.done(true)
 	return &m, nil
 }
 
@@ -450,7 +536,8 @@ func killGroup(pgid int, done <-chan error) {
 const teardownLimit = 5 * time.Minute
 
 // manifestPorts is the ports the room's manifest names: the gate opens these
-// and no others (not the db or aux ports, which the app uses internally).
+// and no others (never the db port, which checkManifest refuses in a
+// manifest: the app uses it internally).
 func manifestPorts(m *manifest) []int {
 	var ports []int
 	seen := map[int]bool{}
@@ -479,8 +566,10 @@ func setupTimeout() time.Duration {
 func roomData(d string) bool { return d == "seed" || d == "local" }
 
 // checkManifest holds the room to Rule 1: seed or local data, and nothing
-// but this room's own ports on this machine.
-func checkManifest(m *manifest, ports []int, signsInAs string) error {
+// but this room's own ports on this machine. names are the ports' names, in
+// order: the db port is the app's own, never the browser's, so an origin on
+// it is refused (the gate would open it, and tunnel to it).
+func checkManifest(m *manifest, names []string, ports []int, signsInAs string) error {
 	if !roomData(m.Data) {
 		return refusal{fmt.Sprintf("the room's data is %q; contracts run on seed data or a local copy on this machine (\"seed\" or \"local\"), never production (no business on consecrated ground)", m.Data)}
 	}
@@ -488,8 +577,12 @@ func checkManifest(m *manifest, ports []int, signsInAs string) error {
 		return errors.New("the room's manifest has no url")
 	}
 	own := map[string]bool{}
-	for _, p := range ports {
+	db := ""
+	for i, p := range ports {
 		own[fmt.Sprint(p)] = true
+		if i < len(names) && names[i] == "db" {
+			db = fmt.Sprint(p)
+		}
 	}
 	origins := append([]string{m.URL}, m.Origins...)
 	for _, o := range origins {
@@ -500,6 +593,9 @@ func checkManifest(m *manifest, ports []int, signsInAs string) error {
 		h := u.Hostname()
 		if h != "127.0.0.1" && h != "localhost" {
 			return refusal{fmt.Sprintf("origin %q is not on this machine; professionals only reach their own room", o)}
+		}
+		if u.Port() == db {
+			return refusal{fmt.Sprintf("origin %q is the room's db port ($ADMINISTRATION_PORT_DB): the database is the app's, and the browser never reaches it", o)}
 		}
 		if !own[u.Port()] {
 			return refusal{fmt.Sprintf("origin %q is not on one of this room's ports (%v)", o, ports)}
@@ -576,8 +672,23 @@ func teardown(c *contract, dir, name string, s *status) {
 		stopEquipment(c, ci, pd, readTag(dir, name), s)
 	}
 	teardownBefore(c, dir, name, s)
-	hook := filepath.Join(contractHouse(c), "teardown")
-	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 && (ci == nil || !ci.NoBrowser && ci.Kind != "critic") {
+	house := contractHouse(c)
+	hook := filepath.Join(house, "teardown")
+	roomed := ci == nil || !ci.NoBrowser && ci.Kind != "critic"
+	if _, err := os.Stat(hook); err != nil && roomed && s.Room != "" && !isDir(house) {
+		// The house can't be found: the project gone with it (a worktree
+		// removed, on a contract placed before contracts kept their house;
+		// a house kept on the machine is found through the project), or a
+		// kept house moved or removed. What its setup started outside the
+		// room can't be torn down, and the books say so rather than
+		// calling the room clean.
+		what := fmt.Sprintf("its house (%s) is gone", house)
+		if !isDir(c.Project) {
+			what = fmt.Sprintf("the project (%s) is gone and its house can't be found", c.Project)
+		}
+		s.Leftovers = fmt.Sprintf("its teardown couldn't run: %s, so whatever its setup started outside the room (a docker compose, a database) may still be running", what)
+	}
+	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 && roomed {
 		ports, _ := os.ReadFile(filepath.Join(pd, "ports"))
 		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		ctx, cancel := context.WithTimeout(context.Background(), teardownLimit)
@@ -595,6 +706,22 @@ func teardown(c *contract, dir, name string, s *status) {
 			logf.Close()
 		}
 	}
+	// What the setup declared for taking down what it started outside its
+	// process group runs after the teardown hook, whatever that did, and
+	// whether or not the setup got as far as its manifest: a setup cut off
+	// by its time limit leaves no container stack behind.
+	if f := cleanupFile(filepath.Join(pd, "room.json")); isFile(f) {
+		ports, _ := os.ReadFile(filepath.Join(pd, "ports"))
+		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		app := ""
+		if s.Room != "" {
+			app = filepath.Join(s.Room, "app")
+		}
+		runCleanup(c, f, roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room.json"), readTag(dir, name)), logf)
+		if logf != nil {
+			logf.Close()
+		}
+	}
 	// Whatever setup left running carries its tag and goes now. What it
 	// started outside its own descendants (docker compose -d, a daemon) is
 	// teardown's job; if a port still answers, the books say so.
@@ -606,7 +733,7 @@ func teardown(c *contract, dir, name string, s *status) {
 		time.Sleep(250 * time.Millisecond)
 		open = listening(open)
 	}
-	if len(open) > 0 {
+	if len(open) > 0 && s.Leftovers == "" {
 		s.Leftovers = fmt.Sprintf("still listening after teardown: %v (check %s)", open, houseFile(c.Project, "teardown"))
 	}
 	s.TornDown = true
@@ -669,7 +796,56 @@ var secretGlobs = []string{".env", ".env.*", ".envrc", ".npmrc", ".netrc", ".pyp
 	// Signing keys and service credentials a mobile or cloud project keeps
 	// beside its code.
 	"*.p8", "*.jks", "*.keystore", "*service-account*.json", "GoogleService-Info.plist",
-	"google-services.json", ".aws/**"}
+	"google-services.json", ".aws/**",
+	// What a house's env/ keeps for a build (signing passwords beside
+	// sdk.dir); env/ itself never reaches a room either (rosterFile).
+	"local.properties", "keystore.properties", "signing.properties"}
+
+// secretDenies are the Read rules for every secret file: each of
+// secretGlobs anywhere under the working directory and anywhere at all
+// (a rule with no leading // is the working directory's, and the Director
+// and verifiers read the project through --add-dir), in any case too (a
+// filesystem that ignores case opens .ENV or .Env as .env, and a rule
+// doesn't): as written, lower, upper, and every letter as [eE], and the
+// houses' env/ folders, the untracked config a build is given.
+func secretDenies(houses ...string) []string {
+	var out []string
+	for _, g := range secretGlobs {
+		vs := []string{g}
+		for _, v := range []string{strings.ToLower(g), strings.ToUpper(g), anyCase(g)} {
+			if !slices.Contains(vs, v) {
+				vs = append(vs, v)
+			}
+		}
+		for _, v := range vs {
+			out = append(out, "Read(**/"+v+")", "Read(//**/"+v+")")
+		}
+	}
+	out = append(out, "Read(**/.administration/env/**)", "Read(//**/.administration/env/**)")
+	for _, h := range houses {
+		if h != "" {
+			out = append(out, "Read("+absRule(filepath.Join(h, "env"))+"/**)")
+		}
+	}
+	return out
+}
+
+// gitDenies keep a repository's .git from being read, in any case.
+var gitDenies = []string{"Read(**/.git/**)", "Read(//**/.git/**)", "Read(**/.[gG][iI][tT]/**)", "Read(//**/.[gG][iI][tT]/**)"}
+
+// anyCase is a glob that matches its letters in either case: .env is
+// .[eE][nN][vV].
+func anyCase(g string) string {
+	var b strings.Builder
+	for _, r := range g {
+		if lo, up := unicode.ToLower(r), unicode.ToUpper(r); lo != up {
+			b.WriteString("[" + string(lo) + string(up) + "]")
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // settingsFor is the wall in Claude Code's own terms. --restricted already
 // takes away every tool that runs commands, ignores the person's settings and
@@ -688,9 +864,11 @@ func settingsFor(c *contract, ci *castItem, room string) map[string]any {
 		// config from where it's run, and cd would move it there.
 		deny = append(deny, "Bash(git)", "Bash(git *)", "Bash(cd)", "Bash(cd *)")
 	}
-	for _, g := range secretGlobs {
-		deny = append(deny, "Read(**/"+g+")")
-	}
+	deny = append(deny, secretDenies(contractHouse(c))...)
+	// A repository's history: every secret ever committed and taken out
+	// again is in its objects. The contract's copy has none; a project read
+	// as it is now (one outside git) might.
+	deny = append(deny, gitDenies...)
 	if ci.Kind != "critic" {
 		// A user's room is outside home, so all of home is off limits.
 		deny = append(deny, "Read(~/**)", "Read(//Users/**)", "Read(//home/**)")
@@ -723,7 +901,7 @@ func settingsFor(c *contract, ci *castItem, room string) map[string]any {
 			// except where the desk says.
 			"filesystem": map[string]any{
 				"denyRead": append([]string{home, "/home", "/Users", "/root", "/run/user", "/var/run/docker.sock",
-					"/run/docker.sock", "/tmp", "/mnt", "/media"}, otherRooms(room)...),
+					"/run/docker.sock", "/tmp", "/mnt", "/media"}, otherRooms(c, room)...),
 				"denyWrite": []string{filepath.Join(room, "app"), filepath.Join(room, "equipment")},
 			},
 		}
@@ -762,15 +940,6 @@ func browserConfig(m *manifest, room, gateAddr string, show, screen bool) map[st
 		cfg["snapshot"] = map[string]any{"mode": "none"}
 	}
 	return cfg
-}
-
-func mcpFor(node, configPath string) map[string]any {
-	return map[string]any{"mcpServers": map[string]any{
-		"playwright": map[string]any{
-			"command": node,
-			"args":    []string{playwrightCLI(), "--config", configPath},
-		},
-	}}
 }
 
 func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
@@ -925,6 +1094,15 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 			}
 			fmt.Fprintf(&b, "- %s (its tools are named mcp__eq_%s__…): %s\n", u, strings.ReplaceAll(u, "-", "_"), about)
 		}
+		// The copy is what was tested; the equipment needs what's installed
+		// (dependencies, a build), which only the checkout has.
+		if copyKept(c) != "" {
+			fmt.Fprintf(&b, "Your working directory is a copy of the project as the contract was placed; the equipment runs the project's own checkout, as it is on disk.")
+			if d := liveDrift(c); d != "" {
+				fmt.Fprintf(&b, " That checkout %s, so what you run may not be what you read: when they disagree, say which one a finding is from.", d)
+			}
+			fmt.Fprintf(&b, "\n")
+		}
 		fmt.Fprintf(&b, "Reading finds a suspicion; running it settles one. When you suspect an input goes wrong, feed it through the code with those tools and quote what came back. A finding you ran says so, with the call and its output; one you only read says that too. Cite file and line for every finding.\n")
 	} else if ci.Kind == "critic" {
 		fmt.Fprintf(&b, "You read code only: Read, Grep and Glob, in the project at your working directory. Cite file and line for every finding.\n")
@@ -936,7 +1114,11 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 		fmt.Fprintf(&b, "Use your time. A first read finds the obvious; the bugs that ship are in how pieces meet. For each path in scope, follow the data from where it comes in (a form, a request, a stored row, an offline queue) through every function that touches it to where it is shown, stored or charged, across files, and ask at each step what happens on the second time, the empty case, the other branch, the retry. Only stop when you have followed every path, or your coins are nearly gone.\n")
 	}
 	if ch := c.Changes; ch != nil {
-		fmt.Fprintf(&b, "\nThe contract is on these changes: everything since %s (merge base %.8s), working tree included.\n", ch.Base, ch.MergeBase)
+		if c.Build != "" {
+			fmt.Fprintf(&b, "\nThe contract is on these changes: everything since %s (merge base %.8s) up to commit %s, and no uncommitted work.\n", ch.Base, ch.MergeBase, ch.Head)
+		} else {
+			fmt.Fprintf(&b, "\nThe contract is on these changes: everything since %s (merge base %.8s), working tree included.\n", ch.Base, ch.MergeBase)
+		}
 		if ci.Kind == "critic" {
 			if ch.Split != "" {
 				fmt.Fprintf(&b, "The diff is split by file in %s: INDEX.md there lists each changed file, its lines added and removed, and the file holding its part. Read the index, then the parts for the files in your part, then the code around them; the whole diff (%s) only if your part needs all of it.\n", ch.Split, ch.Patch)
@@ -944,6 +1126,9 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 				fmt.Fprintf(&b, "The diff is %s. Read it first, then the code around it.\n", ch.Patch)
 			}
 			fmt.Fprintf(&b, "This is a release check: give each finding a mark (record_finding's mark, or right after a FINDING: mark), one of three, and say where as the file and its line in the working tree (src/cart.ts:412), never the diff's own lines or hunk: the diff shows what changed, the files are what a reader opens.\n- NEW: these changes make the app behave differently for the worse: something that worked before doesn't, or now goes wrong. Say what the code did before (the old lines, or that the path didn't exist) and what it does now; a risk you can't trace to lines the diff added or changed isn't NEW.\n- CHANGE: the change's own text is wrong but nothing that ran before behaves differently: a comment or document that misstates the code, a test that can fail or tests the wrong thing, a check that's missing.\n- OLD: it was already so before these changes.\n")
+		}
+		if ch.LeftOut > 0 && ci.Kind == "critic" {
+			fmt.Fprintf(&b, "%s\n", secretsLeftOutNote(ch.LeftOut))
 		}
 		fmt.Fprintf(&b, "Changed files:\n")
 		for i, f := range append(ch.Files, ch.Untracked...) {
@@ -987,6 +1172,71 @@ func childEnv(tmp string) []string {
 	return env
 }
 
+// claudeEnv says whether a variable is Claude Code's own: its sign-in, where
+// it talks to, its config, or what it tells the programs it starts.
+func claudeEnv(k string) bool {
+	return strings.HasPrefix(k, "ANTHROPIC_") || strings.HasPrefix(k, "CLAUDE_") || k == "CLAUDECODE"
+}
+
+// dropClaudeEnv takes Claude Code's variables out of this process's
+// environment. The house's servers (_equip, _screen, _drive) are started by
+// the professional's claude with its environment, sign-in included, and
+// what they start in turn is the person's code (a declared program, a
+// driver) or the browser server: none of it needs the credential, and a
+// declared program's output goes straight back to the professional.
+func dropClaudeEnv() {
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); claudeEnv(k) {
+			_ = os.Unsetenv(k)
+		}
+	}
+}
+
+// blankClaudeEnv is the env a tool server the house doesn't run itself (the
+// browser server, a project's own) is given in mcp.json: Claude Code's
+// credentials set empty over what it would otherwise inherit.
+func blankClaudeEnv() map[string]string {
+	env := map[string]string{}
+	for _, k := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"} {
+		env[k] = ""
+	}
+	return env
+}
+
+// criticCopy is the folder a critic reads, and a note on it; or "" and why
+// it can't have one. A contract that named a commit is read only at that
+// commit: when its copy can't be had, the project as it is now holds what
+// it was placed without (its history, ignored files, later work), so the
+// critic doesn't read that instead. One that named none (placed outside
+// git, or before contracts kept their commit) reads the project, and
+// says so.
+func criticCopy(c *contract, dir string) (string, string) {
+	cwd, why := projectCopy(c, dir)
+	if cwd == c.Project && c.tested() != "" {
+		return "", "the contract's copy of the project couldn't be made, and a critic reads only that: " + why
+	}
+	return cwd, why
+}
+
+// tagServers marks every tool server with the professional's tag, in its
+// own env, so what they start is cleared with the session whether or not
+// Claude Code hands its environment on (a declared program runs in a
+// process group of its own, out of reach of the session's).
+func tagServers(servers map[string]any, tag string) {
+	for _, v := range servers {
+		srv, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		env, _ := srv["env"].(map[string]string)
+		if env == nil {
+			env = map[string]string{}
+		}
+		env[tagVar] = tag
+		srv["env"] = env
+	}
+}
+
 // displayEnv is what a browser needs to open a window on the person's
 // screen, given only when they asked to watch (--show-browsers). It lets the
 // browser draw on that screen; the professional still has nothing but the
@@ -1011,7 +1261,15 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 	// upload and drop: the room's own copies, by name only (desk.go).
 	files := ""
 	if hasFileTools(c, ci) && s.Room != "" {
-		desk, err := fillDesk(c.Project, s.Room)
+		// The desk the contract was placed with; one placed before
+		// contracts kept it gets the project's as it is now.
+		var desk []deskFile
+		var err error
+		if c.Desk != nil {
+			desk, err = fillDeskWith(c.Project, *c.Desk, deskKept(filepath.Dir(pd)), s.Room)
+		} else {
+			desk, err = fillDesk(c.Project, s.Room)
+		}
 		if err != nil {
 			return "failed", err.Error()
 		}
@@ -1063,7 +1321,10 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 			}
 			if seesScreen(ci) {
 				tools = screenToolNames()
-			} else if files != "" {
+			} else {
+				// A page's file picker is there whether or not the desk has
+				// files: the choosing tool answers either way (with no desk,
+				// that there's nothing on it), as a screen user's does.
 				tools = append(tools, "browser_choose_file", "browser_drop_file")
 			}
 			// One browser per app, each with a profile of its own: the two
@@ -1083,17 +1344,17 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 				if err := writeJSON(cfg, browserConfig(sd.m, s.Room, g.addr(), c.ShowBrowsers, seesScreen(ci))); err != nil {
 					return "failed", err.Error()
 				}
-				srv := mcpFor(node, cfg)["mcpServers"].(map[string]any)["playwright"]
+				// Every user's browser is behind the screen: it turns the
+				// server's file hints to the house's tools, checks the
+				// files it would write, and keeps navigation on the web.
+				var srv map[string]any
 				if seesScreen(ci) {
-					if srv, err = screenServer(node, cfg, files); err != nil {
-						return "failed", err.Error()
-					}
-				} else if files != "" {
-					// A screen reader's browser, behind the screen only for
-					// the desk's files.
-					if srv, err = readerServer(node, cfg, files); err != nil {
-						return "failed", err.Error()
-					}
+					srv, err = screenServer(node, cfg, files)
+				} else {
+					srv, err = readerServer(node, cfg, files)
+				}
+				if err != nil {
+					return "failed", err.Error()
 				}
 				servers[sd.key] = srv
 				for _, t := range tools {
@@ -1116,6 +1377,7 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 		}
 		servers["house"] = hs
 		allowed = append(allowed, houseAllowed()...)
+		tagServers(servers, tag+"/pro")
 		mcp := filepath.Join(pd, "mcp.json")
 		if err := writeJSON(mcp, map[string]any{"mcpServers": servers}); err != nil {
 			return "failed", err.Error()
@@ -1168,7 +1430,9 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 		// The project as it was when the contract was placed, not the
 		// checkout someone may still be committing to.
 		var why string
-		if cwd, why = projectCopy(c, filepath.Dir(pd)); why != "" && c.Commit != "" {
+		if cwd, why = criticCopy(c, filepath.Dir(pd)); cwd == "" {
+			return "failed", why
+		} else if why != "" {
 			fmt.Fprintf(os.Stderr, "administration: %s\n", why)
 		}
 		args = append(args, "--tools", "Read,Grep,Glob")
@@ -1193,6 +1457,7 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 			}
 			allowed = append(allowed, eqAllowed...)
 		}
+		tagServers(servers, tag+"/pro")
 		mcp := filepath.Join(pd, "mcp.json")
 		if err := writeJSON(mcp, map[string]any{"mcpServers": servers}); err != nil {
 			return "failed", err.Error()
@@ -1411,7 +1676,7 @@ wait:
 		case rep.browserRun == 0:
 			reason = "never used the browser"
 		case rep.browserErr != "":
-			reason = "the browser never worked: " + rep.browserErr
+			reason = "the browser never worked: " + browserFailure(rep.browserErr)
 		default:
 			reason = "the browser never loaded a page (its calls got no answer)"
 		}
@@ -1476,10 +1741,29 @@ func chromiumSandbox() bool {
 	return !(os.Getenv("ADMINISTRATION_TEST_ISOLATED") == "1" && os.Getenv("ADMINISTRATION_TEST_NO_CHROMIUM_SANDBOX") == "1")
 }
 
-func secret(name string) bool {
-	for _, g := range secretGlobs {
-		if ok, _ := filepath.Match(g, name); ok {
-			return true
+// secret says whether a file, by its path from the project (or the
+// house), is one of secretGlobs: its name, or the last parts of its path
+// for a glob with a folder in it (.git/config, anywhere), or any folder on
+// the way for one that ends in /** (.aws/**). Case is folded, as a disk
+// that ignores it (macOS's) opens .env for .ENV.
+func secret(rel string) bool {
+	parts := strings.Split(strings.ToLower(filepath.ToSlash(filepath.Clean(rel))), "/")
+	// Anything in a repository's own folder: its config, a worktree's or a
+	// submodule's, its hooks, its refs, the objects with every secret ever
+	// committed. None of it is the project's to hand a room.
+	if slices.Contains(parts, ".git") {
+		return true
+	}
+	for i := range parts {
+		for _, g := range secretGlobs {
+			g = strings.ToLower(g)
+			if dir, ok := strings.CutSuffix(g, "/**"); ok {
+				if m, _ := path.Match(dir, parts[i]); m && i < len(parts)-1 {
+					return true
+				}
+			} else if m, _ := path.Match(g, strings.Join(parts[i:], "/")); m {
+				return true
+			}
 		}
 	}
 	return false
@@ -1550,13 +1834,25 @@ func sealSandboxed(c *contract, ci *castItem, room string) error {
 // professionals' on this contract and every other contract's. (Denying the
 // rooms folder and allowing this room back leaves the room's own mounts
 // read-only under the sandbox, which then can't start; so they're listed.)
-func otherRooms(room string) []string {
+// The list is fixed when the session starts, so this contract's other rooms
+// are made now, empty, if their workers haven't got to them yet: they're
+// built while this one runs. A contract placed later still has rooms
+// this list can't name.
+func otherRooms(c *contract, room string) []string {
 	if room == "" {
 		return nil
 	}
 	var out []string
 	contract := filepath.Dir(room)
 	rooms := filepath.Dir(contract)
+	if c != nil {
+		for i := range c.Professionals {
+			p := &c.Professionals[i]
+			if r := roomPath(rooms, c, p.Name); r != room && (p.Kind == "user" || len(p.Uses) > 0) {
+				_ = os.MkdirAll(r, 0o700)
+			}
+		}
+	}
 	cs, _ := os.ReadDir(rooms)
 	for _, c := range cs {
 		if !c.IsDir() {

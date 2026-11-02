@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,6 +35,9 @@ type verdict struct {
 	// that was already so before the changes is "OLD". The summary files it
 	// there.
 	Tag string `json:"tag,omitempty"`
+	// A false finding the test room caused, not the app (a seed that
+	// didn't load, a setup that half ran, the wall blocking a font).
+	Room bool `json:"room,omitempty"`
 	// Why a verifier decided a link the way it did; it goes with the link.
 	linkWhy string
 }
@@ -54,8 +59,10 @@ func cmdVerdicts(args []string) error {
 	if len(args) != 2 {
 		return usageError{"verdicts ID FILE|-   (JSON: {\"name\": [{\"finding\": 1, \"verdict\": \"confirmed\"}]})"}
 	}
-	c, dir, err := loadContract(args[0])
-	if err != nil {
+	// The contract is looked up first, so a mistyped ID is told at once,
+	// and again under the books' use lock once the verdicts are read: a
+	// verdicts waiting on its stdin doesn't keep a prune refused.
+	if _, _, err := loadContract(args[0]); err != nil {
 		return err
 	}
 	var in io.Reader = os.Stdin
@@ -84,6 +91,15 @@ func cmdVerdicts(args []string) error {
 	}
 	if given == 0 {
 		return usageError{"verdicts: there are none in it to record"}
+	}
+	unuse, err := useBooks()
+	if err != nil {
+		return err
+	}
+	defer unuse()
+	c, dir, err := loadContract(args[0])
+	if err != nil {
+		return err
 	}
 	on := map[string]bool{}
 	for _, p := range c.Professionals {
@@ -215,6 +231,8 @@ type ledgerLine struct {
 	// Of those, the ones a verifier gave and nobody has reviewed since.
 	ByVerifier int `json:"by_verifier,omitempty"`
 	Dossier   int      `json:"dossier_bytes,omitempty"`
+	// How long it waited for the machine before its coins started.
+	WaitedSecs float64 `json:"waited_secs,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -222,9 +240,14 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 	l := ledgerLine{Contract: c.ID, Target: c.Target, Placed: c.PlacedAt.Format(time.RFC3339), Name: p.Name,
 		Kind: p.Kind, State: s.State, CoinsMin: p.CoinsMin, CostUSD: s.CostUSD, Turns: s.Turns,
 		Findings: s.Findings, Unreached: s.Unreached, Dossier: p.Dossier}
-	if s.StartedAt != nil && s.FinishedAt != nil {
+	// The coins it used: from when its room was ready, so what it waited
+	// for the machine isn't counted against it.
+	if from := s.ReadyAt; from != nil && s.FinishedAt != nil {
+		l.Minutes = s.FinishedAt.Sub(*from).Minutes()
+	} else if s.StartedAt != nil && s.FinishedAt != nil {
 		l.Minutes = s.FinishedAt.Sub(*s.StartedAt).Minutes()
 	}
+	l.WaitedSecs = s.WaitedSecs
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true
@@ -307,8 +330,10 @@ func history(project string) ([]ledgerLine, error) {
 	if f, err := os.Open(projectLedger(books, projectKey(project))); err == nil {
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
+			// A line written twice (by a prune before appendLedger
+			// looked first) counts once.
 			var l ledgerLine
-			if json.Unmarshal(sc.Bytes(), &l) == nil {
+			if json.Unmarshal(sc.Bytes(), &l) == nil && !seen[l.Contract+"/"+l.Name] {
 				lines = append(lines, l)
 				seen[l.Contract+"/"+l.Name] = true
 			}
@@ -542,6 +567,17 @@ func countContracts(lines []ledgerLine) int {
 // once the Director has reviewed it, or once it's older than --older. Its
 // numbers move to the project's ledger, and only the last --keep summaries
 // and reports stay.
+//
+// It holds the books' use lock (useBooks) exclusive while it looks and
+// renames, so nothing it removes is being placed, closed, verified or
+// resumed meanwhile, and it's refused while one of those runs. What it
+// removes it first renames into the books' .pruned folder, so nothing ever
+// finds half of it: a copy, a build or a contract is there whole or not at
+// all. The removal itself, which can take a while, comes after the lock is
+// let go: what's set aside is nobody's. A contract's numbers are in the
+// ledger before it's set aside, and appendLedger writes only the lines the
+// ledger lacks, so a prune cut off or failing anywhere neither loses them
+// nor counts them twice.
 func cmdPrune(args []string) error {
 	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false})
 	if err != nil {
@@ -555,7 +591,7 @@ func cmdPrune(args []string) error {
 	}
 	older := 30 * 24 * time.Hour
 	if f.has("older") {
-		if older, err = parseAge(f.get("older")); err != nil {
+		if older, err = parseAge(f.get("older")); err != nil || older < 0 {
 			return usageError{"--older: an age like 30d or 12h"}
 		}
 	}
@@ -563,75 +599,206 @@ func cmdPrune(args []string) error {
 	if err != nil {
 		return err
 	}
+	// A dry run changes nothing, makes nothing and takes no lock: it can
+	// look while a place or a close runs.
+	dry := f.has("dry-run")
+	if !dry {
+		if err := os.MkdirAll(books, 0o700); err != nil {
+			return err
+		}
+		unlock, ok := tryLockFile(useLock(books))
+		if !ok {
+			return busy{"a place, close, verify, verdicts or resume is running on the books; prune once it's done"}
+		}
+		// Last-in first-out: the lock is let go, then what this prune (or
+		// one cut off before it) set aside is removed.
+		defer clearPruned(books)
+		defer unlock()
+	}
+	// What couldn't be removed is told after the rest is done, with what
+	// was: one failure doesn't stop the prune or hide what it did.
+	var failed []string
+	fail := func(what string, err error) { failed = append(failed, what+": "+err.Error()) }
+	gone := func(path string) bool {
+		if dry {
+			return true
+		}
+		_, err := aside(books, path)
+		if err != nil {
+			fail(path, err)
+		}
+		return err == nil
+	}
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 	byProject := map[string][]*contract{}
+	// The shared copies of the project (copyRoot) a contract still kept
+	// whole may read, and the builds an open one's rooms may install.
+	needed := map[string]bool{}
+	need := func(c *contract) {
+		if c.tested() == "" {
+			return
+		}
+		for _, w := range []string{c.Work, ""} {
+			if root, err := copyRoot(c, c.tested(), w); err == nil {
+				needed[root] = true
+			}
+		}
+	}
 	for _, file := range files {
 		c, _, err := loadContract(filepath.Base(filepath.Dir(file)))
+		if err == nil && c.ClosedAt == nil {
+			need(c)
+			if root, err := buildsDir(c); err == nil && buildCommit(c) != "" {
+				needed[filepath.Join(root, buildCommit(c))] = true
+			}
+			// Its before app's build too, of the merge base.
+			if root, err := buildsDir(c); err == nil && c.Before && c.Changes != nil && c.Changes.MergeBase != "" {
+				needed[filepath.Join(root, c.Changes.MergeBase)] = true
+			}
+		}
 		if err != nil || c.ClosedAt == nil {
 			continue
 		}
 		byProject[contractKey(c)] = append(byProject[contractKey(c)], c)
 	}
+	// The files a stripped contract loses, in each professional's folder:
+	// everything but the report, the status, the verdicts and the links,
+	// the before app's and the equipment's as well as the room's.
 	raw := []string{"stream.jsonl", "brief.md", "persona.md", "settings.json", "mcp.json", "browser.json",
-		"claude.log", "worker.log", "setup.log", "teardown.log", "gate.log", "room.json", "ports", "tag", "worker.pid"}
+		"claude.log", "worker.log", "setup.log", "teardown.log", "gate.log", "room.json", "ports", "tag", "worker.pid",
+		"room-before.json", "setup-before.log", "browser-before.json", "ports-before", "argv.json", "equipment-*.log"}
+	// A contract closed with --keep kept its rooms: they go with it.
+	keptRooms := func(id string) string {
+		if rooms, err := roomsDir(); err == nil && isDir(filepath.Join(rooms, id)) {
+			return filepath.Join(rooms, id)
+		}
+		return ""
+	}
 	stripped, removed := 0, 0
 	for project, cs := range byProject {
-		sort.Slice(cs, func(i, j int) bool { return cs[i].PlacedAt.After(cs[j].PlacedAt) })
+		// The last closed first: the keep is the last --keep to close.
+		sort.Slice(cs, func(i, j int) bool { return cs[i].ClosedAt.After(*cs[j].ClosedAt) })
 		for i, c := range cs {
 			dir := filepath.Join(books, "contracts", c.ID)
-			_, reviewed := os.Stat(filepath.Join(dir, "reviewed"))
+			_, err := os.Stat(filepath.Join(dir, "reviewed"))
+			isReviewed := err == nil
 			old := time.Since(*c.ClosedAt) > older
+			if !isReviewed && !old {
+				// Kept whole until the Director has reviewed it, or it's
+				// old, past the keep or not: its findings may not be
+				// checked yet.
+				need(c)
+				continue
+			}
 			if i >= keep {
-				// Past the keep: its numbers go to the ledger, then all of it.
-				if f.has("dry-run") {
+				// Past the keep: its numbers go to the ledger, then all of
+				// it. The ledger first, so it has them before the contract
+				// is gone; a prune cut off in between leaves the contract
+				// with its lines already written, and the next one adds
+				// none again.
+				if dry {
 					fmt.Printf("would remove %s (%q)\n", c.ID, c.Target)
 					continue
 				}
 				if err := appendLedger(books, project, c, dir); err != nil {
-					return err
+					fail("the ledger for "+c.ID, err)
+					continue
 				}
-				if err := os.RemoveAll(dir); err != nil {
-					return err
+				if _, err := aside(books, dir); err != nil {
+					fail(c.ID, err)
+					continue
+				}
+				if r := keptRooms(c.ID); r != "" {
+					_ = os.RemoveAll(r)
 				}
 				removed++
 				continue
 			}
-			if reviewed == nil || old {
-				for _, p := range c.Professionals {
-					for _, name := range raw {
-						path := filepath.Join(dir, p.Name, name)
-						if _, err := os.Stat(path); err == nil {
-							if f.has("dry-run") {
-								fmt.Printf("would remove %s\n", path)
-								continue
-							}
-							_ = os.Remove(path)
-						}
-					}
+			var paths []string
+			for _, p := range c.Professionals {
+				for _, name := range raw {
+					m, _ := filepath.Glob(filepath.Join(dir, p.Name, name))
+					paths = append(paths, m...)
 				}
-				if !f.has("dry-run") {
-					_ = os.RemoveAll(filepath.Join(dir, contractHandout))
-					_ = os.RemoveAll(filepath.Join(dir, ".verify")) // a failed verifier's or matcher's stream
-					_ = os.RemoveAll(filepath.Join(dir, ".match"))
-					_ = os.RemoveAll(checkoutDir(dir)) // the copy critics and verifiers read
-					tmps, _ := filepath.Glob(checkoutDir(dir) + "-*") // a copy cut off before it was renamed into place
-					for _, t := range tmps {
-						_ = os.RemoveAll(t)
-					}
-					_ = os.RemoveAll(filepath.Join(dir, "handout")) // where it was before 0.4
-					stripped++
+			}
+			tmps, _ := filepath.Glob(checkoutDir(dir) + "-*") // a copy cut off before it was renamed into place
+			for _, p := range append([]string{
+				filepath.Join(dir, contractHandout),
+				filepath.Join(dir, ".verify"), // a failed verifier's or matcher's stream
+				filepath.Join(dir, ".match"),
+				deskKept(dir),                 // the desk's files as placed
+				checkoutDir(dir),              // the copy critics and verifiers read, before copies were shared
+				filepath.Join(dir, "handout"), // where it was before 0.4
+			}, tmps...) {
+				if _, err := os.Lstat(p); err == nil {
+					paths = append(paths, p)
 				}
+			}
+			if r := keptRooms(c.ID); r != "" {
+				paths = append(paths, r)
+			}
+			n := 0
+			for _, p := range paths {
+				if dry {
+					fmt.Printf("would remove %s\n", p)
+					continue
+				}
+				if st, err := os.Lstat(p); err == nil && !st.IsDir() {
+					if os.Remove(p) == nil {
+						n++
+					}
+				} else if gone(p) {
+					n++
+				}
+			}
+			if n > 0 {
+				stripped++
 			}
 		}
 	}
+	// The shared copies: one no contract kept whole is on goes. A place
+	// holds the use lock from before it takes a copy until its contract
+	// names it, and a worker makes one only for an open contract, which
+	// needs it, so a copy left by nobody is one nobody is using. One made
+	// in the last hour (or --older, if less) is left all the same. A copy
+	// still being made (makeCheckout's .<name>-XXXX) is judged by the copy
+	// it's being made into.
+	copies := 0
+	grace := min(time.Hour, older)
+	made, _ := filepath.Glob(filepath.Join(books, "copies", "*", "*"))
+	for _, d := range made {
+		into := d
+		if base := filepath.Base(d); strings.HasPrefix(base, ".") {
+			if i := strings.LastIndex(base, "-"); i > 1 {
+				into = filepath.Join(filepath.Dir(d), base[1:i])
+			}
+		}
+		st, err := os.Stat(d)
+		if err != nil || needed[d] || needed[into] || time.Since(st.ModTime()) < grace {
+			continue
+		}
+		if dry {
+			fmt.Printf("would remove the copy %s\n", d)
+			continue
+		}
+		if gone(d) {
+			copies++
+		}
+	}
 	// The build hook's builds, kept per commit: one nobody has used in the
-	// age goes (a contract on it again builds it again).
+	// age goes (a contract on it again builds it again). An open
+	// contract's is kept, and so is one a room or a build holds the lock
+	// of (ensureBuild): a room holds it while it's installing or running
+	// the build.
 	// A build that failed (a log, no artifact) or was killed before it
 	// could clean up (its checkout left, with the house's env/ copied in)
-	// goes by its log's age the same way, checkout first.
+	// goes by its log's age the same way, checkout and all.
 	builds := 0
 	kept, _ := filepath.Glob(filepath.Join(books, "builds", "*", "*"))
 	for _, d := range kept {
+		if needed[d] {
+			continue
+		}
 		mark := filepath.Join(d, "artifact")
 		if _, err := os.Stat(mark); err != nil {
 			mark = filepath.Join(d, "build.log")
@@ -643,55 +810,144 @@ func cmdPrune(args []string) error {
 		if err != nil || time.Since(st.ModTime()) <= older {
 			continue
 		}
-		unlock, ok := tryLockFile(filepath.Join(d, ".lock"))
-		if !ok {
-			continue // building now
-		}
-		if f.has("dry-run") {
-			unlock()
-			fmt.Printf("would remove the build in %s\n", d)
+		if dry {
+			if !lockHeld(filepath.Join(d, ".lock")) {
+				fmt.Printf("would remove the build in %s\n", d)
+			}
 			continue
 		}
-		// Held until it's gone, so a build can't start in it meanwhile
-		// (one waiting for the lock finds the folder gone and starts anew).
-		_ = os.RemoveAll(filepath.Join(d, "src"))
-		if os.RemoveAll(d) == nil {
+		unlock, ok := tryLockFile(filepath.Join(d, ".lock"))
+		if !ok {
+			continue // building, or in use
+		}
+		// Renamed aside while it's held: a room that was waiting for the
+		// lock finds the folder gone and starts a new one (lockWaiting),
+		// and nothing starts a build in the folder being removed.
+		if gone(d) {
 			builds++
 		}
 		unlock()
 	}
-	if !f.has("dry-run") {
+	if !dry {
 		fmt.Printf("Pruned: %d contracts down to their summaries, %d removed (their numbers are in the ledger).\n", stripped, removed)
+		if copies > 0 {
+			fmt.Printf("Removed %s of the project no contract reads any more.\n", plural(copies, "copy", "copies"))
+		}
 		if builds > 0 {
 			fmt.Printf("Removed %s unused for %s.\n", plural(builds, "build", "builds"), map[bool]string{true: f.get("older"), false: "30d"}[f.has("older")])
 		}
 	}
+	if len(failed) > 0 {
+		return fmt.Errorf("prune couldn't remove %s (left in the books; the next prune tries again): %s",
+			plural(len(failed), "thing", "things"), strings.Join(failed, "; "))
+	}
 	return nil
 }
 
+// aside renames path into the books' .pruned folder, whole, and says where
+// it went; clearPruned removes it from there. What's in the books is then
+// all of a thing or none of it, even when a prune is cut off. A path on
+// another file system (a rooms folder set apart) is removed where it is.
+func aside(books, path string) (string, error) {
+	trash := filepath.Join(books, ".pruned")
+	if err := os.MkdirAll(trash, 0o700); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(trash, strings.TrimPrefix(filepath.Base(path), ".")+"-")
+	if err != nil {
+		return "", err
+	}
+	moved := filepath.Join(tmp, filepath.Base(path))
+	if err := os.Rename(path, moved); err != nil {
+		_ = os.Remove(tmp)
+		if errors.Is(err, syscall.EXDEV) {
+			return "", os.RemoveAll(path)
+		}
+		return "", err
+	}
+	return moved, nil
+}
+
+// clearPruned removes what aside put in the books' .pruned folder.
+func clearPruned(books string) {
+	trash := filepath.Join(books, ".pruned")
+	es, _ := os.ReadDir(trash)
+	for _, e := range es {
+		_ = os.RemoveAll(filepath.Join(trash, e.Name()))
+	}
+}
+
+// appendLedger writes a contract's lines, one per professional, to its
+// project's ledger, read from dir, and only the ones the ledger doesn't
+// have yet: a prune cut off after writing some or all of them, or failing
+// part way, leaves the contract in the books, and the next prune completes
+// its lines without doubling any. They go in one write and are synced
+// before prune removes the contract. A line a failed write left cut off is
+// ended first, so it spoils only itself (history skips what isn't JSON).
 func appendLedger(books, project string, c *contract, dir string) error {
 	path := projectLedger(books, project)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	for _, p := range c.Professionals {
-		b, _ := json.Marshal(lineFor(c, dir, p))
-		if _, err := f.Write(append(b, '\n')); err != nil {
-			return err
+	have := map[string]bool{}
+	var last byte = '\n'
+	sc := bufio.NewScanner(f)
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		var l ledgerLine
+		if json.Unmarshal(sc.Bytes(), &l) == nil {
+			have[l.Contract+"/"+l.Name] = true
 		}
 	}
-	return nil
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if st, err := f.Stat(); err == nil && st.Size() > 0 {
+		b := make([]byte, 1)
+		if _, err := f.ReadAt(b, st.Size()-1); err == nil {
+			last = b[0]
+		}
+	}
+	var out []byte
+	if last != '\n' {
+		out = append(out, '\n')
+	}
+	n := 0
+	for _, p := range c.Professionals {
+		if have[c.ID+"/"+p.Name] {
+			continue
+		}
+		b, _ := json.Marshal(lineFor(c, dir, p))
+		out = append(append(out, b...), '\n')
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	if _, err := f.Write(out); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
+// parseAge is --older's age: a Go duration, or a number of days (30d).
+// A day count too big for a duration (about 292 years) is an error, not
+// one that wraps round to a small age that would prune everything.
 func parseAge(s string) (time.Duration, error) {
 	if strings.HasSuffix(s, "d") {
 		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
-		return time.Duration(n) * 24 * time.Hour, err
+		if err != nil {
+			return 0, err
+		}
+		if int64(n) > math.MaxInt64/int64(24*time.Hour) || int64(n) < math.MinInt64/int64(24*time.Hour) {
+			return 0, fmt.Errorf("%s is too long an age", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
 }
@@ -707,6 +963,72 @@ func lockBooks() (func(), error) {
 		return nil, err
 	}
 	return lockFile(filepath.Join(books, "lock"))
+}
+
+// useLock is the books' use lock's file.
+func useLock(books string) string { return filepath.Join(books, "use.lock") }
+
+// useWait is how long a command waits for a prune to let go of the books'
+// use lock before it gives up. Prune holds it only while it looks and
+// renames, so it's rarely more than a moment.
+var useWait = 2 * time.Minute
+
+// useBooks holds the books' use lock, shared, until the returned func is
+// called (once; calling it again does nothing). Every command that reads
+// or writes a closed contract's folder (close, verify, verdicts, resume)
+// or takes a shared copy before its contract names it (place) holds it
+// while it needs to, and prune takes it exclusive, so prune never strips
+// or removes anything under one of them. While a prune holds it, the
+// command says so and waits, up to useWait, then gives up as busy (exit 4).
+func useBooks() (func(), error) {
+	books, err := booksDir()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(books, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(useLock(books), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(useWait)
+	for told := false; ; {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			f.Close()
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, busy{fmt.Sprintf("a prune has held the books for over %s; try again once it's done", useWait)}
+		}
+		if !told {
+			fmt.Fprintf(os.Stderr, "The books are being pruned; waiting for it (up to %s).\n", useWait)
+			told = true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var once sync.Once
+	return func() { once.Do(func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }) }, nil
+}
+
+// lockHeld says whether someone holds the lock at path, without making
+// the file when there's none (prune --dry-run looks and changes nothing).
+func lockHeld(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }
 
 // tryLockFile is lockFile without the wait: ok is false when someone else

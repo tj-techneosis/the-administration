@@ -25,24 +25,53 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	if c.Changes == nil || c.Changes.MergeBase == "" {
 		return nil, errors.New("no merge base to build the before app from")
 	}
-	src := filepath.Join(s.Room, "before-src")
+	// Its own turn on the machine and its own memory, as the room's app
+	// had (a worker keeps the turn from one to the other).
+	p, err := paceSetup(ctx, c, "before", s, save)
+	if err != nil {
+		return nil, err
+	}
+	defer p.done(false)
+	clone := filepath.Join(s.Room, "before-src")
 	app := filepath.Join(s.Room, "before")
+	// The repository is cloned whole, from its top, as the contract's copy
+	// is: a project in a subfolder of it (apps/web) is that subfolder of the
+	// clone.
+	top, err := git(c.Project, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("the before checkout: %v", err)
+	}
+	rel, err := filepath.Rel(realPath(top), realPath(c.Project))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		rel = "."
+	}
+	src := filepath.Join(clone, rel)
 	if err := os.MkdirAll(app, 0o700); err != nil {
 		return nil, err
 	}
 	// A clone in the room that borrows the project's objects (--shared):
 	// the project's repo is only read, never written, not even a worktree
 	// entry.
-	for _, args := range [][]string{
-		{"clone", "--quiet", "--shared", "--no-checkout", c.Project, src},
-		{"-C", src, "checkout", "--quiet", "--detach", c.Changes.MergeBase},
+	// Both through gitCmd, as the contract's copy is made: the clone from the
+	// room, the checkout in the clone, no filter run and no LFS fetched.
+	for _, step := range []struct {
+		dir  string
+		args []string
+	}{
+		{s.Room, []string{"clone", "--quiet", "--shared", "--no-checkout", top, clone}},
+		{clone, []string{"-C", clone, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", c.Changes.MergeBase}},
 	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		cmd := gitCmd(step.dir, step.args...)
+		cmd.Env = append(cmd.Env, "GIT_LFS_SKIP_SMUDGE=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("the before checkout (%.8s): %v: %s", c.Changes.MergeBase, err, strings.TrimSpace(string(out)))
 		}
 	}
 	// The hook and the files beside it are the project's current ones (a
 	// seed script, a helper): an older checkout has none or old ones.
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		return nil, err // the subfolder didn't exist yet at the merge base
+	}
 	_ = os.RemoveAll(filepath.Join(src, ".administration"))
 	if out, err := exec.Command("cp", "-a", contractHouse(c), filepath.Join(src, ".administration")).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("the before checkout's .administration: %v: %s", err, strings.TrimSpace(string(out)))
@@ -76,6 +105,9 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	cmd := exec.Command(filepath.Join(contractHouse(c), "setup"), src, app)
 	cmd.Dir = src
 	cmd.Env = append(beforeEnv(roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name)), src), "ADMINISTRATION_SIDE=before")
+	// The build hook's build of the merge base, when the house has one:
+	// the setup installs it instead of building the app in every room.
+	cmd.Env = append(cmd.Env, buildEnv(&status{BuildArtifact: s.BeforeBuildArtifact, BuildCommit: s.BeforeBuildCommit})...)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -100,7 +132,7 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("the before app's manifest: %v", err)
 	}
-	if err := checkManifest(&m, ps, ci.SignsInAs); err != nil {
+	if err := checkManifest(&m, names, ps, ci.SignsInAs); err != nil {
 		return nil, err
 	}
 	s.BeforeURL = m.URL
@@ -108,7 +140,20 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	if err := answers(ctx, m.URL, 60*time.Second); err != nil {
 		return nil, err
 	}
+	p.done(true)
 	return &m, nil
+}
+
+// beforeBuildContract is the contract as the build hook sees its before
+// app: the merge base, with no uncommitted work and no chosen build, so its
+// build is kept under the merge base's commit like any other.
+func beforeBuildContract(c *contract) *contract {
+	bc := *c
+	bc.Commit, bc.Work, bc.Build, bc.Checkout = "", "", "", ""
+	if c.Changes != nil {
+		bc.Commit = c.Changes.MergeBase
+	}
+	return &bc
 }
 
 // beforeEnv points the hook at the before checkout instead of the project.
@@ -124,10 +169,38 @@ func beforeEnv(env []string, src string) []string {
 // teardownBefore runs the teardown hook on the before app and removes its
 // worktree; the room's tag clears whatever it left running.
 func teardownBefore(c *contract, dir, name string, s *status) {
+	pd := filepath.Join(dir, name)
+	defer func() {
+		// What its setup declared for taking down what it started outside
+		// its process group, after the teardown hook, and even when the
+		// setup never wrote its manifest.
+		if f := cleanupFile(filepath.Join(pd, "room-before.json")); isFile(f) {
+			ports, _ := os.ReadFile(filepath.Join(pd, "ports-before"))
+			logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			app := ""
+			if s.Room != "" {
+				app = filepath.Join(s.Room, "before")
+			}
+			env := roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room-before.json"), readTag(dir, name))
+			if s.BeforeSrc != "" {
+				env = beforeEnv(env, s.BeforeSrc)
+			}
+			runCleanup(c, f, env, logf)
+			if logf != nil {
+				logf.Close()
+			}
+		}
+		if s.BeforeSrc == "" {
+			return
+		}
+		_ = os.RemoveAll(s.BeforeSrc)
+		if s.Room != "" {
+			_ = os.RemoveAll(filepath.Join(s.Room, "before-src")) // the whole clone, for a subfolder's
+		}
+	}()
 	if s.BeforeSrc == "" {
 		return
 	}
-	pd := filepath.Join(dir, name)
 	hook := filepath.Join(contractHouse(c), "teardown")
 	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 {
 		ports, _ := os.ReadFile(filepath.Join(pd, "ports-before"))
@@ -147,7 +220,6 @@ func teardownBefore(c *contract, dir, name string, s *status) {
 			logf.Close()
 		}
 	}
-	_ = os.RemoveAll(s.BeforeSrc)
 }
 
 // withBefore is the room's manifest with the before app's addresses added,

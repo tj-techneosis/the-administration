@@ -254,10 +254,7 @@ type projectConfig struct {
 	} `toml:"handout"`
 	// The files a user can put into the page, as from their own computer
 	// (desk.go): copied in, or made to a size.
-	Desk struct {
-		Files []string   `toml:"files"`
-		Make  []deskMake `toml:"make"`
-	} `toml:"desk"`
+	Desk deskConfig `toml:"desk"`
 	// The data a room can start from, besides the hook's default: the
 	// project's own ways of getting data for local testing (a seed script,
 	// a dump its tooling pulled). place --data NAME hands the name to the
@@ -711,10 +708,38 @@ var refusedCommands = map[string]bool{
 	"unbuffer": true, "tmux": true, "screen": true, "parallel": true, "fd": true, "rg": true, "sort": true,
 	"split": true, "gdb": true, "lldb": true, "strace": true, "ltrace": true, "valgrind": true, "nvim": true,
 	"ed": true, "ex": true, "nano": true, "sqlite": true, "psql": true, "mysql": true, "tclsh": true, "wish": true,
-	"java": true, "jshell": true, "Rscript": true, "R": true, "julia": true, "guile": true, "gjs": true, "qjs": true,
+	"java": true, "jshell": true, "rscript": true, "r": true, "julia": true, "guile": true, "gjs": true, "qjs": true,
 	"tsx": true, "ts-node": true, "corepack": true, "pandoc": true, "gs": true, "pytest": true, "tox": true,
 	"install": true, "cpio": true, "pax": true, "7z": true, "7za": true, "bsdtar": true, "hyprctl": true,
 	"osascript-": true, "launchctl": true, "at": true, "batch": true, "crontab": true, "pkexec": true,
+	// Other awks, interpreters and REPLs, and build tools, which run their
+	// scripts' commands.
+	"mawk": true, "nawk": true, "luajit": true, "irb": true, "pry": true, "ipython": true, "pypy": true,
+	"pythonw": true, "py": true, "pyw": true, "php-cgi": true, "erl": true, "escript": true, "elixir": true,
+	"iex": true, "ghci": true, "runghc": true, "runhaskell": true, "swift": true, "kotlin": true, "scala": true,
+	"groovy": true, "clojure": true, "racket": true, "sbcl": true, "ocaml": true, "dotnet": true, "mono": true,
+	"dart": true, "gem": true, "rake": true, "bundle": true, "bundler": true, "cmake": true, "ninja": true,
+	"meson": true, "scons": true, "bazel": true, "gradle": true, "gradlew": true, "mvn": true, "ant": true,
+	"gcc": true, "cc": true, "clang": true, "m4": true, "dc": true,
+	// Things that run a command they're given, or a hook or delegate that
+	// does.
+	"rlwrap": true, "entr": true, "convert": true, "magick": true, "mogrify": true, "hg": true, "svn": true,
+	"command": true, "builtin": true, "caffeinate": true, "sandbox-exec": true, "bwrap": true, "firejail": true,
+	// More shells, editors that run a command from within (vim's :!), the
+	// other makes, package managers (hooks and install scripts), pagers
+	// that run one (!cmd), and what runs a command under another user or
+	// in a fresh environment.
+	"ash": true, "rbash": true, "mksh": true, "sash": true, "yash": true, "xonsh": true, "nu": true, "elvish": true,
+	"pdksh": true, "oksh": true, "posh": true, "rc": true, "es": true, "view": true, "vimdiff": true, "rvim": true,
+	"gvim": true, "rview": true, "vimx": true, "nvi": true, "elvis": true, "mg": true, "jed": true, "joe": true,
+	"micro": true, "kak": true, "hx": true, "helix": true, "gmake": true, "bmake": true, "pmake": true, "nmake": true,
+	"apt": true, "apt-get": true, "aptitude": true, "dpkg": true, "rpm": true, "yum": true, "dnf": true, "brew": true,
+	"port": true, "apk": true, "pacman": true, "zypper": true, "snap": true, "flatpak": true, "nix": true,
+	"nix-shell": true, "conda": true, "mamba": true, "pipx": true, "poetry": true, "pdm": true, "hatch": true,
+	"rye": true, "mise": true, "asdf": true, "direnv": true, "volta": true, "bat": true, "most": true, "pg": true,
+	"lv": true, "journalctl": true, "w3m": true, "lynx": true, "links": true, "elinks": true, "runuser": true,
+	"sg": true, "newgrp": true, "capsh": true, "wine": true, "watchexec": true, "nodemon": true, "xterm": true,
+	"kitty": true, "alacritty": true, "wezterm": true, "konsole": true, "gnome-terminal": true,
 }
 
 func checkCommand(cmd string) error {
@@ -727,12 +752,26 @@ func checkCommand(cmd string) error {
 			return fmt.Errorf("command %q: no .. in a command's path", cmd)
 		}
 	}
-	// python3.12, perl5.40: the version doesn't change what it is.
-	base := strings.TrimRight(filepath.Base(cmd), "0123456789.")
-	if strings.HasPrefix(filepath.Base(cmd), "ld-linux") || strings.HasPrefix(filepath.Base(cmd), "ld.so") {
+	// python3.12, perl5.40, python3.12m, python3.13td, python3-dbg,
+	// bash.exe: the version, a build's flags, a debug build or Windows'
+	// suffix don't change what it is, and nor does case (Bash is bash on a
+	// filesystem that ignores it, as macOS's does by default).
+	name := strings.ToLower(filepath.Base(cmd))
+	base := strings.TrimSuffix(name, ".exe")
+	for _, sfx := range []string{"-dbg", "-debug", "_d"} {
+		base = strings.TrimSuffix(base, sfx)
+	}
+	base = strings.TrimRight(base, "0123456789.-")
+	if t := strings.TrimRight(base, "mtwd"); t != base && t != "" && strings.ContainsAny(t[len(t)-1:], "0123456789.") {
+		base = strings.TrimRight(t, "0123456789.-")
+	}
+	if strings.HasPrefix(base, "git-") {
+		base = "git" // git-upload-pack and the rest are git
+	}
+	if strings.HasPrefix(name, "ld-linux") || strings.HasPrefix(name, "ld.so") || strings.HasPrefix(name, "ld-musl") {
 		return fmt.Errorf("command %q: a loader runs any program", cmd)
 	}
-	if refusedCommands[base] || refusedCommands[filepath.Base(cmd)] {
+	if refusedCommands[base] || refusedCommands[name] {
 		return fmt.Errorf("command %q: shells, interpreters, network tools and anything that runs other commands can't be listed", cmd)
 	}
 	return nil
@@ -868,8 +907,9 @@ func checkEquipment(project, name string) (*equipment, error) {
 			}
 		}
 	case "sandboxed":
-		// Run by name, or by a path inside the room's app/ (what the setup
-		// built there), in the OS sandbox: one program each, never a shell.
+		// Run by name, or by a path inside the room's equipment/<name>/
+		// (what its setup built there), in the OS sandbox: one program
+		// each, never a shell.
 		if len(eq.Commands) == 0 {
 			return nil, fmt.Errorf("equipment %s: server = \"sandboxed\" needs commands", name)
 		}
@@ -882,10 +922,18 @@ func checkEquipment(project, name string) (*equipment, error) {
 		if len(eq.Commands) == 0 {
 			return nil, fmt.Errorf("equipment %s: server = \"commands\" needs commands", name)
 		}
+		// One tool per program, named for its file: two that would share
+		// a name would leave one out of reach.
+		byTool := map[string]string{}
 		for _, c := range eq.Commands {
-			if _, err := projectProgram(project, c); err != nil {
+			abs, err := projectProgram(project, c)
+			if err != nil {
 				return nil, fmt.Errorf("equipment %s: %v", name, err)
 			}
+			if other, ok := byTool[commandTool(abs)]; ok {
+				return nil, fmt.Errorf("equipment %s: %s and %s would both be %s; give one another file name", name, other, c, commandTool(abs))
+			}
+			byTool[commandTool(abs)] = c
 		}
 	case "screen":
 		// The house's screen: the professional gets its tools, the driver
@@ -956,43 +1004,75 @@ func projectProgram(project, rel string) (string, error) {
 	return abs, nil
 }
 
-const handoutLimit = 256 << 10
+// A handout's text (instructions, a spec) stays under handoutLimit, so a
+// user reads it whole; its pictures (the designs a page is held to) have
+// their own, larger, budget, as a picture costs a user what its size on
+// screen does, not its bytes.
+const (
+	handoutLimit       = 256 << 10
+	handoutImagesLimit = 8 << 20
+)
+
+var handoutImage = map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true}
+
+// handoutFile is one file of the handout: its name on the desk, and the
+// file itself (every link followed) with what the check saw there.
+type handoutFile struct {
+	Name, Src string
+	st        os.FileInfo
+}
+
+// handoutFiles is the project's handout, checked: each file held to
+// rosterFile's rule (inside the project, links followed; regular; not the
+// house's env/; no secret), no two with one name on the desk, and the text
+// and the pictures each under their limit. Place checks it, so a handout
+// too big is told before any room is built, not by every user failing at
+// the start.
+func handoutFiles(project string) ([]handoutFile, error) {
+	var out []handoutFile
+	seen := map[string]string{}
+	text, images := int64(0), int64(0)
+	for _, rel := range loadProjectConfig(project).Handout.Files {
+		src, st, err := rosterFile(project, rel)
+		if err != nil {
+			return nil, fmt.Errorf("handout %q: %v", rel, err)
+		}
+		// Each goes on the desk by its name, so two of one name (in any
+		// case: one file on macOS's disk) would leave the user one.
+		name := filepath.Base(rel)
+		if prev, ok := seen[strings.ToLower(name)]; ok {
+			return nil, fmt.Errorf("handout %q and %q have one name on the desk (%s); hand out one, or rename it", prev, rel, name)
+		}
+		seen[strings.ToLower(name)] = rel
+		if handoutImage[strings.ToLower(filepath.Ext(rel))] {
+			if images += st.Size(); images > handoutImagesLimit {
+				return nil, fmt.Errorf("the handout's pictures are over %d MB together (%s makes %.1f MB); hand out fewer, or smaller", handoutImagesLimit>>20, rel, float64(images)/(1<<20))
+			}
+		} else if text += st.Size(); text > handoutLimit {
+			return nil, fmt.Errorf("the handout's text is over %d KB together (%s makes %d KB); hand out less, or point to a file in the project", handoutLimit>>10, rel, text>>10)
+		}
+		out = append(out, handoutFile{name, src, st})
+	}
+	return out, nil
+}
 
 // copyHandout puts the project's handout into a user's desk and returns the
-// names it copied. Each file is inside the project, a regular file, and no
-// secret; together they stay under handoutLimit.
+// names it copied.
 func copyHandout(project, desk string) ([]string, error) {
+	files, err := handoutFiles(project)
+	if err != nil {
+		return nil, err
+	}
 	var names []string
-	total := int64(0)
-	for _, rel := range loadProjectConfig(project).Handout.Files {
-		src := housePath(project, rel)
-		if filepath.IsAbs(rel) || !inProject(project, src) {
-			return nil, fmt.Errorf("handout %q: a file inside the project", rel)
-		}
-		for _, g := range secretGlobs {
-			if ok, _ := filepath.Match(g, filepath.Base(rel)); ok {
-				return nil, fmt.Errorf("handout %q looks like a secret; it never goes in a room", rel)
-			}
-		}
-		st, err := os.Lstat(src)
-		if err != nil || !st.Mode().IsRegular() {
-			return nil, fmt.Errorf("handout %q: not a regular file in the project", rel)
-		}
-		if total += st.Size(); total > handoutLimit {
-			return nil, fmt.Errorf("the handout is over %d KB; hand out less", handoutLimit>>10)
-		}
-		b, err := os.ReadFile(src)
-		if err != nil {
-			return nil, err
-		}
-		dst := filepath.Join(desk, "handout", filepath.Base(rel))
+	for _, f := range files {
+		dst := filepath.Join(desk, "handout", f.Name)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(dst, b, 0o600); err != nil {
+		if err := copyRegularAs(f.Src, f.st, dst); err != nil {
 			return nil, err
 		}
-		names = append(names, filepath.Base(rel))
+		names = append(names, f.Name)
 	}
 	return names, nil
 }

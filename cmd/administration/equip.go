@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -128,7 +129,10 @@ func startEquipment(ctx context.Context, c *contract, ci *castItem, pd, tag stri
 		}
 		// What build the room runs: as its setup said, or the build hook's.
 		b := buildFromVars(name, v)
+		b.withWork = hookBuildNamed(s, b.Commit)
 		if b.Commit == "" && s.BuildCommit != "" && eq.Setup != "" {
+			// Taken on trust: the setup was handed the hook's build, and is
+			// held to have installed it.
 			b.From, b.Commit, b.withWork = name+" (build hook)", c.want(), true
 		}
 		if b.Commit != "" || b.App != "" || eq.Server == "screen" || eq.Server == "playwright" {
@@ -144,13 +148,29 @@ func startEquipment(ctx context.Context, c *contract, ci *castItem, pd, tag stri
 	return vars, nil
 }
 
-// buildEnv is what a room's hooks hear of the build hook's build.
+// buildEnv is what a room's hooks hear of the build hook's build: where it
+// is, its commit, and the uncommitted work's hash when it was built with
+// some (ADMINISTRATION_BUILD_WORK, as the hook heard it).
 func buildEnv(s *status) []string {
 	if s.BuildArtifact == "" {
 		return nil
 	}
-	commit, _, _ := strings.Cut(s.BuildCommit, "-work-")
-	return []string{"ADMINISTRATION_BUILD=" + s.BuildArtifact, "ADMINISTRATION_BUILD_COMMIT=" + commit}
+	commit, work, ok := strings.Cut(s.BuildCommit, "-work-")
+	env := []string{"ADMINISTRATION_BUILD=" + s.BuildArtifact, "ADMINISTRATION_BUILD_COMMIT=" + commit}
+	if ok {
+		env = append(env, "ADMINISTRATION_BUILD_WORK=work-"+work)
+	}
+	return env
+}
+
+// hookBuildNamed says whether a reported build names the build hook's,
+// made with the uncommitted work: a setup that installs
+// $ADMINISTRATION_BUILD and echoes $ADMINISTRATION_BUILD_COMMIT reports
+// the bare commit, and its build has the work all the same.
+func hookBuildNamed(s *status, reported string) bool {
+	commit, _, ok := strings.Cut(s.BuildCommit, "-work-")
+	got := strings.ToLower(strings.TrimSpace(reported))
+	return ok && s.BuildArtifact != "" && len(got) >= 7 && hexRE.MatchString(got) && strings.HasPrefix(commit, got)
 }
 
 // equipmentGround holds what an equipment's setup prints to Rule 1, as a
@@ -370,7 +390,7 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 		tools := eq.Tools
 		switch eq.Server {
 		case "playwright":
-			servers[key] = map[string]any{"command": node, "args": append([]string{playwrightCLI()}, filled...)}
+			servers[key] = map[string]any{"command": node, "args": append([]string{playwrightCLI()}, filled...), "env": blankClaudeEnv()}
 			if seesScreen(ci) {
 				// A window seen the way the browser is: the screen in front,
 				// pictures and coordinates, no text of the page.
@@ -395,6 +415,19 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 				}
 				servers[key] = map[string]any{"command": self, "args": append([]string{"_screen", "--files", files, node, playwrightCLI(), "--config", cfg}, filled...)}
 				tools = windowScreenTools(eq.Tools)
+			} else if ci.Kind == "user" {
+				// A screen-reader user's window is behind the screen too, as
+				// its browser is: files only from the desk, named and never
+				// pathed, and only web pages.
+				self, err := os.Executable()
+				if err != nil {
+					return nil, nil, err
+				}
+				files := ""
+				if isDir(deskDir(room)) {
+					files = deskDir(room)
+				}
+				servers[key] = map[string]any{"command": self, "args": append([]string{"_screen", "--reader", "--files", files, node, playwrightCLI()}, filled...)}
 			}
 		case "screen":
 			self, err := os.Executable()
@@ -423,12 +456,25 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 				// the same device again and put the same build back on it.
 				hook, _ := projectProgram(c.Project, eq.Restart)
 				env["ADMINISTRATION_EQUIPMENT_RESTART"] = hook
+				// It runs where the setup hook does, not in the room's desk.
+				env["ADMINISTRATION_EQUIPMENT_RESTART_DIR"] = hookDir(c)
 				for k, v := range map[string]string{"ADMINISTRATION_CONTRACT": c.ID, "ADMINISTRATION_PROFESSIONAL": ci.Name,
 					"ADMINISTRATION_MAIN": c.Project, "ADMINISTRATION_ROOM": room, "ADMINISTRATION_EQUIPMENT": name,
 					"ADMINISTRATION_EQUIPMENT_DIR": filepath.Join(room, "equipment", name), "ADMINISTRATION_PORT": vars[name]["port"],
-					"ADMINISTRATION_BUILD": vars[name]["build"], "ADMINISTRATION_BUILD_COMMIT": vars[name]["build_commit"]} {
+					"ADMINISTRATION_BUILD": vars[name]["build"], "ADMINISTRATION_BUILD_COMMIT": vars[name]["build_commit"],
+					"ADMINISTRATION_DEVICE_PORTS": devicePorts()} {
 					if v != "" {
 						env[k] = v
+					}
+				}
+				// The setup's window or none: a restart boots the device as
+				// the setup did.
+				if c.ShowBrowsers {
+					env["ADMINISTRATION_SHOW"] = "1"
+					for _, kv := range displayEnv() {
+						if k, v, ok := strings.Cut(kv, "="); ok {
+							env[k] = v
+						}
 					}
 				}
 			}
@@ -452,7 +498,7 @@ func equipmentServers(c *contract, ci *castItem, room string, vars eqVars, node 
 			servers[key] = map[string]any{"command": self, "args": cargs, "env": eqEnv(vars)}
 		default:
 			abs, _ := projectProgram(c.Project, eq.Server)
-			servers[key] = map[string]any{"command": abs, "args": filled}
+			servers[key] = map[string]any{"command": abs, "args": filled, "env": blankClaudeEnv()}
 		}
 		for _, t := range tools {
 			allowed = append(allowed, "mcp__"+key+"__"+t)
@@ -504,6 +550,7 @@ func cmdEquip(args []string) error {
 		return usageError{"_equip DESK PROGRAM..."}
 	}
 	desk, progs := args[0], args[1:]
+	dropClaudeEnv()
 	byTool := map[string]string{}
 	for _, p := range progs {
 		byTool[commandTool(p)] = p
@@ -562,33 +609,79 @@ func cmdEquip(args []string) error {
 
 const equipOutputCap = 64 << 10
 
+// declaredLimit is how long one call of a declared program may take.
+var declaredLimit = 10 * time.Minute
+
+// runDeclared runs one declared program in its own process group, so the
+// limit ends what it started too, and a child left holding its output
+// (a VM, a daemon a wrapper starts) holds the call only a few seconds past
+// the program's end: otherwise every later call on this server would wait
+// behind it.
 func runDeclared(prog string, args []string, desk string) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), declaredLimit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, prog, args...)
 	cmd.Dir = desk
+	cmd.Env = os.Environ() // this server's, Claude Code's own taken out
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Sprintf("it ran past %s and was stopped\n%s", declaredLimit, capOutput(buf.String())), true
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// It ended; what it left behind held the output past the delay.
+		err = nil
+		if code := cmd.ProcessState.ExitCode(); code != 0 {
+			return fmt.Sprintf("exit %d\n%s", code, capOutput(buf.String())), true
+		}
+	}
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
 		return "could not run it: " + err.Error(), true
 	}
-	o := buf.String()
+	return fmt.Sprintf("exit %d\n%s", code, capOutput(buf.String())), code != 0
+}
+
+func capOutput(o string) string {
 	if len(o) > equipOutputCap {
 		o = o[:equipOutputCap] + "\n… (cut)"
 	}
-	return fmt.Sprintf("exit %d\n%s", code, o), code != 0
+	return o
 }
 
 // devicePorts is the range of emulator console ports kept for rooms, as
 // FIRST-LAST: 5620-5680 (even ones; each emulator also takes the odd one
-// above it for adb), or ADMINISTRATION_DEVICE_PORTS.
+// above it for adb), or ADMINISTRATION_DEVICE_PORTS. Place refuses a range
+// that can't be one (devicePortsBad), so one here is passed over for the
+// default.
 func devicePorts() string {
-	if v := os.Getenv("ADMINISTRATION_DEVICE_PORTS"); regexp.MustCompile(`^\d{4,5}-\d{4,5}$`).MatchString(v) {
+	if v := os.Getenv("ADMINISTRATION_DEVICE_PORTS"); v != "" && devicePortsBad(v) == "" {
 		return v
 	}
 	return "5620-5680"
+}
+
+// devicePortsBad says what's wrong with a range of console ports: it's
+// backwards, or starts on an odd port (an emulator's console port is even),
+// or isn't FIRST-LAST at all. "" when it's a range.
+func devicePortsBad(v string) string {
+	m := regexp.MustCompile(`^(\d{4,5})-(\d{4,5})$`).FindStringSubmatch(v)
+	if m == nil {
+		return fmt.Sprintf("ADMINISTRATION_DEVICE_PORTS=%q isn't FIRST-LAST (5620-5680)", v)
+	}
+	first, _ := strconv.Atoi(m[1])
+	last, _ := strconv.Atoi(m[2])
+	switch {
+	case first%2 != 0:
+		return fmt.Sprintf("ADMINISTRATION_DEVICE_PORTS=%q starts on an odd port; an emulator's console port is even, and the odd one above it is its adb port", v)
+	case first > last || last > 65534:
+		return fmt.Sprintf("ADMINISTRATION_DEVICE_PORTS=%q isn't a range of ports, first to last", v)
+	}
+	return ""
 }

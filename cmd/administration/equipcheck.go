@@ -110,8 +110,33 @@ func cmdEquipmentCheck(args []string) error {
 		}
 	}
 
+	// The build first, as a contract's worker makes it: the app's setup
+	// hears of it too.
+	if bad := buildHookUnrunnable(c); bad != "" {
+		fmt.Printf("The build didn't work: %s\n", bad)
+		return startError{"equipment check failed"}
+	}
+	if hook := buildHook(c); hook != "" {
+		fmt.Printf("Building %s with the house's build hook (or taking it from the books)...\n", short(buildCommit(c)))
+		var release func()
+		s.BuildArtifact, s.BuildCommit, release, err = ensureBuild(ctx, c, hook, func(why string) {
+			fmt.Printf("The build is locked: %s.\n", why)
+		})
+		// Held while the room installs and runs it.
+		defer release()
+		if err != nil {
+			if e := interrupted(); e != nil {
+				return e
+			}
+			fmt.Printf("The build didn't work: %v\n", err)
+			return startError{"equipment check failed"}
+		}
+		fmt.Printf("The build: %s\n", s.BuildArtifact)
+	}
 	if eq.NeedsApp {
 		fmt.Printf("It reads the app's room, so building that first (up to %s)...\n", setupTimeout())
+		// In turn with every other room's setup on the machine.
+		paceSay = func(why string) { fmt.Printf("  %s\n", why) }
 		if _, err := buildRoom(ctx, c, ci, pd, &s, save); err != nil {
 			if e := interrupted(); e != nil {
 				return e
@@ -126,17 +151,7 @@ func cmdEquipmentCheck(args []string) error {
 	} else if err := makeRoom(c, ci, pd, &s, save); err != nil {
 		return err
 	}
-	if hook := buildHook(c); hook != "" {
-		fmt.Printf("Building %s with the house's build hook (or taking it from the books)...\n", short(buildCommit(c)))
-		if s.BuildArtifact, s.BuildCommit, err = ensureBuild(ctx, c, hook); err != nil {
-			if e := interrupted(); e != nil {
-				return e
-			}
-			fmt.Printf("The build didn't work: %v\n", err)
-			return startError{"equipment check failed"}
-		}
-		fmt.Printf("The build: %s\n", s.BuildArtifact)
-	}
+	endSetupTurn()
 	fmt.Printf("Starting %s (up to %s)...\n", eqName, setupTimeout())
 	t0 := time.Now()
 	vars, err := startEquipment(ctx, c, ci, pd, tag, &s, save)
@@ -164,6 +179,9 @@ func cmdEquipmentCheck(args []string) error {
 		fmt.Printf(" Its setup printed: %s.", strings.Join(printed, ", "))
 	}
 	fmt.Println()
+	if heavy := heavySetup(c); heavy != "" {
+		fmt.Printf("Worth a build hook: %s.\n", heavy)
+	}
 	for _, b := range s.Builds {
 		fmt.Printf("Its build: %s.\n", b)
 		if b.Commit == "" {

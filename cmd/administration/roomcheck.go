@@ -82,7 +82,7 @@ func cmdRoomCheck(args []string) error {
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house"}}}
 	ci := &c.Professionals[0]
 	if f.has("changes") {
-		if c.Changes, err = collectChanges(project, f.get("base"), filepath.Join(dir, contractHandout)); err != nil {
+		if c.Changes, err = collectChanges(project, f.get("base"), "", filepath.Join(dir, contractHandout)); err != nil {
 			return err
 		}
 	}
@@ -97,9 +97,13 @@ func cmdRoomCheck(args []string) error {
 	s := status{State: "setup"}
 	save := func() { _ = writeJSON(filepath.Join(pd, "status.json"), s) }
 	fmt.Printf("Building a room with %s (up to %s)...\n", shown(project, hook), setupTimeout())
+	// It sets up in turn with every other room on the machine, and says so
+	// while it waits; the wait isn't the setup's time.
+	paceSay = func(why string) { fmt.Printf("  %s\n", why) }
+	defer endSetupTurn()
 	t0 := time.Now()
 	m, berr := buildRoom(ctx, c, ci, pd, &s, save)
-	took := time.Since(t0).Round(time.Second)
+	took := (time.Since(t0) - time.Duration(s.WaitedSecs*float64(time.Second))).Round(time.Second)
 	logTail := tail(filepath.Join(pd, "setup.log"), 30)
 	var bm *manifest
 	var bdone time.Duration
@@ -107,15 +111,16 @@ func cmdRoomCheck(args []string) error {
 	before := berr == nil && c.Changes != nil && c.Changes.MergeBase != ""
 	if before {
 		fmt.Printf("Building the before app (%.8s, without the changes), as a release check does...\n", c.Changes.MergeBase)
-		t1 := time.Now()
+		t1, w1 := time.Now(), s.WaitedSecs
 		bm, berr = beforeRoom(ctx, c, ci, pd, &s, save)
-		bdone = time.Since(t1).Round(time.Second)
+		bdone = (time.Since(t1) - time.Duration((s.WaitedSecs-w1)*float64(time.Second))).Round(time.Second)
 		if berr != nil {
 			logTail = tail(filepath.Join(pd, "setup-before.log"), 30)
 			bTail = "the before app's "
 			took = bdone
 		}
 	}
+	endSetupTurn()
 	teardown(c, dir, name, &s)
 	if s.Room != "" {
 		_ = os.RemoveAll(filepath.Dir(s.Room))
@@ -183,6 +188,9 @@ func cmdRoomCheck(args []string) error {
 	}
 	if s.Leftovers != "" {
 		fmt.Printf("After teardown: %s\n", s.Leftovers)
+	}
+	if heavy := heavySetup(c); heavy != "" {
+		fmt.Printf("Worth a build hook: %s.\n", heavy)
 	}
 	fmt.Printf("Cleared away. Browser professionals can take contracts here.\n")
 	return nil

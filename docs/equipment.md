@@ -87,8 +87,12 @@ needs_app = true          # its setup reads the app's room: a browser user's onl
   another command. It's the default for a command-line tool: the project
   writes no wrapper. Only users take it.
 - **`server = "commands"`** is the house's command server: one tool per
-  program in `commands` (`run_<name>`), which runs that program with the
-  arguments given as a list, never through a shell, in the room's desk.
+  program in `commands` (`run_<name>`, from the file's name, so two
+  programs in one piece need two names), which runs that program with the
+  arguments given as a list, never through a shell, in the room's desk,
+  for up to 10 minutes a call (then it and everything it started in its
+  process group are stopped), and without Claude Code's own sign-in in
+  its environment.
   It runs outside the professional's sandbox, which is the point: a
   wrapper that boots a VM or talks to Docker can't work inside a sandbox
   with no network and no sockets. So the program must be its own wall
@@ -119,15 +123,17 @@ needs_app = true          # its setup reads the app's room: a browser user's onl
 
   Coordinates are the device's own pixels; a non-zero exit is a failure
   and its stderr goes back to the professional. The driver runs as the
-  person, outside the wall, with the project's `pass_env` and every
-  piece's setup lines as `EQ_<EQUIPMENT>_<KEY>`. For Android it's adb
+  person, outside the wall (without Claude Code's sign-in), with the
+  project's `pass_env` and every piece's setup lines as `EQ_<EQUIPMENT>_<KEY>`. For Android it's adb
   (`screencap`, `input tap`, `input swipe`, `input text`,
   `input keyevent`); for a VM or a virtual display, a VNC or X client.
   `examples/phone-demo` is a whole one.
 - **A window through `playwright`** is seen the same way by a user who sees
   the screen (the default): the browser's screen goes in front of it,
   with the screenshots, coordinate clicks and keyboard, and no text dump
-  of the page. A `sees: screen-reader` user gets the declared tools.
+  of the page. A `sees: screen-reader` user gets the declared tools,
+  behind the same screen as a screen-reader user's browser: files named,
+  never pathed, and only web pages.
 - **`setup` and `teardown`** run once per room, as the person, like the
   house's setup hook: a fresh emulator, VM or app per professional, so two
   can't step on each other. Their environment has `ADMINISTRATION_ROOM`,
@@ -216,14 +222,19 @@ HH:MM", so the coverage reads as partial. `administration resume <id>
 <name>` places a new contract for them with only what they couldn't reach.
 
 Before that, a screen whose equipment declares `restart` is restarted
-once: the hook runs as the person with the setup's environment
-(`ADMINISTRATION_ROOM`, `ADMINISTRATION_PORT`, `ADMINISTRATION_BUILD`...),
+once: the hook runs as the person, in the folder the setup hook runs in,
+with the setup's environment
+(`ADMINISTRATION_ROOM`, `ADMINISTRATION_PORT`, `ADMINISTRATION_BUILD`,
+`ADMINISTRATION_DEVICE_PORTS`, and `ADMINISTRATION_SHOW` with
+`--show-browsers`...),
 and has to bring the same device back (the same serial: kill the
 emulator on the room's console port and boot it again there) with the
 build installed and the app open. If the screen answers after it, the
 professional is told the device was restarted and where they were is
 gone, and carries on; the status says "equipment restarted at HH:MM". If
-the restart fails, or the device dies again, it's lost. Write the boot
+the restart fails, or the device dies again, it's lost. A failed hook's
+stderr goes in the record ("equipment lost") and the server's log, never
+to the professional, who is told only that restarting failed. Write the boot
 once and have both hooks use it, so a restart is the setup's boot.
 
 ## Which build
@@ -245,17 +256,24 @@ commit it is: rebuild, or place the contract with `--build <sha>` to test
 that build on purpose. Read the commit from the build (a field your build
 stamps into the app, the artifact's own metadata), not from the checkout,
 or a stale artifact at a shared path passes as new. A screen whose setup
-says nothing is let in, shown as "build not reported". `BUILD_COMMIT` is
+says nothing is let in, shown as "build not reported". Other equipment
+(`commands`, a sandboxed tool) that says nothing gets no build line: it's
+taken to install no app. One that installs the app under test should say
+so like a screen does, and is held to it the same way. `BUILD_COMMIT` is
 a commit's hash (whole or its first seven letters or more, `-dirty` on
 the end for a build from a changed tree, which is let in and said), or a
-tag this checkout has. A version, a tag from elsewhere or a branch name
+tag this checkout has, by its name alone (`v1~1` isn't a tag). A version, a tag from elsewhere or a branch name
 is refused: nothing holds the first two to a commit, and a branch names
-wherever the checkout is now, not what was built.
+wherever the checkout is now, not what was built (a hash is looked up as
+a commit only, even when a branch has the same name).
 
 Better still, let the house build it: a `build` hook in the house builds
 a commit into a folder, once, in a clean checkout with the house's `env/`
 copied in (README, The build hook; docs/design.md). The setup then
-installs `$ADMINISTRATION_BUILD`, and the room's build is known.
+installs `$ADMINISTRATION_BUILD`, and the room's build is known: a setup
+that prints nothing is taken to have installed it, and one that prints
+`BUILD_COMMIT=$ADMINISTRATION_BUILD_COMMIT` is held to it, uncommitted
+work and all (`$ADMINISTRATION_BUILD_WORK` is that work's hash).
 
 **Give test builds a badge.** A small banner in a corner, or a line in
 the app's settings, reading the commit and the server it talks to
@@ -279,7 +297,8 @@ mistaken for each other, by people or by agents:
   kept for them, 5620 to 5680 (even ones; each emulator takes the odd port
   above for adb). Equipment hooks get the range as
   `ADMINISTRATION_DEVICE_PORTS` (`5620-5680`; set it in the environment
-  you place from to move it). A room's setup claims a port there and
+  you place from to move it: first even, and no higher than the last, or
+  place refuses it). A room's setup claims a port there and
   passes over any port something else holds (its console or adb port
   answers, or adb already lists `emulator-<port>`), never sharing one:
   `examples/phone-demo` does. Keep development emulators at 5554 to 5618,

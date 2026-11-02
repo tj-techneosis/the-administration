@@ -29,6 +29,13 @@ func cmdVerify(args []string) error {
 	if len(f.pos) != 1 {
 		return usageError{"verify ID [--batch 12] [--coins 10m] [--model M]"}
 	}
+	// While the verifiers read the copy and their verdicts are written:
+	// prune would remove either.
+	unuse, err := useBooks()
+	if err != nil {
+		return err
+	}
+	defer unuse()
 	c, dir, err := loadContract(f.pos[0])
 	if err != nil {
 		return err
@@ -98,6 +105,9 @@ func cmdVerify(args []string) error {
 	if why != "" {
 		fmt.Fprintf(os.Stderr, "administration: %s\n", why)
 	}
+	// Whether the copy has the uncommitted work: projectCopy says why
+	// whenever it doesn't.
+	withWork := c.Work != "" && why == ""
 	var mu sync.Mutex
 	// Each batch goes into the books as it finishes, so stopping verify
 	// part way keeps every verifier that was done.
@@ -114,7 +124,7 @@ func cmdVerify(args []string) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			vs, why := verifyBatch(c, code, filepath.Join(dir, ".verify", strconv.Itoa(k+1)), b, model, coins)
+			vs, why := verifyBatch(c, code, withWork, filepath.Join(dir, ".verify", strconv.Itoa(k+1)), b, model, coins)
 			mu.Lock()
 			defer mu.Unlock()
 			if why != "" {
@@ -177,7 +187,7 @@ func cmdVerify(args []string) error {
 
 // verifyBatch runs one walled verifier on a batch and returns its verdicts,
 // or why it gave none. Its folder is kept when it fails.
-func verifyBatch(c *contract, code, rd string, batch []*summed, model string, coins time.Duration) (map[*summed]verdict, string) {
+func verifyBatch(c *contract, code string, withWork bool, rd string, batch []*summed, model string, coins time.Duration) (map[*summed]verdict, string) {
 	if err := os.MkdirAll(rd, 0o700); err != nil {
 		return nil, err.Error()
 	}
@@ -211,8 +221,16 @@ func verifyBatch(c *contract, code, rd string, batch []*summed, model string, co
 	in := map[string]any{"project": code, "target": c.Target, "findings": items}
 	if t := c.tested(); t != "" && code != c.Project {
 		in["tested_commit"] = t
-		if c.Work != "" {
+		switch {
+		case withWork:
 			in["tested_commit"] = t + ", with the uncommitted work as it was then"
+			if n := leftOutNote(c); n != "" {
+				in["tested_commit"] = t + ", with the uncommitted work as it was then, except that " + n
+			}
+		case c.Work != "":
+			// The copy was made again without it (the work had changed):
+			// a finding in the uncommitted code isn't in what it reads.
+			in["tested_commit"] = t + ", without the uncommitted work the contract was placed with (it had changed before this copy was made, so code that was only in that work isn't here)"
 		}
 	}
 	addDirs := []string{"--add-dir", code}
@@ -230,9 +248,8 @@ func verifyBatch(c *contract, code, rd string, batch []*summed, model string, co
 	// Walled as the Director is: read-only tools, no shell, no web, no
 	// secrets, nothing written.
 	deny := []string{"Bash", "WebFetch", "WebSearch", "NotebookEdit", "Agent", "Write", "Edit"}
-	for _, g := range secretGlobs {
-		deny = append(deny, "Read(**/"+g+")")
-	}
+	deny = append(deny, secretDenies(contractHouse(c))...)
+	deny = append(deny, gitDenies...)
 	settings := filepath.Join(rd, "settings.json")
 	_ = writeJSON(settings, map[string]any{
 		"permissions":     map[string]any{"deny": deny, "disableBypassPermissionsMode": "disable"},
@@ -261,6 +278,7 @@ func verifyBatch(c *contract, code, rd string, batch []*summed, model string, co
 		Also    []string `json:"also"`
 		NotAlso []string `json:"not_also"`
 		LinkWhy string   `json:"link_why"`
+		Room    bool     `json:"room"`
 	}
 	if i < 0 || j < i || json.Unmarshal([]byte(text[i:j+1]), &answers) != nil {
 		return nil, "its answer wasn't a list of verdicts; its stream is in " + rd
@@ -277,6 +295,8 @@ func verifyBatch(c *contract, code, rd string, batch []*summed, model string, co
 		} else if a.Verdict != "confirmed" && a.Verdict != "likely" && a.Verdict != "false" {
 			continue
 		}
+		// Put down to the room only by a false verdict of its own.
+		v.Room = a.Room && a.Verdict == "false" && s.verdict == ""
 		// A mark that agrees with the finding's own (UNMARKED for none) is
 		// no correction.
 		if t, ok := fixTag(a.Tag); ok && t != s.tag && !(t == "UNMARKED" && s.tag == "") && c.Changes != nil {
@@ -381,7 +401,7 @@ func saveVerdicts(c *contract, dir string, vs map[*summed]verdict, touched map[s
 				continue
 			}
 			n, _ := strconv.Atoi(m[2])
-			byName[m[1]] = append(byName[m[1]], verdict{Finding: n, Verdict: v.Verdict, Why: v.Why, By: "verifier", Tag: v.Tag})
+			byName[m[1]] = append(byName[m[1]], verdict{Finding: n, Verdict: v.Verdict, Why: v.Why, By: "verifier", Tag: v.Tag, Room: v.Room})
 		}
 	}
 	for name, add := range byName {

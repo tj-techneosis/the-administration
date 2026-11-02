@@ -20,9 +20,13 @@ import (
 // Crontinental: that's the hook's business, not the core's.
 //
 // A hook runs as the person, like the setup hook, gets hookLimit, and is
-// stopped with its process group after that. Its exit code is ignored, its
-// output goes to the books' hooks.log, and nothing about it changes an
-// outcome. The watch hook is the exception: it opens the watch panes in
+// stopped with its process group after that. Its output goes to the books'
+// hooks.log, a failure is logged there and said in a line, and nothing
+// about it changes an outcome. A project's hook runs in the project; the
+// person's own (the machine's) runs in its own folder, since it's theirs and
+// not the project's: in the project, a tool the project configures (a
+// version manager reading the project's config, which the person may not
+// trust) would decide what its interpreter is, and fail it. The watch hook is the exception: it opens the watch panes in
 // place of the house's, so when it fails place says so and prints the
 // watch line instead.
 const hookLimit = 30 * time.Second
@@ -70,7 +74,14 @@ func fireHooks(event, project string, payload map[string]any) {
 			}
 			continue
 		}
-		runHook(path, project, event, body, payload, logf)
+		if err := runHook(path, project, event, body, payload, logf); err != nil {
+			// A timeout or a start that failed is logged already; an exit
+			// status is logged here. Either way the person hears of it once.
+			if ee, ok := err.(*exec.ExitError); ok && logf != nil {
+				fmt.Fprintf(logf, "  exited %d\n", ee.ExitCode())
+			}
+			fmt.Fprintf(os.Stderr, "administration: the %s hook (%s) failed (%v); its output is in %s\n", event, path, err, filepath.Join(books, "hooks.log"))
+		}
 		if logf != nil {
 			logf.Close()
 		}
@@ -83,9 +94,7 @@ func runHook(path, project, event string, body []byte, payload map[string]any, l
 	ctx, cancel := context.WithTimeout(context.Background(), hookLimit)
 	defer cancel()
 	cmd := exec.Command(path)
-	if project != "" {
-		cmd.Dir = project
-	}
+	cmd.Dir = hookFolder(path, project)
 	env := append(os.Environ(), "ADMINISTRATION_EVENT="+event, "ADMINISTRATION_PROJECT="+project)
 	for _, k := range []string{"contract", "summary", "name", "run"} {
 		if v, ok := payload[k].(string); ok {
@@ -121,6 +130,15 @@ func runHook(path, project, event string, body []byte, payload map[string]any, l
 		}
 		return fmt.Errorf("took longer than %s", hookLimit)
 	}
+}
+
+// hookFolder is where a hook runs: the person's own hooks (the machine's,
+// in the config folder) in their own folder, a project's in the project.
+func hookFolder(path, project string) string {
+	if project == "" || within(path, filepath.Join(configDir(), "hooks")) {
+		return filepath.Dir(path)
+	}
+	return project
 }
 
 // watchHook is the executable that opens the watch panes in place of the

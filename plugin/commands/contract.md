@@ -12,3 +12,5 @@ The request: $ARGUMENTS
 - `status [id]` and `close <id>` map to those commands; a close goes on to
   check every finding as the skill says.
 - Anything else is the target of a new contract: follow "Placing a contract".
+  A contract placed while the rooms are taken is queued and starts by
+  itself ("Queued, N ahead", exit 0): wait for it, don't place it again.

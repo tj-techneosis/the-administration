@@ -592,7 +592,9 @@ func writeSummary(c *contract, dir string) (string, error) {
 	fmt.Fprintf(&b, "# Contract %s: %s\n\n", c.ID, c.Target)
 	fmt.Fprintf(&b, "Placed %s by %s, in %s.\n\n", c.PlacedAt.Local().Format(time.DateTime), c.PlacedBy, c.Project)
 	b.WriteString(provenanceNote(c, dir))
-	fmt.Fprintf(&b, "| professional | kind | outcome | findings | unreached |\n|---|---|---|---|---|\n")
+	// What each seat waited for the machine (a room, the setup turn,
+	// memory) before its coins started.
+	fmt.Fprintf(&b, "| professional | kind | outcome | findings | unreached | waited |\n|---|---|---|---|---|---|\n")
 	total, failed, failedF := 0, 0, 0
 	for _, p := range c.Professionals {
 		s := readStatus(dir, p.Name)
@@ -615,7 +617,11 @@ func writeSummary(c *contract, dir string) (string, error) {
 		if s.EquipmentLost != "" {
 			outcome += "; equipment lost at " + s.EquipmentLost + ", so part of their work wasn't done"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d |\n", p.Name, p.Kind, strings.ReplaceAll(outcome, "|", "/"), s.Findings, s.Unreached)
+		waited := waitedFor(s)
+		if waited == "" {
+			waited = "-"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %s |\n", p.Name, p.Kind, strings.ReplaceAll(outcome, "|", "/"), s.Findings, s.Unreached, waited)
 		total += s.Findings
 		if s.State == "failed" {
 			failed++
@@ -642,6 +648,9 @@ func writeSummary(c *contract, dir string) (string, error) {
 		b.WriteString(", none checked yet. The session that placed the contract checks each one against the code before calling it real, and records it with `administration verdicts`.\n")
 	} else {
 		fmt.Fprintf(&b, "; %d checked: %d confirmed, %d likely, %d false. Unchecked ones aren't real yet.\n", n, checked["confirmed"], checked["likely"], checked["false"])
+	}
+	if room := roomFalse(all); room > 0 {
+		fmt.Fprintf(&b, "%d of the false ones were the test room's, not the app's (its setup, seed data or wall): fix the house before trusting what the users covered.\n", room)
 	}
 	if n := undecidedLinks(all); n > 0 {
 		b.WriteString(undecidedLine(n, c.ID) + "\n")
@@ -908,11 +917,25 @@ type summed struct {
 	by        []string
 	verdict   string
 	why       string
+	room      bool     // the verdict says the test room caused it, not the app
 	whose     string   // which of by the verdict was recorded on
 	checker   string   // "verifier", or empty for the session
 	dissent   []string // other checks of it that disagree
 	links     []link   // the same bug in another contract
 	shared    []string // the shared servers behind it, when everyone who saw it was on one
+}
+
+// roomFalse counts the false findings a check put down to the test room:
+// a seed that rolled back left every user on an empty site, and most of
+// what they found was that.
+func roomFalse(all []*summed) int {
+	n := 0
+	for _, f := range all {
+		if f.verdict == "false" && f.room {
+			n++
+		}
+	}
+	return n
 }
 
 func dissentText(ref, verdict, why string) string {
@@ -972,10 +995,15 @@ func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 			case v.Verdict == "":
 			case into.verdict == "":
 				into.verdict, into.why, into.whose, into.checker = v.Verdict, v.Why, ref, v.By
+				into.room = v.Room
 			case v.Verdict == into.verdict:
+				// Put down to the room only when every check of it says so,
+				// whatever order they come in.
+				into.room = into.room && v.Room
 			case verdictRank(v.Verdict) < verdictRank(into.verdict):
 				into.dissent = append(into.dissent, dissentText(into.whose, into.verdict, into.why))
 				into.verdict, into.why, into.whose, into.checker = v.Verdict, v.Why, ref, v.By
+				into.room = v.Room
 			default:
 				into.dissent = append(into.dissent, dissentText(ref, v.Verdict, v.Why))
 			}
@@ -1027,12 +1055,16 @@ func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 		into.by = append(into.by, f.by...)
 		into.dissent = append(into.dissent, f.dissent...)
 		switch {
-		case f.verdict == "" || f.verdict == into.verdict:
+		case f.verdict == "":
+		case f.verdict == into.verdict:
+			into.room = into.room && f.room
 		case into.verdict == "":
 			into.verdict, into.why, into.whose, into.checker = f.verdict, f.why, f.whose, f.checker
+			into.room = f.room
 		case verdictRank(f.verdict) < verdictRank(into.verdict):
 			into.dissent = append(into.dissent, dissentText(into.whose, into.verdict, into.why))
 			into.verdict, into.why, into.whose, into.checker = f.verdict, f.why, f.whose, f.checker
+			into.room = f.room
 		default:
 			into.dissent = append(into.dissent, dissentText(f.whose, f.verdict, f.why))
 		}

@@ -24,6 +24,13 @@ func cmdResume(args []string) error {
 	if len(f.pos) != 2 {
 		return usageError{"resume ID NAME [--coins 10m]"}
 	}
+	// Until the new contract is placed from this one's persona and desk:
+	// prune would strip them in between.
+	unuse, err := useBooks()
+	if err != nil {
+		return err
+	}
+	defer unuse()
 	c, dir, err := loadContract(f.pos[0])
 	if err != nil {
 		return err
@@ -85,6 +92,22 @@ func cmdResume(args []string) error {
 		coins = (time.Duration(ci.CoinsMin * float64(time.Minute))).Round(time.Second).String()
 	}
 	pargs := []string{c.Target, "--cast", name, "--project", c.Project, "--coins", coins, "--persona-from", dir}
+	if c.Build != "" {
+		// Held to the build it was held to then, not to HEAD now.
+		pargs = append(pargs, "--build", c.Build)
+	} else if c.Commit != "" {
+		// Held to HEAD as it is now, as a contract placed now is: the
+		// person may have fixed what was found. Said, when that isn't the
+		// build the earlier part was on.
+		head, _ := git(c.Project, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+		now, _ := workHash(c.Project)
+		switch {
+		case head != c.Commit:
+			fmt.Fprintf(os.Stderr, "administration: contract %s was on %s, and HEAD is %s now: %s's part goes on on %s, not the build the earlier part was on (administration place --build %s for that one)\n", c.ID, short(c.Commit), short(head), name, short(head), c.Commit)
+		case now != c.Work:
+			fmt.Fprintf(os.Stderr, "administration: the uncommitted work has changed since contract %s was placed (%s, now %s): %s's part goes on on the work as it is now\n", c.ID, orNone(c.Work), orNone(now), name)
+		}
+	}
 	switch {
 	case len(left) > 0:
 		for i, l := range left {
@@ -128,6 +151,11 @@ func cmdResume(args []string) error {
 	}
 	if c.ShowBrowsers {
 		pargs = append(pargs, "--show-browsers")
+	}
+	// Pruned down to its summary: the persona and the desk it was placed
+	// with are gone, and today's stand in for them.
+	if _, err := os.Stat(filepath.Join(dir, name, "persona.md")); err != nil {
+		fmt.Fprintf(os.Stderr, "administration: contract %s was pruned to its summary, so %s is resumed with their persona and the desk as they are today, not as they were placed\n", c.ID, name)
 	}
 	// Said once it's placed, even when someone failed at once (its error
 	// follows); on a refusal or a full house before that, nothing was.

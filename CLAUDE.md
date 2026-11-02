@@ -34,7 +34,7 @@ skill's own file only to change when it triggers.
   claude (`ADMINISTRATION_CLAUDE`), so they never touch the machine's own
   contracts. A behaviour change comes with a test that fails without it.
 - **The wall is the product.** A change to how a professional is started
-  (`runProfessional`, `settingsFor`, `mcpFor`, `browserTools`, `childEnv`)
+  (`runProfessional`, `settingsFor`, `screenServer`, `browserTools`, `childEnv`)
   needs its test updated and a live check on a real machine
   (`tests/live/`). The browser tools are an allowlist; a new Playwright tool
   stays off until someone decides otherwise.

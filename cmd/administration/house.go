@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The project's house is what it sets up for the Administration: setup,
@@ -47,8 +50,16 @@ func originOf(project string) string {
 	}
 	key := ""
 	if isDir(project) {
+		// get-url applies the url.*.insteadOf rewrites; an ssh host alias
+		// (Host work in ~/.ssh/config, for a second key) is ssh's to resolve.
 		if out, err := git(project, "remote", "get-url", "origin"); err == nil {
-			key = remoteKey(out)
+			key = remoteKeyVia(out, sshHostname)
+			// A house kept before aliases were resolved is under the
+			// alias's own key (projects/work/acme/shop): found there still,
+			// until one is kept under the host's.
+			if plain := remoteKey(out); plain != "" && plain != key && !isDir(filepath.Join(projectsDir(), filepath.FromSlash(key))) && isDir(filepath.Join(projectsDir(), filepath.FromSlash(plain))) {
+				key = plain
+			}
 		}
 	}
 	origins.Store(project, key)
@@ -75,6 +86,58 @@ func keptHouse(project string) string {
 
 var scpRemote = regexp.MustCompile(`^(?:[^@/]+@)?([^:/]+):(.+)$`)
 
+// remoteKeyVia is remoteKey with an ssh remote's host resolved first, so
+// git@work:acme/shop (Host work, HostName github.com) keys the same house as
+// git@github.com:acme/shop. A port the remote gives is kept, as remoteKey
+// keeps it: another port is another server, alias or not.
+func remoteKeyVia(remote string, resolve func(string) string) string {
+	key := remoteKey(remote)
+	if key == "" || strings.Contains(remote, "://") && !strings.HasPrefix(remote, "ssh://") && !strings.HasPrefix(remote, "git+ssh://") {
+		return key
+	}
+	host, rest, _ := strings.Cut(key, "/")
+	bare, port, _ := strings.Cut(host, ":")
+	real := strings.ToLower(resolve(bare))
+	if real == "" || real == bare {
+		return key
+	}
+	if port != "" {
+		real += ":" + port
+	}
+	// Keyed again from the resolved host, so its rules (a GitHub path in
+	// any case is one) apply.
+	if k := remoteKey("ssh://" + real + "/" + rest); k != "" {
+		return k
+	}
+	return key
+}
+
+// sshAlias is a host name ssh is asked about: the remote's text goes to
+// ssh -G, whose config can put it in a command (Match exec with %h), so
+// only what a host name is made of.
+var sshAlias = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+
+// sshHostname is the host ssh connects to for alias, from its own config
+// (ssh -G reads it and connects nowhere), or "" when ssh can't say, or not
+// within a few seconds (a slow Match exec holds up nothing for long).
+func sshHostname(alias string) string {
+	if !sshAlias.MatchString(alias) {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ssh", "-G", "--", alias).Output()
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if h, ok := strings.CutPrefix(l, "hostname "); ok {
+			return strings.TrimSpace(h)
+		}
+	}
+	return ""
+}
+
 // remoteKey is a remote URL as host/owner/repo: git@host:owner/repo.git,
 // ssh://git@host:22/owner/repo, https://host/owner/repo(.git) all come out
 // the same. A remote on this machine (a path, file://) has none.
@@ -87,7 +150,7 @@ func remoteKey(remote string) string {
 		}
 		host, path = u.Hostname(), u.Path
 		// Another port is another server; the scheme's own isn't.
-		if port := u.Port(); port != "" && port != map[string]string{"https": "443", "http": "80", "ssh": "22", "git": "9418"}[u.Scheme] {
+		if port := u.Port(); port != "" && port != map[string]string{"https": "443", "http": "80", "ssh": "22", "git+ssh": "22", "ssh+git": "22", "git": "9418"}[u.Scheme] {
 			host += ":" + port
 		}
 	} else if m := scpRemote.FindStringSubmatch(remote); m != nil && !strings.HasPrefix(remote, "/") && !strings.HasPrefix(remote, ".") {

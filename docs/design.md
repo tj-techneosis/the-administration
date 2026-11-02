@@ -48,7 +48,9 @@ changes" into CLI calls, and checks findings against the code afterwards.
   file. Users: no built-in tools, Playwright only (an allowlist of its
   tools), working directory = the room. Critics: `Read,Grep,Glob`, working
   directory = the contract's copy of the project as it was placed (The
-  build under test), the diff handed in with `--add-dir`: whole, and
+  build under test; a critic on a contract with a commit whose copy can't
+  be made fails rather than read the project as it is now, and nobody
+  reads a `.git` folder), the diff handed in with `--add-dir`: whole, and
   split by file with an index (`changes/INDEX.md`, each file's lines added
   and removed), since every turn re-reads all that came before it and the
   whole diff read once was the largest single thing critics re-read. The
@@ -72,10 +74,15 @@ changes" into CLI calls, and checks findings against the code afterwards.
   Commands can write the desk, nothing outside the room, and not the tool's
   own folder.
   Shells, interpreters, network tools and anything that runs other commands
-  are refused in `commands`; that list is a first wall, not the wall (a tool
-  with plug-ins or delegates, like ImageMagick, can still run things, inside
-  the sandbox). The sandbox also denies reading `/run/user` (the session's
-  sockets), container sockets, `/tmp`, other rooms, `/mnt` and `/media`, and
+  are refused in `commands`, in any case and with any version on the name
+  (`Bash`, `python3.12m`); that list is a first wall, not the wall (it
+  names the known ones, ImageMagick and build tools among them, but a tool
+  with plug-ins or delegates it misses can still run things, inside the
+  sandbox). The sandbox also denies reading `/run/user` (the session's
+  sockets), container sockets, `/tmp`, other rooms (those there when the
+  session starts, and this contract's others, made then for the purpose;
+  a contract placed later has rooms the list can't name), `/mnt` and
+  `/media`, and
   writing the room's build and inbox; the build is made read-only after
   setup, and refused if it links out of the room. `git` and `cd` are denied
   outright. Claude Code's own read-only built-ins (`ls`, `cat`, `id`...)
@@ -85,8 +92,13 @@ changes" into CLI calls, and checks findings against the code afterwards.
   base, built by the same setup hook from a clone in the room that shares
   the project's objects (`git clone --shared`; the project's repo is only
   read). The hook gets `ADMINISTRATION_SIDE=before`, `ADMINISTRATION_MAIN`
-  pointing at the clone and `ADMINISTRATION_PROJECT` at the project, and
-  the same data set: a set that seeds the change's own new records must
+  pointing at the clone and `ADMINISTRATION_PROJECT` at the project, and,
+  when the house has a build hook, `ADMINISTRATION_BUILD` and
+  `ADMINISTRATION_BUILD_COMMIT`: the hook's build of the merge base, made
+  once for every room of the contract (and kept for the next contract on
+  the same base, like any build; `prune` keeps it while the contract is
+  open), so a room's before setup only installs and starts it. And the
+  same data set: a set that seeds the change's own new records must
   skip them where the code doesn't exist yet. The
   user runs each flow on both and marks findings `NEW:` (the change caused
   it) or `OLD:`; the gate lets both apps through. `--no-before` skips it.
@@ -101,8 +113,10 @@ changes" into CLI calls, and checks findings against the code afterwards.
   it was written with; on a contract not on changes there are no marks to
   correct.
 - **Handout**: `[handout] files` in `roster.toml` are copied into each
-  user's desk (inside the project, regular files, no secret names, 256 KB
-  in all), and the user gets `Read`, allowed for its desk only; anything
+  user's desk (inside the project, regular files, no secret names; the
+  text 256 KB in all, pictures (png, jpg, gif, webp; an SVG is text) 8 MB
+  in all, no two with one name, checked at place), and the
+  user gets `Read`, allowed for its desk only; anything
   outside its working directory asks, and with no one to answer it's
   refused (live probe 2026-10-25: the app's `.env.local`, its source,
   `/etc`, the books and other rooms were all refused).
@@ -131,7 +145,10 @@ changes" into CLI calls, and checks findings against the code afterwards.
   down), and the persona exactly as it was placed (not as its file says
   today). A part is resumed once: a second resume names the contract that
   picked it up, and what that one leaves is resumed from it. A part the
-  Rules refused isn't resumed; it would be refused again.
+  Rules refused isn't resumed; it would be refused again. A resume of a
+  `--build` contract is held to that build; any other is on HEAD as it is
+  now, like a contract placed now, and says so when that isn't the commit
+  (or the uncommitted work) the earlier part was on.
 - **Desk files** (`desk.go`): a user uploads only what a person would
   have on their computer, and only what the project put there: `[desk]
   files` copied from the project or its house, or `[[desk.make]]` made to
@@ -141,6 +158,16 @@ changes" into CLI calls, and checks findings against the code afterwards.
   the screen turns a name into that copy (no path, no link out) and calls
   Playwright's upload, or drops it at a point with the files in the drag
   event, so the tools that read any path stay off.
+- **Which files a room may have** (`rosterFile`): a desk's or a handout's
+  file is held to one rule. It's inside the project or its house by the
+  path written and by the path it really is, every link followed; a
+  regular file; never in the house's `env/` (the untracked config only a
+  build gets, by whichever spelling reaches it: `.administration/env/x`,
+  or `env/x` taken from the house because the project has none); and no
+  secret by its name or the end of its path (anything in a `.git` folder,
+  anything in `.aws/`), in any case, as macOS's disk opens `.env` for `.ENV`. The
+  copy opens the file it checked and no other (no link at its last part,
+  the same file), so one swapped since isn't what's copied.
 - **Send-backs**: a professional that says it's done with its plan
   unanswered, or done early, is sent back (at most four times). Across
   this house's own contracts the answers after a send-back used about a
@@ -262,12 +289,81 @@ changes" into CLI calls, and checks findings against the code afterwards.
   subfolder of the main checkout. Git knows a main checkout only as the
   folder its `.git` is in, so the worktrees of a bare repository or one
   with `--separate-git-dir` keep their own.
-- **Rooms**: at most `ADMINISTRATION_MAX_ROOMS` at once. A contract that
-  needs more than that can never fit, so `place` stops with an error (exit
-  1: split it). One that would fit once other contracts' users are back
-  exits 4, naming the contracts that hold the rooms (a room is free when
-  its user is back and it's torn down, before anyone closes the contract),
-  and `status` says how many rooms are free. A dry run never waits.
+- **Rooms**: at most `ADMINISTRATION_MAX_ROOMS` at once, a hard cap
+  (pacing, below, is the main control). A contract that needs more than
+  that can never fit, so `place` stops with an error (exit 1: split it).
+  One that would fit once other contracts' users are back is placed all
+  the same, queued: place prints "Queued, N ahead" (N the open contracts
+  holding rooms or in line for them) and exits 0, and each of its users'
+  workers waits for a room by itself (state `waiting`, `queued` in its
+  status). A room is free when its user is back and it's torn down,
+  before anyone closes the contract. The line is every user of every open
+  contract waiting for a room, in the order the contracts were placed
+  (`seq`, to the nanosecond) and then the cast's; a worker takes a room
+  when fewer than the cap are held and nobody waiting is ahead of it,
+  asked under the books' lock so two can't take the last one. A user
+  waiting holds no room; one whose worker hasn't written its status yet
+  counts as holding one, which can only make another wait a moment.
+  `--no-queue` keeps the old refusal, as busy (exit 4), naming the
+  contracts that hold the rooms, and `status` says how many rooms are
+  free and how many users are waiting for one. A dry run never waits.
+- **Pacing** (`pace.go`): one contract with three users once set every
+  room up at once, the app with the changes and the one before them in
+  each, and the machine stopped answering while the seats' coins ran out.
+  So a room sets up only in its turn, and only with the memory for it:
+  - **The setup turn**: one room setup at a time on the machine (per
+    account: it's kept in the rooms folder), the after and before sides
+    alike. A worker keeps the turn from its room's first setup through
+    its before app's (and its equipment's), so its professional starts as
+    soon as its room is up, and lets it go then. The line is a folder of
+    tickets, one per process, each locked by its process (taken before
+    it's in the line, so it's never found unlocked), ordered by when it
+    was asked for; a ticket nobody holds is a process that died and is
+    cleared. The turn itself is a lock beside them. Builds are made before
+    a room takes its turn, never during: a room holds its build's lock
+    shared for as long as it runs, and a rebuild waiting for those rooms
+    while holding the turn would hold everyone else's setup up with it.
+    `room-check` and `equipment-check` take their turns the same way and
+    print the waits.
+  - **Memory, learned per house**: each side's setup is measured while
+    it's the only one running: the machine's available memory (Linux's
+    `MemAvailable`, macOS's free, inactive and speculative pages from
+    `vm_stat`; both count containers, which a process tree wouldn't) is
+    read when it starts and every quarter second while it runs; the
+    deepest fall is its peak, and the fall when the room answers its
+    steady cost. The last three of each side are kept with the house's
+    records in the books (`ledgers/<project>.rooms.json`), and the house's
+    cost is the largest of them, so one measured while something else
+    freed memory doesn't make it look cheap. A side sets up when what's
+    available, less a reserve for the machine (15% of its memory, at
+    least 2 GB), covers that peak; a house never measured needs only to
+    be over the reserve, and its first room, set up alone in its turn, is
+    measured. With no room at work anywhere, nothing of the
+    Administration's will free memory, so the room goes anyway rather
+    than wait for itself. The wait holds the turn, so a big room isn't
+    passed by small ones forever. Where memory can't be read, nothing
+    waits for it.
+  - **The clock starts at the door**: a seat's coins start when its room
+    is ready (`ready_at` in its status), the setup's time limit when its
+    turn comes and the memory is there, so neither a queue nor a busy
+    machine uses them up. What each seat waited (`waited_secs`: for a
+    room, the turn, memory) is in `status` and its own column in the
+    summary, and the ledger's minutes count from `ready_at`.
+  - **Heavy setups**: a house with no build hook whose room setup took two
+    minutes or a gigabyte or more is told, by `status` (while a contract
+    with rooms is open), `room-check` and `equipment-check`, with what was
+    measured, that a build hook would build each commit once.
+  - **Cleanup**: a setup that starts something outside its process group
+    (a container stack) declares how to stop it as soon as it starts it,
+    a shell command per line in `$ADMINISTRATION_CLEANUP` (`cleanup`, or
+    `cleanup-before` for the before app's, in the seat's books), and
+    every teardown runs those, the last first, each on its own, after the
+    teardown hook and whether or not the setup wrote its manifest: a setup
+    cut off by its time limit once left two dozen containers running
+    after its contract closed.
+  A user's equipment starts while its room still holds the turn;
+  equipment with no app room isn't paced, and no equipment's setup is
+  measured.
 - **Workers**: started directly by `place`, each in a session of its own,
   so they outlive the shell or tool call that placed the contract. The
   worker resets PATH to the placer's.
@@ -275,30 +371,68 @@ changes" into CLI calls, and checks findings against the code afterwards.
   project's HEAD (`commit`) and, when the work isn't all committed, a hash
   of the uncommitted files (`work`), and prints both as "Tested build" in
   `status` and the summary. It copies the project as it is then into the
-  contract (`.checkout`: a `--shared` clone checked out at HEAD, its `.git`
+  books (a `--shared` clone checked out at HEAD, or `--build`'s commit, its `.git`
   removed, the uncommitted files copied on top, never a secret), and
   critics work in that copy and verifiers read it, so a builder who keeps
   committing moves nothing under them, and NEW and OLD are judged against
-  the patch and the code as they were tested. The copy is made at place
+  the patch and the code as they were tested. The patch is taken after the
+  copy, so place checks that HEAD and the work are still the ones copied,
+  and asks for the contract to be placed again when they aren't; a
+  `--build` contract's patch is its commit's alone (from the merge base to
+  it), as its copy is. A critic's equipment runs the project's own
+  checkout (the copy has no installed dependencies or builds), and its
+  brief says so, and says when the checkout has moved on from the copy. The copy is made at place
   when a critic needs it or there's uncommitted work (which can't be had
   later); otherwise the commit is enough, and verify makes it once,
   before any verifier starts (made by each, two at once once took it
   from under each other). A pruned copy is made again the same way,
-  without the uncommitted work if that has changed since, and verify
-  says so. A contract that recorded no commit (placed before contracts
+  without the uncommitted work if that has changed since (or changes
+  while the copy is made: the work is hashed again once it's copied), and
+  verify says so, to the person and to the verifiers. The summary says
+  critics and verifiers read the project as it was then only while that
+  copy is there, and says when the one there is without the work. A contract that recorded no commit (placed before contracts
   kept one, or outside git) has nothing to copy: verify says it reads
   the project as it is now, and does.
   What the copy costs: a clone that borrows the project's objects, so
-  the files of the tracked tree once per contract (tens of megabytes for
-  a few thousand files, made in well under a second), plus any
-  uncommitted files. It's kept with the contract until `prune` strips
-  the contract (reviewed, or older than its age). An uncommitted file over
-  8 MB is told apart by its size and time, not read, when the work is
-  hashed.
+  the files of the tracked tree once per commit (tens of megabytes for
+  a few thousand files, made in well under a second), plus the
+  uncommitted files. Copies are shared: one per commit (and per
+  uncommitted work's hash) in the books' `copies/<project>/`, read by
+  every contract on it, so ten contracts on one commit keep one copy. It's
+  made before place takes the books' lock, so a big project's copy
+  doesn't hold up another contract waiting for rooms, and after what can
+  refuse the contract cheaply (its flags, a contract needing more rooms
+  than are free, asked again under the lock), so one tried again after
+  "busy" or a typo doesn't pay for a copy each time. `prune` removes a
+  copy once no contract kept whole is on it (an open one, or a closed one
+  not yet stripped). Place, close, verify, verdicts and resume hold the
+  books' use lock (`use.lock`) shared while they need it (place until
+  its contract is written and its workers started, not through the watch
+  panes and hooks after), and prune takes it exclusive or is refused, so
+  it never removes a copy place has taken but not yet written into its
+  contract, nor strips a contract being closed, verified or resumed from.
+  What prune removes (a copy, a build, a contract past the keep) it first
+  renames into the books' `.pruned/`, lets go of the lock, and removes it
+  there, so a copy is in its place whole or not at all, even when a prune
+  is cut off, and the slow part holds nobody up; the next prune clears
+  what's left. A command that finds a prune holding the lock says so and
+  waits, up to two minutes, then gives up (exit 4). A contract past the
+  keep has its lines in the ledger before it's moved aside, and the
+  ledger takes only lines it hasn't got, so a prune cut off in between,
+  or a write that fails part way, neither loses its numbers nor counts
+  them twice. Two closes of one contract take turns: the second finds it
+  closed. An uncommitted file over 8 MB (a dump, a build) is
+  left out of the copy, and told apart by its size and time, not read,
+  when the work is hashed. The copy names what it left out
+  (`.administration-left-out` at its top), and the summary and the
+  verifiers say so, since a changed file left out isn't there even at the
+  commit's version. A project in a subfolder that was a link at the
+  copy's commit gets no copy (the house's `env/` and the build hook would
+  go through it).
   What the copy lacks: it's the commit's files and the uncommitted ones,
   so nothing ignored (installed dependencies' type definitions, generated
-  code), no submodule's contents (their folders are empty) and, from a
-  clone that has no large-file objects, possibly not Git LFS content. A
+  code), no submodule's contents (their folders are empty) and no Git LFS
+  content (an LFS file is its pointer; the checkout skips the smudge). A
   critic asked how a library is used finds the calls, not the library;
   that's the price of reading what was tested rather than whatever is on
   disk now. Every room
@@ -308,23 +442,48 @@ changes" into CLI calls, and checks findings against the code afterwards.
   checkout's HEAD while its setup ran, unless the manifest says otherwise
   (`"build"`). A build from another commit is refused, with the commit it
   is and how to test it on purpose: `place --build SHA`, which makes that
-  commit the one every room is held to. Commits match on their common
+  commit the one every room is held to, and the one critics and verifiers
+  read (when this checkout has it; otherwise they read HEAD, and the
+  summary says so). A `--build` contract is that commit alone: the
+  uncommitted work isn't in its build, so it isn't in what's tested. Commits match on their common
   first letters (at least seven), either way round, so `--build` with the
   start of someone else's commit takes equipment that reports all of it;
   something that isn't a commit (`v1.0`) is refused, asking for the hash.
+  A hash is looked up as an object only, never as a branch or tag that
+  happens to have that name; a `--build` hash that starts more than one
+  commit here is refused, asking for more of it. Anything else `--build`
+  is given (a tag, a branch, `HEAD`) is the commit it names at place,
+  held to from then on. A `--build` of a commit this checkout lacks
+  is refused at place when the house has a build hook, which builds from
+  this checkout; without one it's placed (it can be someone else's
+  build), and place says the checkout lacks it, since a typo looks the
+  same. A refused room's build is kept, and the summary says the
+  room was refused it, not that it ran it.
   A build marked `-dirty` is let in with that said. A build that names no commit is
   let in and shown as "build not reported" (only for equipment with a
   screen, since that's where an app is), and one of HEAD that may lack
-  the uncommitted work is let in with that said. Git is only read: the
+  the uncommitted work is let in with that said, as is a web room built
+  from a checkout with uncommitted work on a `--build` contract. Git is only read: the
   uncommitted work is never committed or stashed, only hashed and
-  copied, and the copy is a clone in the books.
+  copied, and the copy is a clone in the books. Every git call runs
+  nothing of any config's (fsmonitor, hooks, external diffs, textconv, and
+  every content filter the config names, emptied) and takes no optional
+  lock (`GIT_OPTIONAL_LOCKS=0`), so a diff against the work never writes
+  the project's index. Names come from git as they are (`-z`), and a file
+  is hashed and copied only when no link is on the way to it: a tracked
+  folder replaced by a link is its files removed, as git sees it, not the
+  files wherever the link points. Renames are copied as a
+  removal and a new file, and a link the commit has is never written
+  through: the work's file or folder replaces the link in the copy.
 - **Base sanity** (`baseWarnings`): `place --changes` warns, and the
   summary keeps it, when the branch is missing commits the local default
   branch has (they won't be in what's tested), or when the local default
   branch is ahead of the remote one the changes are compared with
   ("local main is 3 commits ahead of origin/main: test on top of local
-  main? (--base main)"). It warns rather than refuses: a branch behind
-  main can be the point.
+  main? (--base main)"). A branch that already has local main's unpushed
+  commits is told they're in its changes as if they were its own; on main
+  itself they are the changes, and nothing is said. It warns rather than
+  refuses: a branch behind main can be the point.
 - **The build hook** (`build.go`): an optional `build` in the house. A
   phone app built by hand to one shared path, from whichever checkout,
   without the untracked config that checkout lacked, is the opposite of
@@ -335,28 +494,54 @@ changes" into CLI calls, and checks findings against the code afterwards.
   `env/` folder copied in first at the same paths (a `.env`,
   `local.properties`: what nobody commits). It puts its build in `OUT`
   and prints its path last (or nothing: `OUT` is the build); the checkout
-  goes once it's done, so a build left there is refused. Builds are kept
+  goes once it's done, so a build left there is refused. With
+  uncommitted work it builds from a copy of the contract's own checkout,
+  the work as it was placed, so an edit after `place` doesn't fail the
+  rooms still to build. The checkout has no `.git`: a script that stamps
+  its version with `git describe` gets an error (git is stopped at the
+  build's folder, so it can't find another repository above it); use
+  `ADMINISTRATION_BUILD_COMMIT`. Builds are kept
   in the books under `builds/<project>/<commit>/` with their log; rooms
-  that ask at once wait on one lock and the first builds; the next
-  contract on the same commit takes it as it is. Equipment's setup, and
+  that ask at once wait on one lock and the first builds (a build that
+  fails while they wait fails them all with its log, not run again for
+  each: only the hook's own failure, its exit, its time running out or
+  what it printed, never a room cut off or a checkout one contract
+  couldn't make); a room holds the lock shared while it installs and runs the
+  build, so prune leaves it and a build of the commit made another way
+  waits for it, for as long as those rooms run (a room's status says
+  what it waits for), then builds with the hook and `env/` as they are
+  once it has the lock; the next
+  contract on the same commit takes it as it is, as long as the hook and
+  `env/` are as they were (a changed hook or `.env`, a file's mode, a new
+  folder there, builds it again). Equipment's setup, and
   the web setup, get `ADMINISTRATION_BUILD` (the path) and
-  `ADMINISTRATION_BUILD_COMMIT`, and the room's build is recorded as the
-  hook's, so it can't be the wrong one. A failed build fails the room with
+  `ADMINISTRATION_BUILD_COMMIT`, with `ADMINISTRATION_BUILD_WORK` when it
+  was built with uncommitted work. A setup that names no build is taken
+  on trust to have installed the hook's, and recorded as that; nothing
+  checks it did (a web setup that builds from the checkout instead is
+  said, when the checkout moved, but let in). A setup that echoes
+  `ADMINISTRATION_BUILD_COMMIT` has the hook's build, work and all. A failed build fails the room with
   its log's path; prune clears failed builds, and a build's checkout left
-  by one killed outright, by the log's age. `administration build [REF]` runs it by hand (to try a
-  hook, or build ahead); `prune` removes builds unused for its age. The
+  by one killed outright, by the log's age. A `build` that isn't executable is refused at place and
+  by `equipment-check`, not passed over (the rooms would install with no
+  build and nothing said). `administration build [REF]` runs it by hand (to try a
+  hook, or build ahead; Ctrl-C stops the hook too, which runs in a
+  process group of its own); `prune` removes builds unused for its age. The
   hook builds commits, not working trees, because a cache keyed by
   anything less exact is a shared path again.
 - **Equipment restart**: a screen's equipment can declare `restart`, run
   once by the screen's server when the device would otherwise be called
   lost (an emulator that crashed came back when booted again, each loss
-  having cost a part). It runs as the person with the room's environment
-  and the setup's tag, so what it boots is cleared with the room; it must
+  having cost a part). It runs as the person, where the setup hook runs
+  (never the desk the professional writes in), with the room's environment
+  (the device ports and `ADMINISTRATION_SHOW` too, so it boots the device
+  as the setup did) and the setup's tag, so what it boots is cleared with the room; it must
   bring the device back where the setup put it (the same serial), since
   the driver's arguments don't change. If the screen answers after it,
   the professional is told what happened and carries on, and the status
   says "equipment restarted at HH:MM"; if it fails, or the device dies
-  again, it's lost as before.
+  again, it's lost as before. Why the hook failed (its stderr, which can
+  hold a trace or a token) goes to the record, not the professional.
 - **No clock**: the Administration schedules nothing. A contract at a time
   or on a repeat is the person's scheduler running `place`, `wait` and
   `close`, which all work from a script with nobody at the screen; the
@@ -420,6 +605,14 @@ changes" into CLI calls, and checks findings against the code afterwards.
   that can't carry it keeps it under `projects/<host>/<owner>/<repo>/` in
   the config folder, found by the checkout's `origin` remote, so a fresh
   clone or a new worktree finds it where a path-keyed one would be lost.
+  The remote is read as git and ssh would use it: `url.*.insteadOf`
+  applied, and an ssh host alias (`git@work:acme/shop`, with `Host work`
+  for a second key) resolved by `ssh -G`, so it keys the same house as
+  `git@github.com:acme/shop`. A port the remote gives stays in the key
+  (another port is another server), `git+ssh://` is ssh, ssh is asked only
+  about a host name's letters and for a few seconds, and a house kept
+  under the alias's own key before aliases were resolved is still found
+  there.
   The project's own folder (or a worktree's main checkout's) always wins,
   so nothing changes for a project that has one. Every reader and writer
   goes through one lookup (`adminDir`; `houseOf` says which kind it
@@ -451,6 +644,7 @@ which are time. Anyone who wants to track usage can read them from
 | variable | default | for |
 |---|---|---|
 | `ADMINISTRATION_HOME` | `~/.local/share/administration` | the books |
+| `ADMINISTRATION_PLACED_BY` | `$GIT_AUTHOR_NAME` (not inside a hook git runs, where it's the commit's author), else `user:$USER` | who the books say placed a contract, and whose holds the rooms (on an account several people share, the git author each one's session sets); cut to 60 characters, with ` (claude:<session>)` after it when a Claude session placed it |
 | `ADMINISTRATION_ROOMS` | `/Users/Shared/administration-<uid>` (macOS), `/var/tmp/administration-<uid>` | rooms; must be outside home, and the account's own |
 | `ADMINISTRATION_CLAUDE` | `claude` | the claude binary |
 | `ADMINISTRATION_MAX_ROOMS` | 4 | browser rooms at once |
@@ -462,4 +656,5 @@ which are time. Anyone who wants to track usage can read them from
 | `ADMINISTRATION_CONFIG` | `~/.config/administration` | the machine's own professionals and hooks |
 | `ADMINISTRATION_PROJECTS` | `$ADMINISTRATION_CONFIG/projects` | houses kept on the machine, at `<host>/<owner>/<repo>` of each project's origin |
 | `ADMINISTRATION_POLL`, `_CLOSE_GRACE`, `_COIN` | 2s, 30s, 1m | test knobs |
+| `ADMINISTRATION_MEMINFO` | | a test knob: a file in `/proc/meminfo`'s form read as the machine's memory, on any system |
 | `ADMINISTRATION_TEST_ISOLATED`, `_TEST_UNSAFE` | | the suite runs only inside `tests/isolated.sh` (or in a throwaway account) |

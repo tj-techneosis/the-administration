@@ -15,7 +15,7 @@ const (
 	exitError   = 1 // bad usage, unknown names, a broken file
 	exitStart   = 2 // a room or a professional failed to start, or failed at the work (a user whose browser never worked)
 	exitRefused = 3 // refused by the Rules
-	exitBusy    = 4 // not enough rooms free now: place it again once other contracts' users are back
+	exitBusy    = 4 // busy: place --no-queue when the rooms it needs aren't free now (without it, a contract waits in line for them, placed, and exits 0); prune while the books are in use; any command that holds the books when a prune held them too long
 	exitNewer   = 5 // upgrade --check: a newer release (or upstream commit) is out
 )
 
@@ -36,7 +36,7 @@ const usage = `administration: contracts for persona agents.
   administration place TARGET... --cast a,b | --with RUN [--coins 10m] [--model M]
                        [--changes [--base REF]] [--brief NAME=TASK]... [--only NAME=TASK]...
                        [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME]
-                       [--build SHA]
+                       [--build SHA] [--no-queue]
       place a contract; prints its id. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare
       (--no-before doesn't), and warns when the branch is missing commits
@@ -48,10 +48,14 @@ const usage = `administration: contracts for persona agents.
       ADMINISTRATION_WATCH=off, doesn't); --show-browsers opens users'
       browsers as windows on your screen. --with brings a Director cast's
       specialists; --brief gives one their own task on top of their
-      persona's checks, --only instead of them. Exits 4 when the rooms it
-      needs are taken (it names who holds them): place it again once
-      they're back. Exits 2 when someone fails in its first seconds (3 if
-      any was refused); the contract is placed all the same
+      persona's checks, --only instead of them. The machine paces it:
+      when the rooms it needs are taken it's placed all the same, says
+      "Queued, N ahead", and its users take rooms by themselves, in
+      turn, as they free (exit 0); rooms set up one at a time, as memory
+      allows, and each user's coins start when its room is ready.
+      --no-queue refuses it instead (exit 4, naming who holds them).
+      Exits 2 when someone fails in its first seconds (3 if any was
+      refused); the contract is placed all the same
   administration hire NAME|FILE [--replace] | hire --from CONTRACT NAME
       put a professional the Director trained on the project's roster, or
       keep a one-off specialist from a contract
@@ -63,12 +67,14 @@ const usage = `administration: contracts for persona agents.
       a new contract for one professional on what contract ID left undone:
       what they couldn't reach and the steps of their plan never answered,
       or their whole part when they wrote nothing down. Places it as
-      place does, so it exits 2, 3 or 4 as place would. A part is resumed
+      place does (queued when the rooms are taken), so it exits 2 or 3 as
+      place would. A part is resumed
       once: again, it names the contract that picked it up, to resume
       from that one
   administration status [ID] [--json]
-      who's working, who's back; with no ID, every open contract and how
-      many rooms are free
+      who's working, who's back, who's waiting for the machine (a room,
+      the setup turn, memory) and how long each waited; with no ID, every
+      open contract and how many rooms are free
   administration close ID [--keep]
       stop anyone still working, merge the reports, clear the rooms;
       prints the summary's path
@@ -125,10 +131,11 @@ const usage = `administration: contracts for persona agents.
       check professional files (what the Director writes)
   administration version
 
-Exit codes: 0 done, 1 error, 2 a room or professional failed (to start,
-or a user whose browser never worked), 3 refused by the Rules, 4 not enough
-rooms free for it now (place it again once other contracts' users are back),
-5 upgrade --check: a newer version is out.
+Exit codes: 0 done (a contract queued for rooms is placed: 0), 1 error,
+2 a room or professional failed (to start, or a user whose browser never
+worked), 3 refused by the Rules, 4 busy: place --no-queue found the rooms
+it needs taken, or prune found the books in use (or a prune held them too
+long), 5 upgrade --check: a newer version is out.
 `
 
 type usageError struct{ msg string }
@@ -140,8 +147,10 @@ type refusal struct{ msg string }
 
 func (e refusal) Error() string { return e.msg }
 
-// busy is a contract that would fit, but not now: other contracts hold too
-// many of the rooms. It exits 4, so a script can wait and place it again.
+// busy is something that would go, but not now: a contract placed with
+// --no-queue while other contracts hold the rooms it needs, or a prune
+// while the books are in use (and a command a prune held up too long). It
+// exits 4, so a script can wait and try again.
 type busy struct{ msg string }
 
 func (e busy) Error() string { return e.msg }

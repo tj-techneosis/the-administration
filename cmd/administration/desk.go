@@ -38,9 +38,97 @@ import (
 // machine can go into a page.
 
 type deskMake struct {
-	Name  string `toml:"name"`
-	Size  string `toml:"size"`
-	Count int    `toml:"count"`
+	Name  string `toml:"name" json:"name"`
+	Size  string `toml:"size" json:"size"`
+	Count int    `toml:"count" json:"count,omitempty"`
+}
+
+// deskConfig is roster.toml's [desk]: files copied in, and files made. A
+// contract keeps the one it was placed with, and a copy of its files
+// (deskKept), so its rooms, and a resume of it, get that desk, not
+// whatever the roster and the files say by the time they start.
+type deskConfig struct {
+	Files []string   `toml:"files" json:"files,omitempty"`
+	Make  []deskMake `toml:"make" json:"make,omitempty"`
+}
+
+func (d deskConfig) empty() bool { return len(d.Files) == 0 && len(d.Make) == 0 }
+
+// deskKept is where a contract keeps its desk's files as they were placed.
+func deskKept(contractDir string) string { return filepath.Join(contractDir, ".desk") }
+
+// keepDesk copies the desk's files into to, as fillDesk checked them: from
+// the project, or from kept (another contract's, for a resume).
+func keepDesk(project string, cfg deskConfig, kept, to string) error {
+	if err := os.MkdirAll(to, 0o700); err != nil {
+		return err
+	}
+	for _, rel := range cfg.Files {
+		name := filepath.Base(rel)
+		src := filepath.Join(kept, name)
+		var want os.FileInfo
+		if kept == "" {
+			// Checked again, not only resolved again: the file may have
+			// been swapped since fillDesk checked it (for a link out, or a
+			// file the roster never named).
+			real, st, err := rosterFile(project, rel)
+			if err != nil {
+				return fmt.Errorf("desk file %q: %v", rel, err)
+			}
+			src, want = real, st
+		}
+		if err := copyRegularAs(src, want, filepath.Join(to, name)); err != nil {
+			return fmt.Errorf("desk file %q: %v", rel, err)
+		}
+	}
+	return nil
+}
+
+// rosterFile is a file roster.toml names for a room (a desk's, a
+// handout's), held to the one rule both are: a path inside the project or
+// its house, still inside them with every link on the way followed (a link
+// to a folder outside the project is outside it), a regular file, not in
+// the house's env/ (the untracked config only a build gets), and nothing
+// that looks like a secret, by the path written or the one it really is,
+// in any case. It returns the file with every link followed, and what it
+// is, for the copy to hold to.
+func rosterFile(project, rel string) (string, os.FileInfo, error) {
+	src := housePath(project, rel)
+	if filepath.IsAbs(rel) || !inProject(project, src) {
+		return "", nil, fmt.Errorf("a file inside the project or its house")
+	}
+	if secret(rel) {
+		return "", nil, fmt.Errorf("looks like a secret; it never goes in a room")
+	}
+	st, err := os.Lstat(src)
+	if os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("there's no such file")
+	}
+	if err != nil || !st.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("not a regular file (a folder, or a link)")
+	}
+	proj, house := realPath(project), realPath(adminDir(project))
+	real, err := filepath.EvalSymlinks(src)
+	if err != nil || !within(real, proj) && !within(real, house) {
+		return "", nil, fmt.Errorf("outside the project and its house (through a link)")
+	}
+	// The house's env/, by whichever spelling reached it (.administration/
+	// env/..., or env/... that housePath took from the house because the
+	// project has none).
+	if within(real, filepath.Join(house, "env")) {
+		return "", nil, fmt.Errorf("in the house's env/, the config only a build gets; it never goes in a room")
+	}
+	from := proj
+	if within(real, house) {
+		from = house
+	}
+	if r, err := filepath.Rel(from, real); err != nil || secret(r) {
+		return "", nil, fmt.Errorf("looks like a secret; it never goes in a room")
+	}
+	if st, err = os.Lstat(real); err != nil || !st.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("not a regular file (a folder, or a link)")
+	}
+	return real, st, nil
 }
 
 type deskFile struct {
@@ -65,8 +153,13 @@ func deskDir(room string) string { return filepath.Join(room, "desk", "files") }
 // fillDesk puts the project's declared files on a room's desk; with no
 // room it only checks them (place does, before anyone starts).
 func fillDesk(project, room string) ([]deskFile, error) {
-	cfg := loadProjectConfig(project).Desk
-	if len(cfg.Files) == 0 && len(cfg.Make) == 0 {
+	return fillDeskWith(project, loadProjectConfig(project).Desk, "", room)
+}
+
+// fillDeskWith is fillDesk from cfg, with the files to copy from kept (a
+// contract's own copy of them) when it's given, rather than the project.
+func fillDeskWith(project string, cfg deskConfig, kept, room string) ([]deskFile, error) {
+	if cfg.empty() {
 		return nil, nil
 	}
 	dir := ""
@@ -92,29 +185,29 @@ func fillDesk(project, room string) ([]deskFile, error) {
 		return nil
 	}
 	for _, rel := range cfg.Files {
-		src := housePath(project, rel)
 		name := filepath.Base(rel)
-		if filepath.IsAbs(rel) || !inProject(project, src) {
-			return nil, fmt.Errorf("desk file %q: a file inside the project or its house", rel)
+		if kept != "" {
+			src := filepath.Join(kept, name)
+			st, err := os.Lstat(src)
+			if err != nil || !st.Mode().IsRegular() {
+				return nil, fmt.Errorf("desk file %q: the contract's copy of it is gone (%s)", rel, src)
+			}
+			if err := add(name, st.Size()); err != nil {
+				return nil, err
+			}
+			if dir != "" {
+				if err := copyRegular(src, filepath.Join(dir, name)); err != nil {
+					return nil, err
+				}
+			}
+			continue
 		}
-		if secret(name) {
-			return nil, fmt.Errorf("desk file %q looks like a secret; it never goes in a room", rel)
+		real, st, err := rosterFile(project, rel)
+		if err != nil {
+			return nil, fmt.Errorf("desk file %q: %v", rel, err)
 		}
 		if !deskNameRE.MatchString(name) {
 			return nil, fmt.Errorf("desk file %q: a desk file's name is letters, digits, dots, dashes, underscores and spaces, starting and ending with a letter or digit", rel)
-		}
-		st, err := os.Lstat(src)
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("desk file %q: there's no such file", rel)
-		}
-		if err != nil || !st.Mode().IsRegular() {
-			return nil, fmt.Errorf("desk file %q: not a regular file (a folder, or a link)", rel)
-		}
-		// Every folder on the way followed: a link to a folder outside the
-		// project is still outside it.
-		real, err := filepath.EvalSymlinks(src)
-		if err != nil || !within(real, realPath(project)) && !within(real, realPath(adminDir(project))) {
-			return nil, fmt.Errorf("desk file %q is outside the project and its house (through a link)", rel)
 		}
 		if st.Size() > deskFileLimit {
 			return nil, fmt.Errorf("desk file %q is over %d MB", rel, deskFileLimit>>20)
@@ -123,7 +216,7 @@ func fillDesk(project, room string) ([]deskFile, error) {
 			return nil, err
 		}
 		if dir != "" {
-			if err := copyRegular(real, filepath.Join(dir, name)); err != nil {
+			if err := copyRegularAs(real, st, filepath.Join(dir, name)); err != nil {
 				return nil, err
 			}
 		}
@@ -175,8 +268,12 @@ func writeDeskList(room string, files []deskFile) error {
 	return os.WriteFile(deskList(room), b, 0o600)
 }
 
-func copyRegular(src, dst string) error {
-	in, err := os.Open(src)
+func copyRegular(src, dst string) error { return copyRegularAs(src, nil, dst) }
+
+// copyRegularAs is copyRegular of the file a check saw at src (want), and
+// no other: never through a link, never one swapped in since.
+func copyRegularAs(src string, want os.FileInfo, dst string) error {
+	in, _, err := openRegular(src, want)
 	if err != nil {
 		return err
 	}

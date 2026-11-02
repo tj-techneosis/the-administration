@@ -57,6 +57,9 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    about changes ("these changes", "my branch"), the contract is on the
    changes: add `--changes` (and `--base REF` if they name a base). With
    nothing changed it exits 1 with "nothing has changed since ..."; say so.
+   If only files that look like secrets changed it exits 1 saying that:
+   critics are never handed them. Files left out of a diff otherwise are
+   counted in place's warning and in the critics' brief.
    **Watch place's warnings about the base**: "this branch is missing N
    commits that main has" or "local main is N commits ahead of
    origin/main" means what's tested lacks work already done, and a bug
@@ -129,18 +132,25 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
 5. **Place it**: `administration place "<target>" --with <run> [--cast a,b]
    [--changes] [--brief <name>="..."]... [--data <name>] [--coins 10m]`. It
    prints the contract id and returns within a few seconds (it waits that
-   long to see whether any room fails at once). If it exits 4, there aren't
-   enough rooms free for its users now and nothing was placed: it names the
-   contracts holding them; wait for those (`administration wait <id>`),
-   then place it again.
+   long to see whether any room fails at once). The machine paces itself:
+   when the rooms are taken, place says "Queued, N ahead" (exit 0), and
+   its users take rooms by themselves, in the order contracts were placed,
+   as rooms free; rooms set up one at a time, as memory allows, and each
+   user's coins start only when its room is ready. So place the contract
+   as the person wants it: don't split it to fit the rooms, wait for
+   other contracts first, or place it again. Wait for it like any other
+   (`status` says who is "waiting for a room", "waiting for setup (2
+   ahead)" or "waiting for memory"). Only a contract with more users than
+   there are rooms at all is refused (exit 1): split that one.
 6. **Wait in the background**: run `administration wait <id>` with
    `run_in_background` (a foreground wait dies at the Bash time limit). It
    prints a line as each professional's state changes, and returns early
    if one fails or is refused while the others work: tell the person who
    and why (its line says), then run the wait again for the rest. Tell
    the person it's placed, about how long it takes (the largest purse in
-   minutes, plus a few minutes to build each room), and that in VS Code
-   `/tasks` shows it running. Then carry on with whatever else they want. If
+   minutes, plus a few minutes to build each room, one room after another,
+   and longer when it was queued), and that in VS Code `/tasks` shows it
+   running. Then carry on with whatever else they want. If
    they ask how it's going, `administration status <id>`.
    **Watching**: in Herdr or tmux, place opens a watch tab with a pane per
    professional, without taking focus, in the Herdr space you're working
@@ -168,6 +178,12 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    nobody there closed with nobody checking its findings, so when the
    person comes back to it, read its summary (`administration report <id>`)
    and check every finding before reporting it.
+8. **Placing on someone's behalf**: when your whole job is to place a
+   contract for someone else (a scheduled run, an agent sent to place,
+   wait, close and report), do that and write the result where you were
+   told (the contract id and the summary's path, or what they asked for).
+   Then finish: end the session, rather than stay open and idle; nobody
+   is coming back to it, and whoever sent you reads the result, not you.
 
 **Before anything ships** (a merge, a deploy, a release): if the app runs
 and no users have worked the changed flows yet, offer a persona pass first,
@@ -295,17 +311,19 @@ one for whatever it left. Each report's "Told along the way" lists
 what the Administration said to them after the brief (asked at halfway to
 write down what they had, sent back to their plan), and when.
 
-Exit codes: 0 done, 1 error, 2 a room or professional failed, 3 refused by
-the Rules, 4 not enough rooms free for it now, 5 (from `upgrade --check`
-only) a newer version is out. A 2 or 3 from `place` (or
-`resume`) itself means someone failed in its first seconds (a setup hook
-that exits at once), 3 if any of them was refused: the contract is still
-placed, its id is on the first line, and the message says whether anyone
-else is working on it (then `wait` for them) or not (then `close` it). On a 4, nothing was placed: the message
-names the contracts holding the rooms; wait for one of them
-(`administration wait <id>`), then place it again. A contract that needs
-more rooms than there are at all is an error (1): split its users across
-two. On a 2, the `wait` line and `administration status <id>` give
+Exit codes: 0 done (a contract queued for rooms is placed, and exits 0),
+1 error, 2 a room or professional failed, 3 refused by the Rules, 4 busy,
+5 (from `upgrade --check` only) a newer version is out. A 2 or 3 from
+`place` (or `resume`) itself means someone failed in its first seconds (a
+setup hook that exits at once), 3 if any of them was refused: the contract
+is still placed, its id is on the first line, and the message says whether
+anyone else is working on it (then `wait` for them) or not (then `close`
+it). A 4 comes only from `place --no-queue` (for a script that would
+rather place it again later than wait in line: nothing was placed, and the
+message names the contracts holding the rooms), and from `prune` while the
+books are in use (or any command a prune held up too long): try again
+once it's done. A contract that needs more rooms than there are at all is
+an error (1): split its users across two. On a 2, the `wait` line and `administration status <id>` give
 each failed professional's reason; for more, read
 `~/.local/share/administration/contracts/<id>/<name>/setup.log` (the room)
 or `claude.log` (the professional) and say what broke. A user whose
@@ -334,14 +352,23 @@ step after writes there and not into the project.
    which starts the app on seed data in each room (the README's "A House of
    Your Own" has its contract). If there isn't one, offer to write it: read
    how the project runs its app, seeds a demo and makes logins, and keep
-   everything that calls out switched off.
+   everything that calls out switched off. When it starts anything outside
+   its own process group (containers, a daemon), have it say how to stop
+   them as soon as it starts them, before anything else can fail: a line
+   appended to `$ADMINISTRATION_CLEANUP`, which teardown runs even when
+   the setup never finished.
 3. **Check it with `administration room-check`**, in the background (a real
    build takes minutes). Never run the hook yourself: it needs permissions
    a session usually doesn't have, and room-check runs it the way a
    contract does, in a fresh room, then clears it. It makes the hook
    executable if it isn't, says whether the room came up on seed data and
    which logins it made, and shows the end of the setup's output if not.
-   Fix and run it again until it passes, before any contract.
+   Fix and run it again until it passes, before any contract. When it (or
+   `status`) says "Worth a build hook", the house's rooms each build the
+   app for themselves and that's heavy (it names the time and memory it
+   measured): offer to write the house's `build` hook (the README's "The
+   build hook"), so each commit is built once and every room, the before
+   app's too, only installs and starts it.
 4. **Equipment**, when what they test isn't a web app (a desktop window, a
    phone, a tool on another OS): see `docs/equipment.md`. When onboarding
    leaves agents out for want of equipment, or a cast needs some, the

@@ -56,6 +56,25 @@ Code:
 The plugin puts a small launcher on Claude's PATH, so it finds the binary
 even when the extension's shell doesn't read your profile.
 
+**On Ubuntu 23.10 or later** (24.04 on most servers), AppArmor keeps
+Playwright's Chromium from building its sandbox, and every browser user
+fails at once with "Chromium sandboxing failed!" (`place` warns when it
+sees this). Give Playwright's browsers a profile like the stock Chrome
+one, as root, with your own home folder in the path:
+
+```
+cat > /etc/apparmor.d/playwright-chromium <<'END'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile playwright-chromium /home/YOU/.cache/ms-playwright/chromium{,_headless_shell}-*/**/{chrome,headless_shell,chrome-headless-shell} flags=(unconfined) {
+  userns,
+  include if exists <local/playwright-chromium>
+}
+END
+apparmor_parser -r /etc/apparmor.d/playwright-chromium
+```
+
 **Upgrading** is `administration upgrade`: it installs the latest release,
 or, if you built from a checkout, pulls it and builds again. The plugin's skill reads its instructions from the binary
 (`administration guide`), so open sessions use the new version from their
@@ -110,7 +129,11 @@ hit a stub or ran out of coins says so. Silence is not a pass.
    The contract is on a commit, and nobody works the wrong build: a room
    whose app is another commit's is turned away at the door, and critics
    read the project as it was placed. Browser professionals each get a
-   room first. The Administration runs
+   room first, and the house paces itself to the building: rooms are
+   made up one at a time, each when there's memory for it, and a contract
+   placed while every room is taken waits in the lobby, then goes up by
+   itself, in turn. Nobody's purse is touched while they wait: the coins
+   start when the room is ready. The Administration runs
    every stay itself, to its coins, and keeps its log.
 3. **Worked.** You keep working. Claude waits in the background and checks
    in when they're back. In Herdr or tmux the watch panes show them at
@@ -157,7 +180,7 @@ Two kinds of professional:
 | **user** | the running app, in a browser, or the project's equipment (a command-line tool, a window, a phone) | only the room's own pages and the equipment's tools |
 | **critic** | the code | the project, read-only (`Read`, `Grep`, `Glob`); with `uses`, it also runs the commands of the project's equipment, to settle what it reads |
 
-A browser professional reads nothing of yours, except a **handout** the project names in `roster.toml` (`[handout] files = ["house-rules.md"]`): copies of its own rule documents, put in each user's desk, the only place it can read. Personas that work from a project's rules need it; secrets never go in one.
+A browser professional reads nothing of yours, except a **handout** the project names in `roster.toml` (`[handout] files = ["house-rules.md"]`): copies of its own rule documents, put in each user's desk, the only place it can read. Personas that work from a project's rules need it; secrets never go in one, nor does the house's `env/`, and no two of its files may share a name.
 
 **Files to upload** go on the same desk, for a user to pick in the page's file picker or drop onto it, as a person does from their own computer:
 
@@ -171,7 +194,7 @@ size = "5MB"
 count = 20
 ```
 
-Each room gets its own copies, and a user reaches them only by name (`browser_choose_file`, `browser_drop_file`): the Administration hands the page the desk's copy, so nothing else on the machine can go into it. `place` checks the desk before anyone starts. Its rules: a name is letters, digits, dots, dashes, underscores and spaces, starting and ending with a letter or digit, and no two the same (ignoring case); a file is up to 200 MB, a desk up to 1 GB, and one `[[desk.make]]` makes up to 200 (with `{n}` in the name for more than one); a made file is at least as big as its format's smallest. A file from the project can't be a secret or reach outside it through a link. Every user with the browser has the desk (a screen-reader user aims a drop by the page's ref, as it aims everything), and so does one who sees a window equipment shows.
+Each room gets its own copies, and a user reaches them only by name (`browser_choose_file`, `browser_drop_file`): the Administration hands the page the desk's copy, so nothing else on the machine can go into it. `place` checks the desk before anyone starts, and the contract keeps it as it was then: its rooms, and a `resume` of it, get that desk, not whatever the roster and the files say later. Its rules: a name is letters, digits, dots, dashes, underscores and spaces, starting and ending with a letter or digit, and no two the same (ignoring case); a file is up to 200 MB, a desk up to 1 GB, and one `[[desk.make]]` makes up to 200 (with `{n}` in the name for more than one); a made file is at least as big as its format's smallest. A file from the project can't be a secret (by its name or its path, in any case), be in the house's `env/`, or reach outside it through a link. Every user with the browser has the desk (a screen-reader user aims a drop at an element from the page's snapshot, with the browser's own drop, as it aims everything), and so does one who sees a window equipment shows.
 
 A user can also work through the project's **equipment** instead of (or as well as) the web app: a command-line tool run in the Administration's own sandbox (`server = "sandboxed"`), a desktop app's window, a phone emulator, a VM's desktop. Anything a person looks at is seen through the Administration's screen: a picture, a tap or click where something is, typing and keys, and what changed since the last look; never the device's own text of what's on it. The project hooks up what it already has (the Administration ships no VM or emulator) and declares each piece in `roster.toml`, with the hooks that start a fresh one for every room; the professional gets only its tools. See [docs/equipment.md](docs/equipment.md).
 
@@ -270,7 +293,9 @@ worktree of that remote finds the same house (a project in a subfolder of
 its repo, the same subfolder of it: `.../acme/shop/apps/web/`); one with its own
 `.administration/` (or a worktree whose main checkout has one) always uses
 that. `administration roster` says which house a checkout lives in, and
-room-check and place, finding none, name the places they looked. A kept
+room-check and place, finding none, name the places they looked; place
+also says when it's using a kept house, and for which origin, since the
+origin is the checkout's own config and its setup is what runs. A kept
 house is the person's to back up or share: nothing commits it.
 
 Paths in `roster.toml` (handout files, equipment programs, a critic's
@@ -303,7 +328,12 @@ folder. It must:
   so rooms side by side never race for one. Anything it leaves running stays in its process
   group, so it's cleared at the end even if `teardown` misses it. Start a
   server with a plain `&`, not `nohup`: the hook has no terminal, and
-  macOS's `nohup` then fails and the server never starts;
+  macOS's `nohup` then fails and the server never starts. What it starts
+  outside its process group (containers, a daemon) isn't cleared that
+  way: the moment it starts them, before anything can fail, it appends
+  the command that stops them to `$ADMINISTRATION_CLEANUP`, one per line,
+  and every teardown runs them (the last first), even for a setup cut off
+  by its time limit before it wrote its manifest;
 - load seed data, and nothing else, and enough of it to be real: what
   professionals can't see they can't test (photos the pages show, a busy
   day's worth of records, the flows people use switched on, with a key
@@ -323,7 +353,8 @@ folder. It must:
 
   `origins` lists any other ports the page talks to, such as an API. The
   Administration refuses a room whose `data` isn't `seed` or `local`, or
-  whose addresses aren't this machine's and this room's ports.
+  whose addresses aren't this machine's and this room's ports (never the
+  db port: the database is the app's, not the browser's).
 
   **Data sets.** However the project already gets data for local testing
   (a seed script, a dump its own tooling pulled), the hook is where it
@@ -359,9 +390,17 @@ in at the same paths (the `.env` or `local.properties` nobody commits, so a
 build never ships without its map key again). It puts its build in OUT and
 prints its path last. Every room of the contract, and the next contract on
 the same commit, gets that one build as `$ADMINISTRATION_BUILD`, with
-`$ADMINISTRATION_BUILD_COMMIT`; its setup installs it. Uncommitted work is
-built too, kept apart under its own hash. `administration build` tries the
-hook; builds stay in the books until `prune` finds them unused.
+`$ADMINISTRATION_BUILD_COMMIT`; its setup installs it. A release check's
+before app is built the same way, once for its merge base, and handed to
+each room's before setup (`$ADMINISTRATION_SIDE` is `before`), so a room
+only installs and starts its two apps. Uncommitted work is
+built too, kept apart under its own hash. A changed hook or `env/` builds
+again. The checkout has no `.git`, so a build that stamps its version uses
+`$ADMINISTRATION_BUILD_COMMIT`, not `git describe`. `administration build`
+tries the hook; builds stay in the books until `prune` finds them unused.
+A house without one has every room build the app for itself; when that
+is heavy, `status` and `room-check` say so, with the time and memory they
+measured, and suggest the hook.
 
 `examples/demo/` is a complete house: a small app, its setup hook and two
 professionals. Try it with `administration place "sign up" --cast
@@ -375,7 +414,8 @@ project. Each professional is a separate headless Claude Code session:
 - **`--restricted`**: no shell or code-running tools at all, the person's own
   settings and hooks ignored, file tools confined to the working directory;
 - **users get no file tools**, only the browser. Critics get `Read`, `Grep`
-  and `Glob` in the project, with `.env` files and keys denied;
+  and `Glob` in the project, with `.env` files and keys denied (in any
+  case, wherever they are, and the house's `env/`), and `.git` too;
 - **no MCP servers but the house's own**: the room's browser (behind the
   screen), the project's equipment it was given, and the record's server,
   which only says "Recorded." (or why a call can't be); nothing persisted
@@ -383,9 +423,13 @@ project. Each professional is a separate headless Claude Code session:
 - **the browser goes through a gate.** Every connection Chromium makes,
   loopback included, goes through a small proxy the Administration runs for
   that room, which lets through only the room's own ports on this machine.
-  Other local servers, the internet, WebSockets, redirects out of the room
-  and `file:` URLs all stop there, and each refusal is logged (`gate.log`).
-  Playwright's own origin list sits in front as a second layer. WebRTC over
+  Other local servers, the internet, WebSockets and redirects out of the
+  room all stop there, and each refusal is logged (`gate.log`). A page
+  that isn't on the web (`file:`, `view-source:`, `chrome:`, `data:`) never
+  reaches a proxy, so the screen in front of the browser refuses to
+  navigate to one (any tool's `url`: an http or https page, or a host and
+  port with no scheme, which it writes out as `http://`), and Playwright's
+  own origin list sits in front as a second layer. WebRTC over
   UDP, DNS prefetch and service workers are off, Chromium's sandbox is on,
   and the profile is isolated and thrown away. Playwright's file upload,
   file drop and run-code tools are off; a user uploads or drops only the
@@ -394,7 +438,10 @@ project. Each professional is a separate headless Claude Code session:
 - **the professional can't touch the app it's testing.** A room is three
   folders: `app` (the copy setup builds, which runs as you), `desk` (the
   professional's working directory, where screenshots go) and `tmp` (the
-  browser's profile). The professional's tools only reach the desk.
+  browser's profile). The professional's tools only reach the desk: a
+  file a browser tool writes (a screenshot, a snapshot) is named, never
+  pathed, and the screen refuses a `filename` with a folder in it, as it
+  does any argument it doesn't know that holds a folder or a path.
 - **the browser server is ours**: `install.sh` puts the pinned Playwright
   MCP in `~/.local/share/administration/tools`, so nothing in a project can
   swap it.
@@ -407,7 +454,8 @@ project. Each professional is a separate headless Claude Code session:
   still answering after teardown is reported, not hunted down.
 - **a professional inherits almost nothing** from the session that placed
   the contract: no session ids, no tokens beyond what Claude Code needs to
-  sign in.
+  sign in, and the tool servers it starts don't get even that (the house's
+  take it out before starting anything; the others are given it empty).
 
 Reports are text. Screenshots stay in the room and go with it at close
 (`close --keep` keeps them). A professional files each finding with the
@@ -424,10 +472,10 @@ instead: never dropped, never counted.
 | command | does |
 |---|---|
 | `administration roster [--match tags] [--json] [--project DIR]` | who's hired, what they know, the open rooms; `--match` drafts a cast |
-| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--build SHA]` | places a contract on the project's HEAD (and any uncommitted work) and prints its id; a room whose build is another commit's is refused, unless `--build` names that commit on purpose; `--changes` warns when the branch is missing commits the local default branch has; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work. Exits 4 when there aren't enough free rooms for its users now |
+| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--build SHA] [--no-queue]` | places a contract on the project's HEAD (and any uncommitted work) and prints its id; a room whose build is another commit's is refused, unless `--build` names that commit on purpose; `--changes` warns when the branch is missing commits the local default branch has; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work. When the rooms are taken it's queued ("Queued, N ahead", exit 0) and its users start by themselves, in turn; `--no-queue` exits 4 instead |
 | `administration build [REF]` | the house's build hook's build of REF (HEAD by default), from the books or made now; prints its path |
 | `administration wait ID [--timeout 3h]` | waits until everyone is back or out of coins, with a line as each one's state changes; returns early (2, or 3 if refused) when one fails while others still work |
-| `administration status [ID] [--json]` | who's working and who's back; with no ID, every open contract and a `Rooms:` line saying how many are free |
+| `administration status [ID] [--json]` | who's working and who's back, who's waiting for the machine (a room, the setup turn, memory) and how long each waited, and who placed it; with no ID, every open contract and a `Rooms:` line saying how many are free and how many users wait for one |
 | `administration close ID [--keep]` | stops anyone still working, merges the reports, puts the Director's specialists who found something on the roster and clears the rooms; prints the summary's path |
 | `administration report ID [NAME]` | prints the summary once closed, or one professional's report |
 | `administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]` | builds one room with the setup hook, checks it comes up on seed data, shows its address and logins (not the passwords), and clears it away: the test for a hook you just wrote. `--changes` also builds the app before them, as a release check does |
@@ -440,24 +488,60 @@ instead: never dropped, never counted.
 | `administration verdicts ID FILE\|-` | records the check of each finding, `{"name": [{"finding": 3, "verdict": "confirmed", "why": "...", "tag": "OLD", "also": ["ID NAME #N"], "not_also": [...]}]}`; `tag` refiles a finding whose mark is wrong; the summary shows each beside its finding, and `also` links it to the same bug in another contract, on both sides |
 | `administration check FILE...` | checks a professional's file |
 
-Exit codes: **0** done, **1** error, **2** a room or a professional failed
+Exit codes: **0** done (a contract queued for rooms is placed, and exits
+0), **1** error, **2** a room or a professional failed
 (to start, or a user whose browser never loaded a page), **3** refused by
 the Rules (from `place` or `resume`, 2 when someone fails in its first
 seconds, 3 if any of them was refused: the contract is placed all the
-same, its id printed), **4** not enough rooms free for this contract now (nothing was
-placed; the message names the contracts holding them: place it again once
-their users are back, closed or not; `administration status` says how many
-are free), **5** from `upgrade --check` only: a newer release (or, for a
+same, its id printed), **4** busy: from `place --no-queue`, not enough
+rooms free for this contract now (nothing was placed; the message names
+the contracts holding them: place it again once their users are back,
+closed or not; `administration status` says how many are free); from
+`prune`, the books are in use: prune once it's done; from any command
+that holds the books, a prune held them for over two minutes: run it
+again. **5** from `upgrade --check` only: a newer release (or, for a
 checkout, newer commits upstream) is out.
 
 Each contract is a directory in `~/.local/share/administration/contracts/`,
 with every professional's brief, settings, stream, report and status, and
-the merged `summary.md`. Up to four browser rooms run at once
-(`ADMINISTRATION_MAX_ROOMS`), because each one runs a copy of the app.
+the merged `summary.md`.
+
+**Pacing.** Each browser room runs a copy of the app, and a machine has
+only so much of it to give, so the house paces itself and nobody has to
+pick a room count:
+
+- **One setup at a time.** Rooms are made up in turn on the machine, the
+  app with the changes and the one before them alike. A professional whose
+  room is ready starts at once; the next room sets up behind it. `status`
+  says "setting up", or "waiting for setup (2 ahead)".
+- **By memory, learned per house.** Each setup is measured (how far the
+  machine's available memory falls while it runs, containers included),
+  and kept with the house's records. A room sets up only when what's free,
+  less a reserve for the machine itself (15% of it, at least 2 GB),
+  covers what the house's rooms took before; a house never measured sets
+  up its first room alone, and is measured. "waiting for memory" says how
+  much it needs.
+- **A queue, not a refusal.** Up to four rooms are held at once
+  (`ADMINISTRATION_MAX_ROOMS`, a hard cap). A contract placed while
+  they're taken is placed all the same, waiting, and its users take rooms
+  by themselves in the order contracts were placed. Only one with more
+  users than rooms is refused: split it.
+- **The coins start at the door.** A seat's purse starts when its room is
+  ready, and a setup's 15 minutes when its turn comes, so waiting costs
+  nothing; `status` and the summary say how long each seat waited.
 The books grow: a phone user's stream can pass 10MB in ten minutes.
 `administration prune` strips reviewed or old contracts to their summaries
-(`--keep 10`, `--older 30d`), and past `--keep` to a line each in the
-project's ledger, so the stats outlive them.
+(`--keep 10`, `--older 30d`), and past `--keep` (the last to close are
+kept) to a line each in the project's ledger, so the stats outlive them. A
+contract nobody has reviewed is kept whole until it's older than
+`--older`. Prune is refused (exit 4) while a place, close, verify,
+verdicts or resume is running, and leaves alone a build a room is
+installing or running. One of those started during a prune says so and
+waits for it; prune holds the books only while it looks and moves things
+aside, and removes them after. `--dry-run` only looks, so it's never
+refused. A contract's ledger lines are written before it's removed, and
+never twice, so a prune cut off or failing loses no numbers; one that
+can't remove something carries on, then names it (exit 1).
 
 **Hooks.** The Administration tells nobody anything itself; it runs your
 hooks. An executable named after an event, `placed`, `closed`, `hired` or
@@ -466,7 +550,11 @@ hooks. An executable named after an event, `placed`, `closed`, `hired` or
 `ADMINISTRATION_*` variables (the contract, the summary's path). Post the
 summary to a chat, send it to your phone, open issues from confirmed
 findings: that's the hook's business. A hook that fails or hangs changes
-nothing (except `watch`, below).
+nothing (except `watch`, below); its output and its exit go in the
+books' `hooks.log`, and the command says in a line that it failed. A
+project's hook runs in the project; your own, the machine's, runs in its
+own folder, so nothing a project configures (a version manager's config
+you never trusted, say) decides what its interpreter is.
 
 A `watch` hook decides where the watch panes open, in place of the house's
 own (a Herdr tab in the space you placed from, or a tmux window). It hears
@@ -524,5 +612,8 @@ done
 - sharing professionals between projects (a roster source other projects
   can point at);
 - a container room, for projects that want a harder wall;
+- one running before app shared by a contract's users, for a house whose
+  users each sign in as their own seeded account and can't change what
+  another sees (today each room has its own);
 - vendor test keys from a team secret store, for contracts that need a real
   test environment instead of a stub.

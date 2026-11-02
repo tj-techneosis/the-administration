@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -65,12 +64,18 @@ func contractHouse(c *contract) string {
 }
 
 // hookDir is where a contract's hooks run: its project, or its house's
-// checkout when the project (a worktree) has been removed since.
+// checkout when the project (a worktree) has been removed since, or the
+// house itself when it's one kept on the machine (its folder is no
+// checkout).
 func hookDir(c *contract) string {
 	if isDir(c.Project) {
 		return c.Project
 	}
-	return filepath.Dir(contractHouse(c))
+	h := contractHouse(c)
+	if filepath.Base(h) != ".administration" {
+		return h
+	}
+	return filepath.Dir(h)
 }
 
 func findAdminDir(project string) string {
@@ -222,6 +227,58 @@ func outsideHome(d string) error {
 	return nil
 }
 
+// lstatIn is os.Lstat of rel inside root with no link followed on the way:
+// a folder on the way that is a link (or isn't a folder) means the file
+// isn't there, which is how git sees it too. os.Lstat alone follows every
+// link but the last, so a tracked folder replaced by a link to one outside
+// the project would be read through.
+func lstatIn(root, rel string) (os.FileInfo, error) {
+	notThere := &os.PathError{Op: "lstat", Path: filepath.Join(root, rel), Err: os.ErrNotExist}
+	if filepath.IsAbs(rel) {
+		return nil, notThere
+	}
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	p := root
+	for i, part := range parts {
+		if part == ".." || part == "" {
+			return nil, notThere
+		}
+		p = filepath.Join(p, part)
+		st, err := os.Lstat(p)
+		if err != nil {
+			return nil, err
+		}
+		if i == len(parts)-1 {
+			return st, nil
+		}
+		if !st.IsDir() {
+			return nil, notThere
+		}
+	}
+	return nil, notThere
+}
+
+// openRegular opens the regular file at p without following a link at its
+// last part, and, given want (what a check saw at p), only that file: one
+// swapped for another or for a link since the check isn't read.
+func openRegular(p string, want os.FileInfo) (*os.File, os.FileInfo, error) {
+	// O_NONBLOCK so a pipe put there opens rather than waits; a regular
+	// file ignores it.
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err == nil && (!st.Mode().IsRegular() || want != nil && !os.SameFile(st, want)) {
+		err = fmt.Errorf("%s changed while it was being read (it's another file, or not a regular one)", p)
+	}
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, st, nil
+}
+
 // within reports whether p is base or inside it.
 func within(p, base string) bool {
 	rel, err := filepath.Rel(base, p)
@@ -234,7 +291,7 @@ func projectDir(flag string) (string, error) {
 	if flag != "" {
 		return filepath.Abs(flag)
 	}
-	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+	if out, err := gitCmd("", "rev-parse", "--show-toplevel").Output(); err == nil {
 		return strings.TrimSpace(string(out)), nil
 	}
 	return os.Getwd()

@@ -15,6 +15,7 @@ persona's body says: a line "FAKE: <mode>" picks the mode.
   old        retag's first finding, marked OLD
   partial    a plan of four, one covered and the rest unreached
   record     keeps its record with the house's tools, not FINDING: lines
+  room       a finding the test room caused (its seed never loaded)
 
 With --input-format stream-json the brief comes as the first message on
 stdin; each later message (the Administration sending it back) is recorded
@@ -63,6 +64,8 @@ if os.path.basename(persona) == "verifier.md":
         elif "$5 too high" in f["text"]:
             # Marked NEW, but the code was so before the changes.
             a = {"id": f["id"], "verdict": "confirmed", "why": "cart.js:8 added it before the change", "tag": "OLD"}
+        elif "course list is empty" in f["text"]:
+            a = {"id": f["id"], "verdict": "false", "why": "seed.py:40 makes the courses; the room's seed failed", "room": True}
         elif "prints twice" in f["text"]:
             a = {"id": f["id"], "verdict": "confirmed", "why": "receipt.js:3 prints in both handlers", "tag": "new"}
         # A proposed link: the same when the words are the same.
@@ -153,6 +156,8 @@ if mode == "record":
 if mode == "partial":
     text("PLAN 1: the upload screen\nPLAN 2: a batch of files\nPLAN 3: a dropped link\nPLAN 4: a reload mid-upload\n"
          "COVERED 1\nUNREACHED: 2 no way to make a file\nUNREACHED: 3 no file to upload\nUNREACHED: 4 no file to upload")
+if mode == "room":
+    text("FINDING: the course list is empty on /courses")
 if mode == "old":
     text("FINDING: OLD: the total on /cart is $5 too high since the change")
 if mode == "plan":

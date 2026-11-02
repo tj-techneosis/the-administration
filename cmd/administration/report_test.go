@@ -234,3 +234,13 @@ func TestAPatchPartIsNamedForItsFile(t *testing.T) {
 		}
 	}
 }
+
+func TestASandboxFailureSaysWhatToDo(t *testing.T) {
+	got := browserFailure("Error: async initializeServer: Target page, context or browser has been closed Browser logs: Chromium sandboxing failed!")
+	if !strings.Contains(got, "AppArmor") || !strings.Contains(got, "README") {
+		t.Fatalf("no hint: %s", got)
+	}
+	if other := browserFailure("Socket directory path is too long"); other != "Socket directory path is too long" {
+		t.Fatalf("a hint on another error: %s", other)
+	}
+}

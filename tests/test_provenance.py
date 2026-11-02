@@ -5,7 +5,9 @@ without the local default branch's fixes). Run through tests/isolated.sh.
 """
 import json
 import os
+import signal
 import subprocess
+import time
 import unittest
 
 from test_administration import Base, binary, professional, write, setUpModule  # noqa: F401
@@ -100,7 +102,7 @@ class Provenance(Base):
         cid = self.place("x", "--cast", "reader")
         self.cli("wait", cid)
         self.cli("close", cid)
-        checkout = os.path.join(self.books, "contracts", cid, ".checkout")
+        checkout = self.contract(cid)["checkout"]
         subprocess.run(["rm", "-rf", checkout], check=True)
         write(os.path.join(self.project, "app.txt"), "moved on\n")
         self.git("commit", "-qam", "later")
@@ -112,7 +114,7 @@ class Provenance(Base):
         for v in seen:
             self.assertEqual(os.path.realpath(v["project"]), os.path.realpath(checkout))
         self.assertEqual(open(os.path.join(checkout, "app.txt")).read(), "one\n")
-        self.assertEqual([n for n in os.listdir(os.path.dirname(checkout)) if n.startswith(".checkout-")], [])
+        self.assertEqual([n for n in os.listdir(os.path.dirname(checkout)) if n.startswith(".")], [])
 
     def test_a_contract_with_no_commit_says_verify_reads_the_project_as_it_is(self):
         self.hire_file("reader", kind="critic")
@@ -137,7 +139,10 @@ class Provenance(Base):
         self.assertNotIn("checkout", self.contract(cid))
         self.cli("close", cid)
         self.cli("verify", cid, env={"ADMINISTRATION_MATCH": "off"})
-        self.assertTrue(os.path.isdir(self.contract(cid)["checkout"]))
+        # Made by verify, among the shared copies; contract.json is left as
+        # place and close wrote it.
+        self.assertEqual(self.copies(), [self.head()])
+        self.assertIn("read the project as it was then", self.cli("report", cid).stdout)
         # Uncommitted work can't be had later: copied at place.
         write(os.path.join(self.project, "app.txt"), "one\nwip\n")
         self.phone(f"echo BUILD_COMMIT={self.head()}")
@@ -182,6 +187,10 @@ class Provenance(Base):
         self.assertIn(f"phone runs a build of {old[:10]}", reason)
         self.assertIn(f"--build {old[:10]}", reason)
         self.cli("close", cid)
+        # The summary doesn't say the room ran the build it refused.
+        rep = self.cli("report", cid).stdout
+        self.assertIn(f"thumb's room was refused phone: {old[:10]}", rep)
+        self.assertNotIn("thumb's room ran", rep)
         # On purpose: the person says that build is the one to test.
         cid = self.place("x", "--cast", "thumb", "--build", old[:8])
         self.cli("wait", cid)
@@ -303,6 +312,103 @@ class Provenance(Base):
         s = self.status(cid)["status"]["member"]
         self.assertEqual(s["builds"], [{"from": "app", "commit": self.head()}], s)
 
+    def test_a_web_room_on_a_build_of_head_with_uncommitted_work_says_so(self):
+        # --build HEAD is that commit alone; a setup that builds from the
+        # checkout builds the uncommitted work in too.
+        self.house()
+        self.hire_file("member")
+        write(os.path.join(self.project, "app.txt"), "one\nwip\n")
+        cid = self.place("x", "--cast", "member", "--build", "HEAD")
+        self.cli("wait", cid)
+        s = self.status(cid)["status"]["member"]
+        self.assertEqual(s["state"], "back", s)
+        self.assertIn("has uncommitted work", s["builds"][0]["note"])
+
+    def test_a_web_room_off_the_chosen_build_names_the_chosen_one(self):
+        old = self.head()
+        write(os.path.join(self.project, "app.txt"), "two\n")
+        self.git("commit", "-qam", "newer")
+        self.house()
+        self.hire_file("member")
+        cid = self.place("x", "--cast", "member", "--build", old, early=3)
+        self.cli("wait", cid, check=3)
+        reason = self.status(cid)["status"]["member"]["reason"]
+        self.assertIn(f"the contract was placed to test {old[:10]} (--build)", reason)
+        self.assertIn(f"put the checkout at {old[:10]}", reason)
+
+    def test_a_chosen_build_this_checkout_lacks_is_refused_with_a_build_hook(self):
+        self.phone("echo BUILD_COMMIT=0123456")
+        write(os.path.join(self.project, ".administration", "build"), "#!/bin/sh\necho x > \"$2/a\"\n", 0o755)
+        err = self.cli("place", "x", "--cast", "thumb", "--build", "0123456", check=1).stderr
+        self.assertIn("this checkout doesn't have that commit", err)
+
+    def test_a_device_port_range_that_cant_be_one_is_refused(self):
+        self.phone("true")
+        for bad in ["5680-5620", "5621-5681"]:
+            err = self.cli("place", "x", "--cast", "thumb", check=1, env={"ADMINISTRATION_DEVICE_PORTS": bad}).stderr
+            self.assertIn("ADMINISTRATION_DEVICE_PORTS", err)
+
+    def test_a_restart_boots_the_device_as_the_setup_did(self):
+        self.phone("true")
+        write(os.path.join(self.project, ".administration", "roster.toml"), '''
+            [equipment.phone]
+            about = "A phone."
+            setup = ".administration/equipment/phone/start"
+            server = "screen"
+            driver = ".administration/equipment/phone/server"
+            restart = ".administration/equipment/phone/start"
+            ''')
+        cid = self.place("x", "--cast", "thumb", "--show-browsers", env={"ADMINISTRATION_DEVICE_PORTS": "5700-5720", "DISPLAY": ":99"})
+        self.cli("wait", cid)
+        mcp = json.load(open(os.path.join(self.pdir(cid, "thumb"), "mcp.json")))
+        [env] = [v["env"] for v in mcp["mcpServers"].values() if "ADMINISTRATION_EQUIPMENT_RESTART" in v.get("env", {})]
+        self.assertEqual(env["ADMINISTRATION_DEVICE_PORTS"], "5700-5720")
+        self.assertEqual(env["ADMINISTRATION_SHOW"], "1")
+
+    def test_a_resume_off_the_contracts_commit_says_so(self):
+        self.hire_file("reader", kind="critic")
+        cid = self.place("x", "--cast", "reader")
+        self.cli("wait", cid)
+        was = self.head()
+        write(os.path.join(self.project, "app.txt"), "two\n")
+        self.git("commit", "-qam", "newer")
+        err = self.cli("resume", cid, "reader").stderr
+        self.assertIn(f"contract {cid} was on {was[:10]}, and HEAD is {self.head()[:10]} now", err)
+
+    def test_changes_on_a_chosen_build_are_that_commits_alone(self):
+        self.git("checkout", "-qb", "feature")
+        write(os.path.join(self.project, "feature.txt"), "feature\n")
+        self.git("add", "feature.txt")
+        self.git("commit", "-qm", "feature")
+        write(os.path.join(self.project, "app.txt"), "one\nwip\n")
+        write(os.path.join(self.project, "untracked.txt"), "new\n")
+        self.hire_file("reader", kind="critic")
+        cid = self.place("x", "--cast", "reader", "--changes", "--base", "main", "--build", "HEAD")
+        ch = self.contract(cid)["changes"]
+        self.assertEqual(ch["files"], ["feature.txt"])
+        self.assertNotIn("untracked", ch)
+        self.assertNotIn("wip", open(ch["patch"]).read())
+        self.cli("wait", cid)
+        self.assertIn("no uncommitted work", open(os.path.join(self.pdir(cid, "reader"), "brief.md")).read())
+
+    def test_equipment_check_builds_with_the_hook_before_the_apps_room(self):
+        self.house()
+        seen = os.path.join(self.tmp, "seen")
+        hook = os.path.join(self.project, ".administration", "setup")
+        write(hook, open(hook).read().replace("set -e\n", f"set -e\necho \"$ADMINISTRATION_BUILD_COMMIT\" > \"{seen}\"\n"), 0o755)
+        write(os.path.join(self.project, ".administration", "build"), "#!/bin/sh\necho x > \"$2/a\"\n", 0o755)
+        rt = os.path.join(self.project, ".administration", "roster.toml")
+        write(rt, open(rt).read() + '''
+[equipment.probe]
+about = "A probe."
+needs_app = true
+server = "commands"
+commands = [".administration/run"]
+''')
+        write(os.path.join(self.project, ".administration", "run"), "#!/bin/sh\n", 0o755)
+        self.cli("equipment-check", "probe")
+        self.assertEqual(open(seen).read().strip(), self.head())
+
 
     def test_equipment_hears_the_rooms_device_ports(self):
         # A development emulator on a room's console port crashed a room's
@@ -334,18 +440,74 @@ class Provenance(Base):
             ''')
         self.assertIn("Have its setup print BUILD_COMMIT=", self.cli("equipment-check", "phone", check=2).stdout)
 
+    def copies(self):
+        root = os.path.join(self.books, "copies")
+        return sorted(n for d in (os.listdir(root) if os.path.isdir(root) else [])
+                      for n in os.listdir(os.path.join(root, d)))
+
     def test_prune_clears_the_copy_with_the_rest_of_the_raw_files(self):
         self.hire_file("reader", kind="critic")
         cid = self.place("x", "--cast", "reader")
         self.cli("wait", cid)
         self.cli("close", cid)
-        checkout = os.path.join(self.books, "contracts", cid, ".checkout")
+        checkout = self.contract(cid)["checkout"]
         self.assertTrue(os.path.isdir(checkout))
-        cut = checkout + "-1234"  # a copy killed before it was renamed into place
+        # a copy killed before it was renamed into place
+        cut = os.path.join(os.path.dirname(checkout), "." + os.path.basename(checkout) + "-1234")
         write(os.path.join(cut, "app.txt"), "one\n")
+        old = os.path.join(self.books, "contracts", cid, ".checkout")  # where a copy was before they were shared
+        write(os.path.join(old, "app.txt"), "one\n")
         self.cli("prune", "--older", "0h")
         self.assertFalse(os.path.exists(checkout))
         self.assertFalse(os.path.exists(cut))
+        self.assertFalse(os.path.exists(old))
+
+    def test_contracts_on_one_commit_share_one_copy_until_none_needs_it(self):
+        self.hire_file("reader", kind="critic")
+        a = self.place("x", "--cast", "reader")
+        b = self.place("y", "--cast", "reader")
+        self.assertEqual(self.contract(a)["checkout"], self.contract(b)["checkout"])
+        self.assertEqual(self.copies(), [self.head()])
+        self.cli("wait", a)
+        self.cli("close", a)
+        self.cli("prune", "--older", "0h")
+        self.assertEqual(self.copies(), [self.head()], "b is open and reads it")
+        self.cli("wait", b)
+        self.cli("close", b)
+        self.cli("prune", "--older", "0h")
+        self.assertEqual(self.copies(), [])
+        # Uncommitted work gets its own; a big uncommitted file isn't in it.
+        write(os.path.join(self.project, "app.txt"), "one\nwip\n")
+        with open(os.path.join(self.project, "dump.sql"), "wb") as f:
+            f.write(b"x" * (9 << 20))
+        c = self.place("z", "--cast", "reader")
+        co = self.contract(c)["checkout"]
+        self.assertEqual(open(os.path.join(co, "app.txt")).read(), "one\nwip\n")
+        self.assertFalse(os.path.exists(os.path.join(co, "dump.sql")))
+        self.assertEqual(self.copies(), [self.head() + "-" + self.contract(c)["work"]])
+        # Left out, and said: the summary doesn't claim the copy has it all.
+        self.cli("wait", c)
+        self.cli("close", c)
+        self.assertIn("over 8 MB were left out of the copy (not even at the commit's version): dump.sql", self.cli("report", c).stdout)
+
+    def test_a_placement_refused_for_rooms_makes_no_copy(self):
+        # Refused before the copy: one tried again after "busy" or a typo
+        # doesn't pay for it each time.
+        self.phone(f"echo BUILD_COMMIT={self.head()}")
+        self.hire_file("pinky", extra="  browser: false\n  uses: [phone]")
+        self.hire_file("reader", kind="critic")
+        write(os.path.join(self.project, "app.txt"), "one\nwip\n")
+        self.cli("place", "x", "--cast", "thumb,pinky,reader", check=1, env={"ADMINISTRATION_MAX_ROOMS": "1"})
+        self.cli("place", "x", "--cast", "thumb,reader", "--brief", "nobody=x", check=1)
+        self.assertEqual(self.copies(), [])
+
+    def test_a_chosen_build_this_checkout_lacks_is_said_at_place(self):
+        # Not refused without a build hook (it can be someone else's), but a
+        # typo looks just the same, so place says so.
+        self.phone("echo BUILD_COMMIT=0123456")
+        p = self.cli("place", "x", "--cast", "thumb", "--build", "0123456")
+        self.assertIn("--build 0123456: this checkout doesn't have that commit", p.stderr)
+        self.cli("wait", p.stdout.split()[1])
 
 
 class BaseSanity(Base):
@@ -394,6 +556,30 @@ class BaseSanity(Base):
         p = self.cli("place", "x", "--cast", "reader", "--changes")
         self.assertNotIn("missing", p.stderr)
         self.assertNotIn("ahead", p.stderr)
+        self.cli("wait", p.stdout.split()[1])
+
+
+    def test_local_main_ahead_on_main_itself_says_nothing(self):
+        # On main, its unpushed commits are the changes.
+        write(os.path.join(self.project, "fix.txt"), "fixed\n")
+        self.git("add", "fix.txt")
+        self.git("commit", "-qm", "fix on local main")
+        p = self.cli("place", "x", "--cast", "reader", "--changes")
+        self.assertNotIn("ahead", p.stderr)
+        self.cli("wait", p.stdout.split()[1])
+
+    def test_a_branch_with_local_mains_unpushed_commits_is_told_they_are_in_its_changes(self):
+        write(os.path.join(self.project, "fix.txt"), "fixed\n")
+        self.git("add", "fix.txt")
+        self.git("commit", "-qm", "fix on local main")
+        self.git("checkout", "-qb", "feature")
+        write(os.path.join(self.project, "feature.txt"), "feature\n")
+        self.git("add", "feature.txt")
+        self.git("commit", "-qm", "feature")
+        p = self.cli("place", "x", "--cast", "reader", "--changes")
+        self.assertNotIn("missing", p.stderr)
+        self.assertNotIn("test on top of local main", p.stderr)
+        self.assertIn("this branch has them: they're in the changes as if they were its own (--base main", p.stderr)
         self.cli("wait", p.stdout.split()[1])
 
 
@@ -474,6 +660,22 @@ class BuildHook(Base):
         self.assertTrue(installed.startswith("one\nwip\n"), installed)
         self.assertRegex(installed, r"work=work-[0-9a-f]{10}\n$")
 
+    def test_a_setup_that_echoes_the_hooks_commit_has_the_work(self):
+        # It installed $ADMINISTRATION_BUILD, made with the work: no note
+        # that the work isn't in it.
+        start = os.path.join(self.project, ".administration", "equipment", "phone", "start")
+        write(start, open(start).read() + 'echo "BUILD_COMMIT=$ADMINISTRATION_BUILD_COMMIT"\necho "WORK=$ADMINISTRATION_BUILD_WORK"\n', 0o755)
+        write(os.path.join(self.project, "app.txt"), "one\nwip\n")
+        cid = self.place("x", "--cast", "thumb")
+        self.cli("wait", cid)
+        s = self.status(cid)["status"]["thumb"]
+        self.assertEqual(s["builds"], [{"from": "phone", "commit": self.head}], s)
+        self.assertEqual(self.contract_work(cid), json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["work"])
+
+    def contract_work(self, cid):
+        env = open(os.path.join(self.pdir(cid, "thumb"), "equipment-phone.log")).read()
+        return env.split("WORK=", 1)[1].split()[0]
+
     def test_a_build_that_fails_fails_the_room_with_its_log(self):
         write(os.path.join(self.project, ".administration", "build"), "#!/bin/sh\necho no sdk >&2\nexit 1\n", 0o755)
         cid = self.place("x", "--cast", "thumb", early=2)
@@ -482,6 +684,23 @@ class BuildHook(Base):
         self.assertIn(f"the build of {self.head[:10]} failed", reason)
         log = reason.rsplit("see ", 1)[1]
         self.assertIn("no sdk", open(log).read())
+
+    def test_rooms_waiting_on_a_build_that_fails_take_its_failure(self):
+        write(os.path.join(self.project, ".administration", "build"),
+              '#!/bin/sh\necho built >> "$BUILD_COUNT"\nsleep 2\necho no sdk >&2\nexit 1\n', 0o755)
+        cid = self.cli("place", "x", "--cast", "thumb,pinky", check=None).stdout.split()[1]
+        self.cli("wait", cid, check=2)
+        # wait is back at the first failure; the other room may still be
+        # taking it up.
+        reasons = [self.wait_state(cid, n, {"failed"})["reason"] for n in ("thumb", "pinky")]
+        for r in reasons:
+            self.assertIn(f"the build of {self.head[:10]} failed", r)
+        self.assertEqual(open(self.count).read(), "built\n", "built once, not once a room")
+        self.assertIn("no sdk", open(reasons[0].rsplit("see ", 1)[1]).read())
+        # The next contract tries again.
+        cid = self.cli("place", "x", "--cast", "thumb", check=None).stdout.split()[1]
+        self.cli("wait", cid, check=2)
+        self.assertEqual(open(self.count).read(), "built\nbuilt\n")
 
     def test_prune_clears_failed_builds_and_a_killed_builds_checkout(self):
         write(os.path.join(self.project, ".administration", "build"), "#!/bin/sh\nexit 1\n", 0o755)
@@ -493,6 +712,37 @@ class BuildHook(Base):
         write(os.path.join(failed[0], "src", ".env"), "MAPS_KEY=x\n")  # as one killed outright leaves it
         self.cli("prune", "--older", "0h")
         self.assertFalse(os.path.exists(failed[0]))
+
+    def test_a_build_hook_that_isnt_executable_is_refused_not_passed_over(self):
+        os.chmod(os.path.join(self.project, ".administration", "build"), 0o644)
+        err = self.cli("place", "x", "--cast", "thumb", check=1).stderr
+        self.assertIn("isn't executable", err)
+
+    def test_ctrl_c_in_build_stops_the_hook(self):
+        pid = os.path.join(self.tmp, "hook.pid")
+        write(os.path.join(self.project, ".administration", "build"),
+              f'#!/bin/sh\necho $$ > {pid}.tmp && mv {pid}.tmp {pid}\nsleep 60\n', 0o755)
+        p = subprocess.Popen([binary(), "build"], cwd=self.project, env=self.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 20
+        while not os.path.exists(pid) and time.time() < deadline:
+            time.sleep(0.1)
+        hook = int(open(pid).read())
+        p.send_signal(signal.SIGINT)
+        _, err = p.communicate(timeout=30)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("interrupted", err)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(hook, 0)
+        # Nothing kept as the build's failure: the next one builds.
+        write(os.path.join(self.project, ".administration", "build"), self.BUILD, 0o755)
+        self.assertIn(self.head[:10] + ": ", self.cli("build").stdout)
+
+    def test_build_takes_no_option_for_a_ref(self):
+        for args in (["-q"], ["--", "--all"]):
+            p = self.cli("build", *args, check=None)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("isn't a commit here", p.stderr)
 
     def test_a_build_left_in_the_checkout_is_refused(self):
         write(os.path.join(self.project, ".administration", "build"), "#!/bin/sh\necho x > app.apk\necho \"$(pwd)/app.apk\"\n", 0o755)
@@ -540,8 +790,27 @@ class Restart(Base):
         os.remove(alive)
         write(restart, '#!/bin/sh\nexit 0\n', 0o755)
         text, lost = self.drive(drv, restart, 3)
-        self.assertIn("restarting it failed too: the screen still doesn't answer", text[3])
+        self.assertIn("restarting it failed too", text[3])
         self.assertIn("It's lost", text[3])
+        self.assertIn("restarting it failed too: the screen still doesn't answer", open(lost).read())
+
+    def test_a_failed_restarts_own_words_stay_the_persons(self):
+        # The hook's stderr (a trace with a token in it) goes to the record
+        # and the server's log, never to the professional; and it runs where
+        # the setup does, not in the desk.
+        drv = os.path.join(self.tmp, "driver")
+        write(drv, '#!/bin/sh\necho "device not found" >&2; exit 1\n', 0o755)
+        restart = os.path.join(self.tmp, "restart")
+        where = os.path.join(self.tmp, "restart-pwd")
+        write(restart, f'#!/bin/sh\npwd > "{where}"\necho "+ curl -H token=sk-hunter2" >&2\nexit 3\n', 0o755)
+        here = os.path.join(self.tmp, "hookdir")
+        os.makedirs(here)
+        self.env = {**self.env, "ADMINISTRATION_EQUIPMENT_RESTART_DIR": here}
+        text, lost = self.drive(drv, restart, 3)
+        self.assertIn("restarting it failed too", text[3])
+        self.assertNotIn("hunter2", text[3])
+        self.assertIn("hunter2", open(lost).read())
+        self.assertEqual(os.path.realpath(open(where).read().strip()), os.path.realpath(here))
 
     def test_restart_is_only_for_a_screen(self):
         write(os.path.join(self.project, ".administration", "roster.toml"), '''

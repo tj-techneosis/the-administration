@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -111,6 +112,10 @@ class Base(unittest.TestCase):
         self.project = os.path.join(self.home, "project")
         os.makedirs(self.project)
         write(os.path.join(self.tmp, "tools", "node_modules", "@playwright", "mcp", "cli.js"), "// stand-in\n")
+        # The machine's memory as the rooms see it: plenty, unless a test
+        # says otherwise, so the real machine's never paces the suite.
+        self.meminfo = os.path.join(self.tmp, "meminfo")
+        self.set_memory(48 << 20)
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.project, check=True)
         self.env = {
             "PATH": os.environ["PATH"], "HOME": self.home, "USER": "tester", "LANG": "C.UTF-8",
@@ -121,8 +126,15 @@ class Base(unittest.TestCase):
             "ADMINISTRATION_TOOLS": os.path.join(self.tmp, "tools"),
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+            "ADMINISTRATION_MEMINFO": self.meminfo,
         }
         self.addCleanup(self.cleanup)
+
+    def set_memory(self, available_kb, total_kb=64 << 20):
+        tmp = self.meminfo + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"MemTotal: {total_kb} kB\nMemFree: 1024 kB\nMemAvailable: {available_kb} kB\n")
+        os.replace(tmp, self.meminfo)
 
     def cleanup(self):
         # Close whatever a failed test left open, so no server outlives it.
@@ -162,6 +174,11 @@ class Base(unittest.TestCase):
         if check == 0:
             return p.stdout.split()[1]
         return p
+
+    def rooms_left(self):
+        """What's in the rooms folder, but the machine's pacing (.pacing:
+        the line for setups), which isn't any room's."""
+        return [e for e in os.listdir(self.rooms) if e != ".pacing"] if os.path.isdir(self.rooms) else []
 
     def status(self, cid):
         return json.loads(self.cli("status", cid, "--json").stdout)[0]
@@ -737,6 +754,20 @@ class Coins(Base):
         self.assertEqual(self.status(cid)["status"]["slow"]["state"], "closed")
         self.assertIn("the save button does nothing", open(path).read())
 
+    def test_two_closes_at_once_close_it_once(self):
+        got = os.path.join(self.tmp, "closed-events")
+        write(os.path.join(self.project, ".administration", "hooks", "closed"), f'#!/bin/sh\necho x >> "{got}"\n', 0o755)
+        self.hire_file("slow", kind="critic", fake="slow", coins="30m")
+        cid = self.place("x", "--cast", "slow")
+        self.wait_state(cid, "slow", {"working"})
+        run = lambda: subprocess.Popen([binary(), "close", cid], cwd=self.project, env=self.env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        a, b = run(), run()
+        outs = [p.communicate(timeout=60) for p in (a, b)]
+        self.assertEqual((a.returncode, b.returncode), (0, 0), outs)
+        self.assertEqual(outs[0][0], outs[1][0], "both print the summary's path")
+        self.assertEqual(open(got).read(), "x\n", "the closed hook heard it once")
+
 
 class Room(Base):
     def test_a_user_sees_the_screen_and_a_screen_reader_user_hears_the_page(self):
@@ -760,6 +791,11 @@ class Room(Base):
             self.assertEqual("the screen is all you have" in brief, screen, name)
             self.assertEqual("You use a screen reader" in brief, not screen, name)
             self.assertIn("browser_look" if screen else "person's-eye check", brief)
+            # Both behind the screen, with no desk too: a page's file picker
+            # is answered with the house's tool, never the server's own.
+            args = json.load(open(os.path.join(self.pdir(cid, name), "mcp.json")))["mcpServers"]["playwright"]["args"]
+            self.assertEqual(args[:2], ["_screen", "--files"] if screen else ["_screen", "--reader"], name)
+            self.assertIn("mcp__playwright__browser_choose_file", allowed, name)
         path = os.path.join(self.tmp, "p.md")
         write(path, professional("p", extra="  sees: braille"))
         self.assertIn("or screen-reader (a person using one)", self.cli("check", path, check=1).stdout)
@@ -791,7 +827,13 @@ for line in sys.stdin:
                 {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "browser_choose_file", "arguments": {"names": ["photo.jpg"]}}},
                 {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "browser_choose_file", "arguments": {"names": ["../secret.txt"]}}},
                 {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": [os.path.join(self.tmp, "secret.txt")], "x": 5, "y": 5}}},
-                {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "x": 5, "y": 6}}}]
+                {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "x": 5, "y": 6}}},
+                # The browser writes as the person: a file it saves is named, never pathed,
+                # and it goes only to web pages (file: never reaches the gate).
+                {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "browser_take_screenshot", "arguments": {"filename": os.path.join(self.tmp, "written.png")}}},
+                {"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "browser_take_screenshot", "arguments": {"filename": "page.png"}}},
+                {"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "browser_navigate", "arguments": {"url": "file:///etc/hostname"}}},
+                {"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "browser_navigate", "arguments": {"url": "view-source:file:///etc/hostname"}}}]
         desk = os.path.join(self.tmp, "room", "desk", "files")
         write(os.path.join(desk, "photo.jpg"), "a photo\n")
         write(os.path.join(self.tmp, "room", "desk-files.json"), '["photo.jpg"]')
@@ -821,6 +863,13 @@ for line in sys.stdin:
         drop = [c for c in sent if c["name"] == "browser_evaluate" and "DataTransfer" in c["arguments"]["function"]]
         self.assertEqual(len(drop), 1)
         self.assertIn('"name":"photo.jpg"', drop[0]["arguments"]["function"])
+        for i in (11, 13, 14):
+            self.assertTrue(out[i]["result"]["isError"], out[i])
+        self.assertIn("a plain file name", out[11]["result"]["content"][0]["text"])
+        self.assertIn("isn't a web page", out[13]["result"]["content"][0]["text"])
+        self.assertIn({"name": "browser_take_screenshot", "arguments": {"filename": "page.png"}}, sent)
+        self.assertEqual([c for c in sent if c["name"] == "browser_navigate"], [])
+        self.assertNotIn("written.png", open(calls).read())
 
     def test_a_screen_reader_user_gets_the_desk_too(self):
         # Every browser tool passes but the ones that read any path; the
@@ -832,7 +881,10 @@ for line in sys.stdin:
     m = json.loads(line)
     if "id" not in m: continue
     if m["method"] == "tools/list":
-        r = {{"tools": [{{"name": n}} for n in ("browser_snapshot", "browser_click", "browser_file_upload", "browser_drop", "browser_run_code_unsafe")]}}
+        r = {{"tools": [{{"name": n}} for n in ("browser_snapshot", "browser_click", "browser_file_upload", "browser_run_code_unsafe")]
+             + [{{"name": "browser_drop", "inputSchema": {{"type": "object", "required": ["target"], "properties":
+                 {{"element": {{"type": "string"}}, "target": {{"type": "string"}}, "paths": {{"type": "array"}}, "data": {{"type": "object"}},
+                   "filePath": {{"type": "string"}}}}}}}}]}}
     else:
         open({calls!r}, "a").write(json.dumps(m["params"]) + "\\n")
         r = {{"content": [{{"type": "text", "text": "done " + m["params"]["name"]}}]}}
@@ -844,7 +896,12 @@ for line in sys.stdin:
         reqs = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "browser_snapshot", "arguments": {}}},
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "browser_file_upload", "arguments": {"paths": ["/etc/hosts"]}}},
-                {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "element": "Drop area", "ref": "e12"}}}]
+                {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "element": "Drop area", "target": "e12"}}},
+                # A file-bearing argument a later server might add, or one it never had,
+                # goes no further: the files are the desk's.
+                {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "browser_drop_file", "arguments": {"names": ["photo.jpg"], "target": "e13", "filePath": "/etc/hosts", "extra": "x"}}},
+                {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "browser_navigate", "arguments": {"url": "file:///etc/hosts"}}},
+                {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "browser_snapshot", "arguments": {"filename": "../app/x.md"}}}]
         p = subprocess.run([binary(), "_screen", "--reader", "--files", desk, sys.executable, fake],
                            input="".join(json.dumps(r) + "\n" for r in reqs), capture_output=True, text=True, timeout=20)
         out = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
@@ -853,7 +910,16 @@ for line in sys.stdin:
         self.assertTrue(out[3]["result"]["isError"])
         sent = [json.loads(l) for l in open(calls)]
         self.assertNotIn("browser_file_upload", [c["name"] for c in sent])
-        self.assertIn({"name": "browser_drop", "arguments": {"element": "Drop area", "ref": "e12", "paths": [os.path.join(desk, "photo.jpg")]}}, sent)
+        self.assertIn({"name": "browser_drop", "arguments": {"element": "Drop area", "target": "e12", "paths": [os.path.join(desk, "photo.jpg")]}}, sent)
+        self.assertIn({"name": "browser_drop", "arguments": {"target": "e13", "paths": [os.path.join(desk, "photo.jpg")]}}, sent)
+        self.assertTrue(out[6]["result"]["isError"])
+        self.assertTrue(out[7]["result"]["isError"])
+        self.assertNotIn("/etc/hosts", open(calls).read())
+        # The drop is aimed as the server's own drop is (target, not ref),
+        # with the desk's names in place of paths the user never has.
+        [drop] = [t for t in out[1]["result"]["tools"] if t["name"] == "browser_drop_file"]
+        self.assertEqual(sorted(drop["inputSchema"]["properties"]), ["element", "names", "target"])
+        self.assertEqual(drop["inputSchema"]["required"], ["names", "target"])
 
     def test_a_user_works_in_a_walled_room(self):
         self.house()
@@ -902,6 +968,8 @@ for line in sys.stdin:
         settings = json.load(open(os.path.join(self.pdir(cid, "member"), "settings.json")))
         self.assertIn("Read(~/**)", settings["permissions"]["deny"])
         self.assertIn("Read(**/.npmrc)", settings["permissions"]["deny"])
+        self.assertIn("Read(//**/.npmrc)", settings["permissions"]["deny"])  # outside the working directory too
+        self.assertIn("Read(//**/.NPMRC)", settings["permissions"]["deny"])
         self.assertTrue(os.path.exists(os.path.join(room, "member.torn")))
         setup_env = open(os.path.join(room, "app", "setup-env")).read()
         self.assertNotIn("do-not-leak", setup_env)
@@ -1182,6 +1250,17 @@ for line in sys.stdin:
         self.assertEqual(out[3]["result"]["content"][0]["text"], "exit 0\nin the vm: a b ; rm -rf /\n")
         self.assertIn("no tool sh", out[4]["error"]["message"])
 
+    def test_two_programs_with_one_tool_name_are_refused(self):
+        # vm/run and gadget/run would both be run_run, and one out of reach.
+        self.equipment('''
+            [equipment.vm]
+            about = "A Linux VM; run the tool in it."
+            server = "commands"
+            commands = [".administration/equipment/vm/run", ".administration/equipment/gadget/run"]
+            ''', {**self.GADGET, ".administration/equipment/gadget/run": "#!/bin/sh\nexit 0\n"})
+        self.hire_file("linux-user", extra="  browser: false\n  uses: [vm]")
+        self.assertIn("would both be run_run", self.cli("place", "x", "--cast", "linux-user", check=1).stderr)
+
     DRIVER = """\
         #!/usr/bin/env python3
         # A pretend device: a 3000x200 screen, white until something is tapped.
@@ -1435,7 +1514,11 @@ for line in sys.stdin:
         self.assertNotIn("mcp__eq_window__browser_snapshot", allowed)
         self.assertNotIn("mcp__eq_window__browser_tabs", allowed)  # not declared
         srv, allowed = wired("listener")
-        self.assertNotEqual(srv["args"][0], "_screen")
+        # Read out, but behind the screen all the same: files named, never
+        # pathed, and only web pages.
+        self.assertEqual(srv["args"][:2], ["_screen", "--reader"])
+        self.assertEqual(srv["args"][-2:], ["--cdp-endpoint", "http://127.0.0.1:9"])
+        self.assertNotIn("--config", srv["args"])
         self.assertIn("mcp__eq_window__browser_snapshot", allowed)
 
     def test_a_screen_needs_a_driver_and_no_tools(self):
@@ -1495,6 +1578,27 @@ for line in sys.stdin:
         self.cli("wait", quiet)
         self.assertNotIn("before_url", self.status(quiet)["status"]["shopper"])
 
+    def test_a_release_check_on_a_subfolder_builds_its_before_app(self):
+        # A project in a subfolder of its repository (apps/web): the before
+        # checkout is the repository's, and the hook gets the subfolder.
+        mono = os.path.join(self.tmp, "mono")
+        self.project = os.path.join(mono, "apps", "web")
+        os.makedirs(self.project)
+        g = lambda *a: subprocess.run(["git", *a], cwd=mono, check=True, env=self.env, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        self.house()
+        self.hire_file("shopper", signs_in_as="member")
+        write(os.path.join(self.project, "a.txt"), "1\n"); g("add", "apps/web/a.txt"); g("commit", "-qm", "base")
+        g("checkout", "-qb", "change"); write(os.path.join(self.project, "a.txt"), "2\n"); g("commit", "-qam", "the change")
+        cid = self.place("these changes", "--cast", "shopper", "--changes", "--base", "main", "--project", self.project)
+        self.cli("wait", cid)
+        s = self.status(cid)["status"]["shopper"]
+        self.assertTrue(s.get("before_url"), s)
+        self.assertTrue(s["before_src"].endswith(os.path.join("before-src", "apps", "web")), s["before_src"])
+        senv = open(os.path.join(s["room"], "before", "setup-env")).read()
+        self.assertIn(f"ADMINISTRATION_MAIN={s['before_src']}", senv)
+        self.cli("close", cid)
+
     def test_room_check_builds_a_room_shows_it_and_clears_it(self):
         self.house()
         os.chmod(os.path.join(self.project, ".administration", "setup"), 0o644)  # as a session that can't chmod leaves it
@@ -1504,7 +1608,7 @@ for line in sys.stdin:
         self.assertIn("member (member@example.com)", out)
         self.assertNotIn("pw-member", out)  # never the passwords
         self.assertIn("Cleared away", out)
-        self.assertEqual(os.listdir(self.rooms) if os.path.isdir(self.rooms) else [], [])
+        self.assertEqual(self.rooms_left(), [])
         contracts = os.path.join(self.books, "contracts")
         self.assertEqual(os.listdir(contracts) if os.path.isdir(contracts) else [], [])  # nothing in the books
 
@@ -1524,7 +1628,7 @@ for line in sys.stdin:
         write(hook, SETUP.replace("set -e\n", 'set -e\n[ -f "$ADMINISTRATION_MAIN/makers.txt" ] || echo "no makers here yet"\n'), 0o755)
         out = self.cli("room-check", "--changes", "--base", "main").stdout
         self.assertIn("The before app came up too", out)
-        self.assertEqual(os.listdir(self.rooms) if os.path.isdir(self.rooms) else [], [])
+        self.assertEqual(self.rooms_left(), [])
         self.assertEqual(len(g("worktree", "list").stdout.strip().splitlines()), 1)
 
     def test_a_room_gets_the_ports_its_roster_names(self):
@@ -1585,6 +1689,46 @@ for line in sys.stdin:
         self.assertNotIn("pw-member", out)
         self.assertIn("type [password]", out)
 
+    def test_a_contract_keeps_its_desk_and_a_resume_gets_it(self):
+        self.house()
+        write(os.path.join(self.project, "photo.jpg"), "v1\n")
+        roster = os.path.join(self.project, ".administration", "roster.toml")
+        with open(roster, "a") as f:
+            f.write('[desk]\nfiles = ["photo.jpg"]\n')
+        self.hire_file("owner")
+        cid = self.place("x", "--cast", "owner")
+        self.cli("wait", cid)
+        self.assertEqual(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["desk"], {"files": ["photo.jpg"]})
+        # The roster and the file change; the resume has the desk it had.
+        write(os.path.join(self.project, "photo.jpg"), "v2\n")
+        write(os.path.join(self.project, "other.txt"), "new\n")
+        write(roster, open(roster).read().replace('["photo.jpg"]', '["photo.jpg", "other.txt"]'))
+        out = self.cli("resume", cid, "owner").stdout
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        room = self.status(new)["status"]["owner"]["room"]
+        self.assertEqual(open(os.path.join(room, "desk", "files", "photo.jpg")).read(), "v1\n")
+        self.assertEqual(json.load(open(os.path.join(room, "desk-files.json"))), ["photo.jpg"])
+        # A contract placed now has today's.
+        cid = self.place("x", "--cast", "owner")
+        self.cli("wait", cid)
+        room = self.status(cid)["status"]["owner"]["room"]
+        self.assertEqual(open(os.path.join(room, "desk", "files", "photo.jpg")).read(), "v2\n")
+        # The resume's kept desk pruned: resuming it says it takes the roster's now.
+        shutil.rmtree(os.path.join(self.books, "contracts", new, ".desk"))
+        r = self.cli("resume", new, "owner")
+        self.assertIn("own copy of its desk was pruned", r.stderr)
+        self.cli("wait", r.stdout.split("Contract ")[1].split()[0])
+
+    def test_a_contract_with_no_desk_keeps_none(self):
+        # Recorded as empty, so a desk the roster gets later isn't this
+        # contract's rooms' (none recorded is a contract from before).
+        self.house()
+        self.hire_file("owner")
+        cid = self.place("x", "--cast", "owner")
+        self.cli("wait", cid)
+        self.assertEqual(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["desk"], {})
+
     def test_users_get_the_projects_handout_and_can_read_only_their_desk(self):
         self.house()
         write(os.path.join(self.project, "rules", "house-rules.md"), "Every decision is a bordered button.\n")
@@ -1619,11 +1763,54 @@ for line in sys.stdin:
         roster = os.path.join(self.project, ".administration", "roster.toml")
         base = open(roster).read()
         write(os.path.join(self.project, ".env"), "SECRET=x\n")
-        for files, want in (('[".env"]', "looks like a secret"), ('["../outside.md"]', "a file inside the project")):
+        write(os.path.join(self.project, "big.md"), "x" * (300 << 10))
+        write(os.path.join(self.project, ".administration", "env", "config.json"), "{}\n")
+        write(os.path.join(self.project, "docs", ".ENV"), "SECRET=x\n")
+        write(os.path.join(self.tmp, "outside", "notes.md"), "private\n")
+        os.symlink(os.path.join(self.tmp, "outside"), os.path.join(self.project, "linked"))
+        for files, want in (('[".env"]', "looks like a secret"), ('["../outside.md"]', "a file inside the project"),
+                            ('["big.md"]', "the handout's text is over 256 KB"),
+                            # The house's env/, by either spelling; a secret in another case; a folder link out.
+                            ('[".administration/env/config.json"]', "the house's env/"), ('["env/config.json"]', "the house's env/"),
+                            ('["docs/.ENV"]', "looks like a secret"), ('["linked/notes.md"]', "through a link")):
             write(roster, base + f"[handout]\nfiles = {files}\n")
-            cid = self.place("x", "--cast", "owner")
-            self.cli("wait", cid, check=2)
-            self.assertIn(want, self.status(cid)["status"]["owner"]["reason"])
+            # Told at place, before any room is built.
+            p = self.place("x", "--cast", "owner", check=1)
+            self.assertIn(want, p.stderr)
+
+    def test_a_handout_has_room_for_pictures(self):
+        # The designs a page is held to: bigger than the text budget, and fine.
+        self.house()
+        self.hire_file("owner")
+        roster = os.path.join(self.project, ".administration", "roster.toml")
+        with open(os.path.join(self.project, "design.png"), "wb") as f:
+            f.write(b"\x89PNG" + b"x" * (3 << 20))
+        with open(roster, "a") as f:
+            f.write('[handout]\nfiles = ["design.png"]\n')
+        cid = self.place("x", "--cast", "owner")
+        self.cli("wait", cid)
+        desk = os.path.join(self.status(cid)["status"]["owner"]["room"], "desk", "handout")
+        self.assertEqual(os.path.getsize(os.path.join(desk, "design.png")), 4 + (3 << 20))
+        with open(os.path.join(self.project, "design2.png"), "wb") as f:
+            f.write(b"x" * (6 << 20))
+        write(roster, open(roster).read().replace('["design.png"]', '["design.png", "design2.png"]'))
+        self.assertIn("pictures are over 8 MB", self.place("x", "--cast", "owner", check=1).stderr)
+
+    def test_a_handouts_pictures_are_not_pasted_in_as_rules(self):
+        self.house()
+        self.hire_file("owner")
+        roster = os.path.join(self.project, ".administration", "roster.toml")
+        with open(os.path.join(self.project, "design.png"), "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\nPICTUREBYTES" + b"x" * 1000)
+        write(os.path.join(self.project, "rules.md"), "Every decision is a bordered button.\n")
+        with open(roster, "a") as f:
+            f.write('[handout]\nfiles = ["rules.md", "design.png"]\n')
+        cid = self.place("x", "--cast", "owner")
+        self.cli("wait", cid)
+        persona = open(os.path.join(self.books_of(cid, "owner"), "persona.md")).read()
+        self.assertIn("Every decision is a bordered button.", persona)
+        self.assertNotIn("PICTUREBYTES", persona)
+        self.assertIn("pictures are in ./handout/, to look at: design.png", persona)
 
     def test_users_without_a_handout_read_nothing(self):
         self.house()
@@ -1867,9 +2054,10 @@ else:
         self.house()
         self.hire_file("slow", fake="slow", coins="30m")
         self.hire_file("other", fake="slow", coins="30m")
-        cid = self.place("x", "--cast", "slow,other", env={"ADMINISTRATION_MAX_ROOMS": "2"})
-        p = self.place("y", "--cast", "slow", check=4, env={"ADMINISTRATION_MAX_ROOMS": "2"})
-        self.assertIn(f"2 of 2 rooms are in use (contract {cid}) and this contract needs 1: place it again once its users are back (administration wait {cid})", p.stderr)
+        cid = self.place("x", "--cast", "slow,other", env={"ADMINISTRATION_MAX_ROOMS": "2", "GIT_AUTHOR_NAME": "Sam"})
+        p = self.place("y", "--cast", "slow", "--no-queue", check=4, env={"ADMINISTRATION_MAX_ROOMS": "2"})
+        self.assertIn(f"2 of 2 rooms are in use (contract {cid}, placed by Sam) and this contract needs 1: place it again once its users are back (administration wait {cid})", p.stderr)
+        self.assertIn("by Sam", self.cli("status").stdout)
         self.place("y", "--cast", "slow", "--dry-run", env={"ADMINISTRATION_MAX_ROOMS": "2"}, check=0)  # a preview waits for nobody
         self.assertIn("Rooms: 2 of 2 in use, 0 free.", self.cli("status", env={"ADMINISTRATION_MAX_ROOMS": "2"}).stdout)
         # More users than rooms never fits, whatever closes: split it.
@@ -1909,6 +2097,8 @@ class Changes(Base):
         self.assertIn("- app.txt (+1 -0): 001-app.txt.patch", index)
         self.assertIn("new.txt (+1 -0)", index)
         self.assertNotIn(".env", index)
+        # Counted, never named: the critic knows something wasn't handed out.
+        self.assertIn("1 more changed file(s) aren't in the diff", index)
         self.assertIn("+two", open(os.path.join(handout, "changes", "001-app.txt.patch")).read())
         self.assertIn("INDEX.md there lists each changed file", self.call(cid, "reader")["prompt"])
         brief = self.call(cid, "reader")["prompt"]
@@ -1964,6 +2154,50 @@ class Changes(Base):
         self.assertIn(os.path.join(main, "professionals", "lane-critic.md"), out)
         self.assertTrue(os.path.exists(os.path.join(self.project, ".administration", "professionals", "lane-critic.md")))
         self.assertFalse(os.path.exists(os.path.join(wt, ".administration")))
+
+    def test_an_old_contract_on_a_removed_worktree_still_closes(self):
+        # Placed before contracts kept their house (0.4), on a worktree
+        # removed since, its worker gone: close tears the room down, and says
+        # the project's own teardown couldn't run.
+        self.house()
+        self.hire_file("slow", fake="slow", coins="30m")
+        wt = os.path.join(os.path.dirname(self.project), "lane")
+        subprocess.run(["git", "worktree", "add", "-q", wt, "-b", "lane"], cwd=self.project, check=True, env=self.env, capture_output=True)
+        cid = self.cli("place", "x", "--cast", "slow", "--project", wt, cwd=wt).stdout.split()[1]
+        for _ in range(100):
+            if self.status(cid)["status"]["slow"].get("room") and self.status(cid)["status"]["slow"]["state"] == "working":
+                break
+            time.sleep(0.1)
+        room = self.status(cid)["status"]["slow"]["room"]
+        path = os.path.join(self.books, "contracts", cid, "contract.json")
+        c = json.load(open(path))
+        c.pop("house", None)
+        json.dump(c, open(path, "w"))
+        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=self.project, check=True, env=self.env, capture_output=True)
+        # Its worker gone too (the machine restarted), so close tears down.
+        os.kill(self.status(cid)["status"]["slow"]["worker_pid"], signal.SIGKILL)
+        self.cli("close", cid)
+        s = self.status(cid)["status"]["slow"]
+        self.assertTrue(s["torn_down"])
+        self.assertIn("its teardown couldn't run", s["leftovers"])
+        self.assertIn("teardown couldn't run", self.cli("report", cid).stdout)
+
+    def test_a_house_gone_from_a_project_still_there_is_said_at_teardown(self):
+        # The project is there and its house isn't (moved, removed): its
+        # teardown can't run, and the books say so.
+        self.house()
+        self.hire_file("slow", fake="slow", coins="30m")
+        cid = self.place("x", "--cast", "slow")
+        for _ in range(100):
+            if self.status(cid)["status"]["slow"].get("room") and self.status(cid)["status"]["slow"]["state"] == "working":
+                break
+            time.sleep(0.1)
+        os.kill(self.status(cid)["status"]["slow"]["worker_pid"], signal.SIGKILL)
+        shutil.move(os.path.join(self.project, ".administration"), os.path.join(self.tmp, "moved-house"))
+        self.cli("close", cid)
+        s = self.status(cid)["status"]["slow"]
+        self.assertTrue(s["torn_down"])
+        self.assertIn("its teardown couldn't run: its house", s["leftovers"])
 
     def test_a_mark_in_any_case_counts_and_a_check_can_correct_it(self):
         self.hire_file("reader", kind="critic", fake="retag")
@@ -2160,6 +2394,16 @@ class Changes(Base):
         self.assertEqual(run({"a": [{"finding": 2, "verdict": "likely"}]}).returncode, 0)
         self.assertEqual([v["finding"] for v in json.load(open(os.path.join(self.pdir(cid, "a"), "verdicts.json")))], [1, 2])
 
+    def test_a_finding_the_room_caused_is_told_apart(self):
+        self.hire_file("a", kind="critic", fake="room")
+        cid = self.place("x", "--cast", "a")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.cli("verify", cid, env={"ADMINISTRATION_MATCH": "off"})
+        v = [x for x in json.load(open(os.path.join(self.pdir(cid, "a"), "verdicts.json"))) if x.get("room")]
+        self.assertEqual([x["verdict"] for x in v], ["false"])
+        self.assertIn("1 of the false ones were the test room's, not the app's", self.cli("report", cid).stdout)
+
     def test_verifiers_check_findings_in_the_house(self):
         for n in ("a", "b"):
             self.hire_file(n, kind="critic")
@@ -2280,8 +2524,18 @@ class Changes(Base):
     def test_no_changes_is_an_error(self):
         subprocess.run(["git", "checkout", "-q", "main"], cwd=self.project, check=True)
         os.remove(os.path.join(self.project, "new.txt"))
+        os.remove(os.path.join(self.project, ".env"))
         self.hire_file("reader", kind="critic")
         self.assertIn("nothing has changed", self.place("x", "--cast", "reader", "--changes", check=1).stderr)
+
+    def test_only_a_secret_changed_is_not_nothing(self):
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.project, check=True)
+        os.remove(os.path.join(self.project, "new.txt"))
+        self.hire_file("reader", kind="critic")
+        write(os.path.join(self.project, ".env"), "SECRET=hunter3\n")
+        err = self.place("x", "--cast", "reader", "--changes", check=1).stderr
+        self.assertIn("only files that look like secrets have changed (1)", err)
+        self.assertNotIn("hunter", err)
 
 
 class Books(Base):
@@ -2352,6 +2606,44 @@ class Books(Base):
         st = json.loads(self.cli("stats", "--json").stdout)
         self.assertEqual(st["contracts"], 3)  # two from the ledger, one still in the books
 
+    def test_prune_counts_and_lists_only_what_it_removes(self):
+        self.hire_file("r", kind="critic")
+        cid = self.place("x", "--cast", "r")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        dir = os.path.join(self.books, "contracts", cid)
+        write(os.path.join(dir, "reviewed"), "d1\n")
+        write(os.path.join(dir, ".match", "stream.jsonl"), "{}\n")
+        write(os.path.join(self.pdir(cid, "r"), "argv.json"), "{}\n")
+        dry = self.cli("prune", "--dry-run").stdout
+        for path in (os.path.join(dir, ".match"), os.path.join(self.pdir(cid, "r"), "stream.jsonl"),
+                     os.path.join(self.pdir(cid, "r"), "argv.json")):
+            self.assertIn(f"would remove {path}\n", dry)
+        self.assertTrue(os.path.exists(os.path.join(dir, ".match")), "a dry run removes nothing")
+        self.assertIn("Pruned: 1 contracts down", self.cli("prune").stdout)
+        self.assertFalse(os.path.exists(os.path.join(dir, ".match")))
+        self.assertFalse(os.path.exists(os.path.join(self.pdir(cid, "r"), "argv.json")))
+        self.assertTrue(os.path.exists(os.path.join(dir, "summary.md")))
+        self.assertIn("Pruned: 0 contracts down", self.cli("prune").stdout, "nothing was left to strip")
+        self.assertEqual(os.listdir(os.path.join(self.books, ".pruned")), [])
+
+    def test_prune_keeps_an_unreviewed_new_contract_whole_past_the_keep(self):
+        self.hire_file("r", kind="critic")
+        ids = []
+        for i in range(2):
+            cid = self.place(f"run {i}", "--cast", "r")
+            self.cli("wait", cid)
+            self.cli("close", cid)
+            ids.append(cid)
+        self.cli("prune", "--keep", "0")
+        self.assertEqual(self.glob_contracts(), sorted(ids), "neither is reviewed or old")
+        for cid in ids:
+            self.assertTrue(os.path.exists(os.path.join(self.pdir(cid, "r"), "stream.jsonl")))
+        write(os.path.join(self.books, "contracts", ids[0], "reviewed"), "d1\n")
+        self.cli("prune", "--keep", "0")
+        self.assertEqual(self.glob_contracts(), [ids[1]])
+        self.assertIn("--older", self.cli("prune", "--older", "-1d", check=1).stderr)
+
 
 class NeverWritesGit(Base):
     """The tool reads git (for --changes) and never writes to it: no commit,
@@ -2364,8 +2656,12 @@ class NeverWritesGit(Base):
         write(os.path.join(bindir, "git"), f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real}" "$@"\n', 0o755)
         g = lambda *a: subprocess.run([real, *a], cwd=self.project, check=True, env=self.env, capture_output=True)
         write(os.path.join(self.project, "a.txt"), "1\n")
+        # A clean filter the repo's own config names: reading the work never runs it.
+        write(os.path.join(self.project, ".gitattributes"), "*.txt filter=x\n")
         g("add", "."), g("commit", "-qm", "base")
+        ran = os.path.join(self.tmp, "filter-ran")
         g("checkout", "-qb", "f")
+        g("config", "filter.x.clean", f"touch '{ran}'; cat")
         write(os.path.join(self.project, "a.txt"), "2\n")
         self.house()
         self.hire_file("r", kind="critic")
@@ -2393,8 +2689,11 @@ class NeverWritesGit(Base):
                 continue
             if words[:2] == ["remote", "get-url"] or words == ["remote"]:  # a house kept on the machine; the remotes' names
                 continue
+            if words[:1] == ["config"] and "--get-regexp" in line:  # the filters' names, to empty them
+                continue
             self.assertIn(words[0], reads, f"git {line}")
         self.assertTrue(cloned)
+        self.assertFalse(os.path.exists(ran), "the repo's clean filter ran")
 
 
 class Hooks(Base):
@@ -2522,6 +2821,9 @@ class Sandboxed(Base):
         for cmds, why in (('["bash"]', "shells"), ('["python3"]', "shells"), ('["/usr/bin/curl"]', "shells"),
                           ('["/usr/bin/python3.12"]', "shells"), ('["busybox"]', "shells"), ('["bin/../../x"]', "no .."),
                           ('["/lib64/ld-linux-x86-64.so.2"]', "loader"), ('["wc -l"]', "one program"),
+                          # Case and a version's letters don't change what it is.
+                          ('["Bash"]', "shells"), ('["/usr/bin/PYTHON3.12m"]', "shells"), ('["mawk"]', "shells"),
+                          ('["magick"]', "shells"), ('["cmake"]', "shells"),
                           ('["a;b"]', "one program"), ('[]', "needs commands")):
             self.cli_equipment(cmds)
             self.assertIn(why, self.cli("place", "x", "--cast", "edge-caser", check=1).stderr, cmds)

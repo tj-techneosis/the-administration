@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"os/exec"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // A contract is a directory in the books: contract.json, and one directory
@@ -31,6 +34,9 @@ type contract struct {
 	House string `json:"house,omitempty"`
 	PlacedAt      time.Time  `json:"placed_at"`
 	PlacedBy      string     `json:"placed_by"`
+	// Its place in the line for rooms: when it was placed, to the
+	// nanosecond (pace.go).
+	Seq int64 `json:"seq,omitempty"`
 	Professionals []castItem `json:"professionals"`
 	ClosedAt      *time.Time `json:"closed_at,omitempty"`
 	Changes       *changes   `json:"changes,omitempty"`
@@ -61,6 +67,12 @@ type contract struct {
 	Work     string `json:"work,omitempty"`
 	Build    string `json:"build,omitempty"`
 	Checkout string `json:"checkout,omitempty"`
+	// The desk its rooms get, as it was placed (desk.go); its files are kept
+	// in the contract's .desk.
+	Desk *deskConfig `json:"desk,omitempty"`
+	// The commit critics and verifiers read: --build's when this checkout
+	// has it, else Commit (tested() says which).
+	Tested string `json:"tested,omitempty"`
 	// What place warned about the changes' base (a branch missing the
 	// local default branch's commits), kept for whoever triages later.
 	BaseWarnings []string `json:"base_warnings,omitempty"`
@@ -91,7 +103,14 @@ type castItem struct {
 // limit, report kept), closed (stopped by close), refused (the Rules turned
 // the room away), failed (the room or the harness broke).
 type status struct {
-	State      string     `json:"state"` // queued, setup, working, back, out, closed, refused, failed
+	State      string     `json:"state"` // queued, waiting, setup, working, back, out, closed, refused, failed
+	// Waiting for a room: it holds none yet (pace.go).
+	Queued bool `json:"queued,omitempty"`
+	// How long it waited for the machine (a room, the setup turn, memory),
+	// in seconds, and when its room was ready and it started work: its
+	// coins start then, not when it was placed.
+	WaitedSecs float64    `json:"waited_secs,omitempty"`
+	ReadyAt    *time.Time `json:"ready_at,omitempty"`
 	Reason     string     `json:"reason,omitempty"`
 	// How many times it was sent back after it said it was done.
 	SentBack int `json:"sent_back,omitempty"`
@@ -132,6 +151,10 @@ type status struct {
 	Builds        []roomBuild `json:"builds,omitempty"`
 	BuildArtifact string      `json:"build_artifact,omitempty"`
 	BuildCommit   string      `json:"build_commit,omitempty"`
+	// The build hook's build of the merge base, for the release check's
+	// before app: one per commit, shared by every room that needs it.
+	BeforeBuildArtifact string `json:"before_build_artifact,omitempty"`
+	BeforeBuildCommit   string `json:"before_build_commit,omitempty"`
 	// When its equipment was restarted after it stopped answering.
 	EquipmentRestarted string `json:"equipment_restarted,omitempty"`
 }
@@ -232,32 +255,74 @@ func readTag(dir, name string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// newID is a free contract id, its folder made in the books' contracts/.
 func newID(books string) (string, error) {
-	const digits = "abcdefghijklmnopqrstuvwxyz0123456789"
 	for range 50 {
-		id := make([]byte, 4)
-		for i := range id {
-			n, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
-			if err != nil {
-				return "", err
-			}
-			id[i] = digits[n.Int64()]
+		id, err := randomID()
+		if err != nil {
+			return "", err
 		}
-		if _, err := os.Stat(filepath.Join(books, "contracts", string(id))); errors.Is(err, os.ErrNotExist) {
-			return string(id), nil
+		// Made now, so two places at once can't draw the same id: only one
+		// Mkdir of it works.
+		if err := os.Mkdir(filepath.Join(books, "contracts", id), 0o700); err == nil {
+			return id, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
 		}
 	}
 	return "", errors.New("could not find a free contract id")
 }
 
+// randomID is four random letters and digits.
+func randomID() (string, error) {
+	const digits = "abcdefghijklmnopqrstuvwxyz0123456789"
+	id := make([]byte, 4)
+	for i := range id {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", err
+		}
+		id[i] = digits[n.Int64()]
+	}
+	return string(id), nil
+}
+
+// placedBy names who placed a contract: the person (ADMINISTRATION_PLACED_BY,
+// else the git author the environment sets, as on a machine shared by an
+// account several people work in), else the account, with the Claude
+// session when one placed it. Inside a hook git runs (it sets
+// GIT_INDEX_FILE there) the author is the commit's, who may be someone
+// else, so it isn't taken.
 func placedBy() string {
+	who := strings.TrimSpace(os.Getenv("ADMINISTRATION_PLACED_BY"))
+	if who == "" && os.Getenv("GIT_INDEX_FILE") == "" {
+		who = strings.TrimSpace(os.Getenv("GIT_AUTHOR_NAME"))
+	}
+	if who == "" {
+		who = "user"
+		if u := os.Getenv("USER"); u != "" {
+			who = "user:" + u
+		}
+	}
+	who = oneLine(who, 60)
 	if s := os.Getenv("CLAUDE_CODE_SESSION_ID"); s != "" {
-		return "claude:" + s[:min(8, len(s))]
+		return who + " (claude:" + s[:min(8, len(s))] + ")"
 	}
-	if u := os.Getenv("USER"); u != "" {
-		return "user:" + u
+	return who
+}
+
+// holderNames is the contracts holding rooms, each with who placed it:
+// "ab12, placed by Sam; cd34, placed by Alex".
+func holderNames(ids []string) string {
+	named := make([]string, len(ids))
+	for i, id := range ids {
+		named[i] = id
+		if c, _, err := loadContract(id); err == nil && c.PlacedBy != "" {
+			who, _, _ := strings.Cut(c.PlacedBy, " (claude:")
+			named[i] = fmt.Sprintf("%s, placed by %s", id, who)
+		}
 	}
-	return "user"
+	return strings.Join(named, "; ")
 }
 
 func maxRooms() int {
@@ -313,49 +378,6 @@ func sweepChecks() {
 	}
 }
 
-// liveRooms counts browser professionals still holding a room, across every
-// open contract: each room runs its own stack, and the machine has only so
-// much memory.
-func liveRooms() int {
-	n, _ := roomHolders()
-	return n
-}
-
-// roomHolders counts the rooms in use and names the open contracts that
-// hold them. A room is free once its professional is back and it's torn
-// down, before anyone closes the contract.
-func roomHolders() (int, []string) {
-	sweepChecks()
-	books, err := booksDir()
-	if err != nil {
-		return 0, nil
-	}
-	dirs, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
-	n := 0
-	var ids []string
-	for _, f := range dirs {
-		dir := filepath.Dir(f)
-		c, _, err := loadContract(filepath.Base(dir))
-		if err != nil || c.ClosedAt != nil {
-			continue
-		}
-		held := 0
-		for _, p := range c.Professionals {
-			if p.Kind == "user" {
-				s := readStatus(dir, p.Name)
-				if !s.terminal() || (s.Room != "" && !s.TornDown) {
-					held++
-				}
-			}
-		}
-		if held > 0 {
-			n += held
-			ids = append(ids, c.ID)
-		}
-	}
-	return n, ids
-}
-
 func cmdPlace(args []string) error {
 	return placeContract(args, "", nil)
 }
@@ -366,7 +388,7 @@ func cmdPlace(args []string) error {
 // from one never placed, and let go of a lock it needed only until then.
 func placeContract(args []string, resumes string, placed func(id string)) error {
 	f, err := parseFlags(args, map[string]bool{"cast": true, "with": true, "coins": true, "model": true, "project": true, "dry-run": false,
-		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true})
+		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false})
 	if err != nil {
 		return err
 	}
@@ -374,6 +396,15 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	if target == "" {
 		return usageError{"place needs a target: what the contract is on"}
 	}
+	// From before it takes a copy of the project until its contract.json
+	// names it and its workers are started, so prune can't remove the copy
+	// in between, and no longer: prune isn't refused while place waits for
+	// quick failures, opens the watch panes or runs the placed hooks.
+	unuse, err := useBooks()
+	if err != nil {
+		return err
+	}
+	defer unuse()
 	if strings.TrimSpace(f.get("cast")) == "" && strings.TrimSpace(f.get("with")) == "" {
 		return usageError{"place needs --cast a,b (from the roster) and/or --with FILE|RUN (one-off professionals, or a Director cast run)"}
 	}
@@ -391,6 +422,12 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	project, err := projectDir(f.get("project"))
 	if err != nil {
 		return err
+	}
+	// A house kept on this machine is found by the project's origin remote,
+	// which the repo's own config names: said, so a checkout that only
+	// claims to be the project is seen running the project's setup.
+	if h := houseOf(project); h.Where == "machine" && !f.has("dry-run") {
+		fmt.Fprintf(os.Stderr, "administration: the house kept on this machine for %s (by the project's origin remote): %s\n", h.Origin, h.Dir)
 	}
 	v, err := loadRoster(project)
 	if err != nil {
@@ -442,7 +479,9 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	if _, err := exec.LookPath(claudeBin()); err != nil {
 		return usageError{fmt.Sprintf("professionals run the standalone Claude Code CLI, and %q isn't on PATH. The VS Code extension doesn't provide it: install it (code.claude.com/docs/en/setup) or set ADMINISTRATION_CLAUDE", claudeBin())}
 	}
-	webUsers, needBrowser := 0, false
+	// deskUsers is the users with the desk's file tools (hasFileTools): the
+	// web browser's, and those whose equipment shows a window through it.
+	webUsers, deskUsers, needBrowser := 0, 0, false
 	for _, p := range cast {
 		if p.Kind == "critic" {
 			// A critic runs what it reads; it has no screen to look at.
@@ -459,6 +498,7 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 		if p.Kind != "user" {
 			continue
 		}
+		desk := p.Browser
 		if p.Browser {
 			webUsers++
 			needBrowser = true
@@ -472,9 +512,16 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 				return usageError{fmt.Sprintf("%s uses %s: %s", p.Name, u, why)}
 			}
 			needBrowser = needBrowser || eq.Server == "playwright"
+			desk = desk || eq.Server == "playwright"
+		}
+		if desk {
+			deskUsers++
 		}
 	}
 	if needBrowser {
+		if sandboxBlocked() {
+			fmt.Fprintln(os.Stderr, "administration: the browser users will likely fail: "+sandboxHint)
+		}
 		if _, err := exec.LookPath("node"); err != nil {
 			return usageError{"browser professionals need Node for the browser, and node isn't on PATH"}
 		}
@@ -489,61 +536,48 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 		if _, _, err := houseSetup(project, false); err != nil {
 			return usageError{"browser professionals need a room, and " + err.Error()}
 		}
-		// The desk is checked now, not when each user starts after its
-		// room is built.
+	}
+	// The desk is checked now, not when each user starts after its room is
+	// built; so is the handout, which every user gets.
+	if deskUsers > 0 {
 		if _, err := fillDesk(project, ""); err != nil {
 			return usageError{err.Error()}
 		}
 	}
-	// The books' lock is held until the workers are started, so two
-	// contracts placed at once can't both slip under the room limit, and no
-	// longer: the watch panes and the hooks after it can take a while.
-	release := func() {}
-	defer func() { release() }()
 	if users > 0 {
-		unlock, err := lockBooks()
-		if err != nil {
-			return err
-		}
-		release = func() { unlock(); release = func() {} }
-		// More users than there are rooms never fits: split it. Fewer, but
-		// the rooms are taken: it fits once another contract's users are
-		// back. A dry run places nothing, so it waits for nobody.
-		if users > maxRooms() {
-			return usageError{fmt.Sprintf("this contract needs %d rooms and there are %d (ADMINISTRATION_MAX_ROOMS): place its users in two contracts, or raise the limit.", users, maxRooms())}
-		}
-		if live, ids := roomHolders(); live+users > maxRooms() && !f.has("dry-run") {
-			wait := "once its users are back (administration wait " + ids[0] + ")"
-			if len(ids) > 1 {
-				wait = "once enough of their users are back (administration wait on each in turn: " + strings.Join(ids, ", ") + ")"
-			}
-			return busy{fmt.Sprintf("%d of %d rooms are in use (contract %s) and this contract needs %d: place it again %s, or with fewer users.",
-				live, maxRooms(), strings.Join(ids, ", "), users, wait)}
-		}
-		rooms, err := roomsDir()
-		if err != nil {
-			return err
-		}
-		// The browser keeps a socket under the room's tmp, and a socket path
-		// can't be long (Playwright refused one of 86 bytes). A room's tmp is
-		// the rooms folder plus "/<id>/rNN/tmp".
-		if len(rooms)+len("/xxxx/r99/tmp") > maxRoomTmp {
-			return usageError{fmt.Sprintf("the rooms folder's path (%s) is too long for the browser's socket; set ADMINISTRATION_ROOMS to a folder of at most %d characters", rooms, maxRoomTmp-len("/xxxx/r99/tmp"))}
+		if _, err := handoutFiles(project); err != nil {
+			return usageError{err.Error()}
 		}
 	}
-
-	books, err := booksDir()
-	if err != nil {
+	// The build under test, and the copy of the project as it is now that
+	// critics and verifiers read: made before the books' lock, which it
+	// would hold up for as long as a big project takes to copy. Shared by
+	// every contract on the same commit and work. Made now when a critic
+	// needs it, or when there's uncommitted work (which can't be had
+	// later); otherwise the commit is enough, and verify makes it if it
+	// runs.
+	held := &contract{Project: project, Key: projectKey(project), House: outsideHouse(project)}
+	if err := recordCommit(held, strings.TrimSpace(f.get("build"))); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(books, "contracts"), 0o700); err != nil {
-		return err
+	critics, rooms := false, false
+	for _, p := range cast {
+		critics = critics || p.Kind == "critic"
+		rooms = rooms || p.Kind == "user" || len(p.Uses) > 0
 	}
-	id, err := newID(books)
-	if err != nil {
-		return err
+	if held.Build != "" && held.Tested == "" && rooms && buildHook(held) != "" {
+		// The hook builds from this checkout, so every room would fail.
+		return usageError{fmt.Sprintf("--build %s: this checkout doesn't have that commit, and the house's build hook builds from this checkout; fetch it first (git fetch), or place it in a checkout that has it", held.Build)}
 	}
-	c := &contract{ID: id, Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
+	if v := os.Getenv("ADMINISTRATION_DEVICE_PORTS"); v != "" && rooms {
+		if bad := devicePortsBad(v); bad != "" {
+			return usageError{bad}
+		}
+	}
+	// What can refuse the contract cheaply is asked before the copy, which
+	// can take a while on a big project: a placement refused after it would
+	// pay for it each time it's tried again. The flags first, then the rooms.
+	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
 		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes}
 	for _, p := range cast {
 		ci := castItem{Name: p.Name, Kind: p.Kind, Source: p.Source, CoinsMin: p.CoinsMin, SignsInAs: p.SignsInAs, Sees: p.Sees,
@@ -595,14 +629,137 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	if f.has("base") && !f.has("changes") {
 		return usageError{"--base goes with --changes"}
 	}
-	if err := recordCommit(c, strings.TrimSpace(f.get("build"))); err != nil {
+	if buildHookUnrunnable(held) != "" && rooms {
+		return usageError{buildHookUnrunnable(held)}
+	}
+	// More users than there are rooms never fits: split it. Fewer, but the
+	// rooms are taken (or others are in line for them): it's queued, and
+	// its users take rooms by themselves, in turn, as they free (pace.go).
+	// --no-queue refuses it instead, as busy, for a script that would
+	// rather place it again later. A dry run places nothing, so it waits
+	// for nobody.
+	queued := ""
+	roomsTaken := func() error {
+		queued = ""
+		if users > maxRooms() {
+			return usageError{fmt.Sprintf("this contract needs %d rooms and there are %d (ADMINISTRATION_MAX_ROOMS): place its users in two contracts, or raise the limit.", users, maxRooms())}
+		}
+		held, waiting, ids := roomUse()
+		if held+waiting+users <= maxRooms() || f.has("dry-run") {
+			return nil
+		}
+		inUse := fmt.Sprintf("%d of %d rooms are in use", held, maxRooms())
+		if waiting > 0 {
+			inUse += fmt.Sprintf(" and %s for one", plural(waiting, "user is waiting", "users are waiting"))
+		}
+		if f.has("no-queue") {
+			wait := "once its users are back (administration wait " + ids[0] + ")"
+			if len(ids) > 1 {
+				wait = "once enough of their users are back (administration wait on each in turn: " + strings.Join(ids, ", ") + ")"
+			}
+			return busy{fmt.Sprintf("%s (contract %s) and this contract needs %d: place it again %s, or with fewer users.",
+				inUse, holderNames(ids), users, wait)}
+		}
+		queued = fmt.Sprintf("Queued, %d ahead: %s (contract %s). Its users take rooms by themselves, in turn, as they free; nothing needs placing again.",
+			len(ids), inUse, holderNames(ids))
+		return nil
+	}
+	if users > 0 {
+		if err := roomsTaken(); err != nil {
+			return err
+		}
+	}
+	if held.Build != "" && held.Tested == "" {
+		// Not refused (it can be someone else's), but a typo looks the same.
+		fmt.Fprintf(os.Stderr, "administration: --build %s: this checkout doesn't have that commit, so every room is held to it and critics and verifiers read HEAD (%s) instead; if it's a typo, close the contract and place it again\n", held.Build, short(held.Commit))
+	}
+	if sha := held.tested(); sha != "" && (critics || held.Work != "") && !f.has("dry-run") {
+		root, err := copyRoot(held, sha, held.Work)
+		if err != nil {
+			return err
+		}
+		if held.Checkout, err = makeCheckout(project, sha, held.Work, root); err != nil {
+			return err
+		}
+		// Taken now. Prune can't remove it while this holds the books' use
+		// lock, and an open contract's copy is kept after.
+		now := time.Now()
+		_ = os.Chtimes(root, now, now)
+	}
+
+	// The books' lock is held until the workers are started, so two
+	// contracts placed at once can't both slip under the room limit, and no
+	// longer: the watch panes and the hooks after it can take a while.
+	release := func() {}
+	defer func() { release() }()
+	if users > 0 {
+		unlock, err := lockBooks()
+		if err != nil {
+			return err
+		}
+		release = func() { unlock(); release = func() {} }
+		// Asked again under the lock: two placed at once can't both fit.
+		if err := roomsTaken(); err != nil {
+			return err
+		}
+		rooms, err := roomsDir()
+		if err != nil {
+			return err
+		}
+		// The browser keeps a socket under the room's tmp, and a socket path
+		// can't be long (Playwright refused one of 86 bytes). A room's tmp is
+		// the rooms folder plus "/<id>/rNN/tmp".
+		if len(rooms)+len("/xxxx/r99/tmp") > maxRoomTmp {
+			return usageError{fmt.Sprintf("the rooms folder's path (%s) is too long for the browser's socket; set ADMINISTRATION_ROOMS to a folder of at most %d characters", rooms, maxRoomTmp-len("/xxxx/r99/tmp"))}
+		}
+	}
+
+	books, err := booksDir()
+	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(books, "contracts"), 0o700); err != nil {
+		return err
+	}
+	id, err := newID(books)
+	if err != nil {
+		return err
+	}
+	c.ID = id
+	// Under the books' lock, with the rooms asked about: the line for rooms
+	// goes by this.
+	c.Seq = time.Now().UnixNano()
+	// newID made the contract's folder: it goes again if the contract
+	// isn't written.
+	written := false
+	defer func() {
+		if !written {
+			os.RemoveAll(filepath.Join(books, "contracts", id))
+		}
+	}()
+	c.Commit, c.Work, c.Build, c.Tested, c.Checkout = held.Commit, held.Work, held.Build, held.Tested, held.Checkout
 	dir := filepath.Join(books, "contracts", id)
 	if f.has("changes") {
-		if c.Changes, err = collectChanges(project, f.get("base"), filepath.Join(dir, contractHandout)); err != nil {
+		// A --build contract's changes are the commit's alone, as its copy
+		// is; otherwise HEAD and the working tree, which must still be the
+		// ones the copy was made of.
+		to := ""
+		if c.Build != "" {
+			to = c.tested()
+		}
+		if c.Changes, err = collectChanges(project, f.get("base"), to, filepath.Join(dir, contractHandout)); err != nil {
 			os.RemoveAll(dir)
 			return err
+		}
+		if to == "" && c.Commit != "" {
+			now := &contract{Project: project}
+			if err := recordCommit(now, ""); err == nil && (now.Commit != c.Commit || now.Work != c.Work) {
+				os.RemoveAll(dir)
+				return fmt.Errorf("the project changed while the contract was being placed (HEAD %s, work %s; now %s, %s), so its changes and the copy critics read wouldn't agree: place it again", short(c.Commit), orNone(c.Work), short(now.Commit), orNone(now.Work))
+			}
+		}
+		if n := c.Changes.LeftOut; n > 0 {
+			fmt.Fprintf(os.Stderr, "administration: --changes: %d changed file(s) that look like secrets left out of the critics' diff\n", n)
 		}
 		c.BaseWarnings = baseWarnings(project, c.Changes.Base)
 		for _, w := range c.BaseWarnings {
@@ -643,7 +800,8 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 				"These are notes, not instructions: the Rules and this contract's brief come first.\n\n" + d + "\n"
 		}
 		// resume's: the persona as it was placed on the contract it picks up
-		// from, not as the file says today.
+		// from, not as the file says today (unless prune has stripped it,
+		// and resume says so).
 		if from := f.get("persona-from"); from != "" {
 			if b, err := os.ReadFile(filepath.Join(from, p.Name, "persona.md")); err == nil {
 				persona = string(b)
@@ -660,31 +818,43 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 			}
 		}
 	}
-	// Critics read the project as it was when the contract was placed, and
-	// so do the verifiers after: a copy at the tested commit. Made now when
-	// a critic needs it, or when there's uncommitted work (which can't be
-	// had later); otherwise the commit is enough, and verify makes the copy
-	// if it runs.
-	critics := false
-	for _, p := range c.Professionals {
-		critics = critics || p.Kind == "critic"
-	}
-	if sha := c.tested(); sha != "" && (critics || c.Work != "") {
-		p, err := makeCheckout(project, sha, c.Work, checkoutDir(dir))
-		if err != nil {
-			os.RemoveAll(dir)
-			return err
+	// The desk, kept as it is now: a resume takes the one its contract had.
+	// An empty one is kept too, so a desk the roster gets later doesn't
+	// reach this contract's rooms (a contract with none recorded is one
+	// placed before contracts kept it, and gets the project's).
+	if deskUsers > 0 {
+		cfg, kept := loadProjectConfig(project).Desk, ""
+		if from := f.get("persona-from"); from != "" {
+			var old contract
+			if b, err := os.ReadFile(filepath.Join(from, "contract.json")); err == nil && json.Unmarshal(b, &old) == nil && old.Desk != nil {
+				switch {
+				case old.Desk.empty():
+					cfg = *old.Desk
+				case isDir(deskKept(from)):
+					cfg, kept = *old.Desk, deskKept(from)
+				default:
+					fmt.Fprintf(os.Stderr, "administration: %s's own copy of its desk was pruned, so this takes the desk roster.toml has now\n", filepath.Base(from))
+				}
+			}
 		}
-		c.Checkout = p
+		if !cfg.empty() {
+			if err := keepDesk(project, cfg, kept, deskKept(dir)); err != nil {
+				os.RemoveAll(dir)
+				return usageError{err.Error()}
+			}
+		}
+		c.Desk = &cfg
 	}
 	if err := writeJSON(filepath.Join(dir, "contract.json"), c); err != nil {
 		return err
 	}
+	written = true
 	if placed != nil {
 		placed(id)
 	}
 	startErr := startWorkers(c, dir)
 	release()
+	unuse()
 
 	names := make([]string, len(c.Professionals))
 	for i, p := range c.Professionals {
@@ -707,6 +877,9 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	working := startErr == nil
 	if working {
 		startErr, working = quickFailures(c, dir)
+	}
+	if queued != "" {
+		fmt.Println(queued)
 	}
 	if working {
 		fmt.Printf("Check in with: administration wait %s\n", id)
@@ -743,7 +916,7 @@ func quickFailures(c *contract, dir string) (err error, working bool) {
 				failed = append(failed, p.Name+": "+s.Reason)
 				names = append(names, p.Name)
 				refused = refused || s.State == "refused"
-			case "queued", "setup":
+			case "queued", "waiting", "setup":
 				pending, working = true, true
 			default:
 				working = working || !s.terminal()
@@ -907,9 +1080,24 @@ func cmdStatus(args []string) error {
 		if vw.ClosedAt != nil {
 			state = "closed"
 		}
-		fmt.Printf("Contract %s (%s), on %q, placed %s\n", vw.ID, state, vw.Target, vw.PlacedAt.Local().Format("Mon 15:04"))
+		by := ""
+		if vw.PlacedBy != "" {
+			by = " by " + vw.PlacedBy
+		}
+		fmt.Printf("Contract %s (%s), on %q, placed %s%s\n", vw.ID, state, vw.Target, vw.PlacedAt.Local().Format("Mon 15:04"), by)
 		if t := vw.testedLine(); t != "" {
 			fmt.Println("  " + t)
+		}
+		// A house whose every room builds the app for itself, and heavily:
+		// said while its contract is open, with what was measured.
+		if vw.ClosedAt == nil {
+			roomed := false
+			for _, p := range vw.Professionals {
+				roomed = roomed || p.Kind == "user" && !p.NoBrowser
+			}
+			if heavy := heavySetup(vw.contract); roomed && heavy != "" {
+				fmt.Println("  Worth a build hook: " + heavy + ".")
+			}
 		}
 		for _, p := range vw.Professionals {
 			s := vw.Status[p.Name]
@@ -925,10 +1113,16 @@ func cmdStatus(args []string) error {
 	return nil
 }
 
-// roomsLine says how many browser rooms are free for another contract.
+// roomsLine says how many browser rooms are free for another contract, and
+// how many users are in line for one.
 func roomsLine() string {
-	live, limit := liveRooms(), maxRooms()
-	return fmt.Sprintf("Rooms: %d of %d in use, %d free.", live, limit, max(0, limit-live))
+	live, waiting, _ := roomUse()
+	limit := maxRooms()
+	line := fmt.Sprintf("Rooms: %d of %d in use, %d free.", live, limit, max(0, limit-live))
+	if waiting > 0 {
+		line += fmt.Sprintf(" %s for one.", plural(waiting, "user is waiting", "users are waiting"))
+	}
+	return line
 }
 
 func describe(s status) string {
@@ -945,6 +1139,9 @@ func describe(s status) string {
 	if s.Reason != "" {
 		parts = append(parts, s.Reason)
 	}
+	if w := waitedFor(s); w != "" && s.State != "waiting" {
+		parts = append(parts, "waited "+w+" for the machine")
+	}
 	if s.EquipmentRestarted != "" {
 		parts = append(parts, "equipment restarted at "+s.EquipmentRestarted)
 	}
@@ -955,6 +1152,15 @@ func describe(s status) string {
 		parts = append(parts, p)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// waitedFor is how long a seat waited for the machine (a room, the setup
+// turn, memory), to the second, or "" for none worth saying.
+func waitedFor(s status) string {
+	if s.WaitedSecs < 1 {
+		return ""
+	}
+	return (time.Duration(s.WaitedSecs * float64(time.Second))).Round(time.Second).String()
 }
 
 func cmdWait(args []string) (int, error) {
@@ -1067,6 +1273,25 @@ func cmdClose(args []string) error {
 	if len(f.pos) != 1 {
 		return usageError{"close ID"}
 	}
+	// Until its links are matched: prune would take a contract closed
+	// from under the matcher.
+	unuse, err := useBooks()
+	if err != nil {
+		return err
+	}
+	defer unuse()
+	_, dir, err := loadContract(f.pos[0])
+	if err != nil {
+		return err
+	}
+	// One close at a time: a second waits for the first, then finds the
+	// contract closed and prints its summary, rather than stopping,
+	// tearing down and summing it up all over again.
+	unlock, err := lockFile(filepath.Join(dir, "close.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, dir, err := loadContract(f.pos[0])
 	if err != nil {
 		return err
@@ -1311,18 +1536,43 @@ func handoutRules(project string) string {
 	var b strings.Builder
 	b.WriteString("\n## The project's own rules\n\nThese are the project's rules, whole: work by them. A finding that breaks one is a finding, whatever it looks like; name the rule. Where your persona above and these rules disagree (a screen size, a device, a name for something), the rules are the project's current word: follow them, and say in your report that they disagreed.\n")
 	total := 0
+	var pictures, left []string
 	for _, f := range files {
-		abs := housePath(project, f)
-		st, err := os.Lstat(abs)
-		if err != nil || !st.Mode().IsRegular() || filepath.IsAbs(f) || !inProject(project, abs) || secret(filepath.Base(f)) {
+		// Held to the handout's rule, file by file: one that fails it is
+		// left out here, and place has said why.
+		abs, st, err := rosterFile(project, f)
+		if err != nil {
 			continue
 		}
-		body, err := os.ReadFile(abs)
-		if err != nil || total+len(body) > 400<<10 {
+		// A picture is the desk's (place holds it to its own budget), not
+		// text to paste in; nor is a file that isn't text, or one that
+		// would take the rules past what a persona carries.
+		if handoutImage[strings.ToLower(filepath.Ext(f))] {
+			pictures = append(pictures, filepath.Base(f))
+			continue
+		}
+		if total+int(st.Size()) > handoutLimit {
+			left = append(left, filepath.Base(f))
+			continue
+		}
+		in, _, err := openRegular(abs, st)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(in, handoutLimit+1))
+		in.Close()
+		if err != nil || total+len(body) > handoutLimit || !utf8.Valid(body) || bytes.IndexByte(body, 0) >= 0 {
+			left = append(left, filepath.Base(f))
 			continue
 		}
 		total += len(body)
 		fmt.Fprintf(&b, "\n### %s\n\n%s\n", filepath.Base(f), strings.TrimSpace(string(body)))
+	}
+	if len(pictures) > 0 {
+		fmt.Fprintf(&b, "\nThe rules' pictures are in ./handout/, to look at: %s.\n", strings.Join(pictures, ", "))
+	}
+	if len(left) > 0 {
+		fmt.Fprintf(&b, "\nThese are in ./handout/ too, but not here, as they aren't text or there's too much: %s.\n", strings.Join(left, ", "))
 	}
 	return b.String()
 }
