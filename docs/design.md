@@ -786,6 +786,17 @@ changes" into CLI calls, and checks findings against the code afterwards.
 
 ## Usage data
 
+A project's ledger (`books/ledgers/<project>.jsonl`, a line per seat as its
+contract is pruned) outlives the books, so each line keeps what a later look
+at the machine needs: `started_at`, `ready_at` and `finished_at` (UTC),
+`waited_secs`, a user's `setup_secs` (room up, less its wait) and `room`
+(`own`, `shared`, `handed on`), and the contract's `data`, `rooms` and
+`version` (the Administration it was placed with, also in its
+`contract.json`). `room-check` and `equipment-check` are keyed and housed
+as the project's contracts are, so their setups are measured with theirs:
+a worktree's check isn't a house of its own, and doesn't go alone to be
+measured again.
+
 Every professional's `status.json`, every ledger line and every Director
 run's `run.json` keep what claude reports at the end of a session: `turns`,
 `tokens_in`, `tokens_out` and `cost_usd` (Claude Code's estimate at list

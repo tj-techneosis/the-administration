@@ -78,7 +78,10 @@ func cmdRoomCheck(args []string) error {
 	if bad := badPorts(project); len(bad) > 0 {
 		portWarning(bad)
 	}
-	c := &contract{ID: id, Target: "room check", Project: project, PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Data: data,
+	// Keyed and housed as a contract on the project is, so its setup is
+	// measured with theirs (a worktree's check isn't a house of its own).
+	c := &contract{ID: id, Target: "room check", Project: project, Key: projectKey(project), House: outsideHouse(project),
+		PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Data: data, Version: version,
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house"}}}
 	ci := &c.Professionals[0]
 	if f.has("changes") {

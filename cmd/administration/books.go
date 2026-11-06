@@ -260,6 +260,20 @@ type ledgerLine struct {
 	Dossier   int      `json:"dossier_bytes,omitempty"`
 	// How long it waited for the machine before its coins started.
 	WaitedSecs float64 `json:"waited_secs,omitempty"`
+	// When it started, its room was up and it finished (UTC), and for a
+	// user how long its room took to set up once its wait was over and
+	// where the room came from (own, shared, handed on): so the ledger,
+	// which outlives prune, can line runs up against the machine's history.
+	StartedAt  string  `json:"started_at,omitempty"`
+	ReadyAt    string  `json:"ready_at,omitempty"`
+	FinishedAt string  `json:"finished_at,omitempty"`
+	SetupSecs  float64 `json:"setup_secs,omitempty"`
+	Room       string  `json:"room,omitempty"`
+	// The contract's: its data set, room plan, and the Administration it was
+	// placed with.
+	Data    string `json:"data,omitempty"`
+	Rooms   string `json:"rooms,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -275,6 +289,27 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 		l.Minutes = s.FinishedAt.Sub(*s.StartedAt).Minutes()
 	}
 	l.WaitedSecs = s.WaitedSecs
+	stamp := func(t *time.Time) string {
+		if t == nil {
+			return ""
+		}
+		return t.UTC().Format(time.RFC3339)
+	}
+	l.StartedAt, l.ReadyAt, l.FinishedAt = stamp(s.StartedAt), stamp(s.ReadyAt), stamp(s.FinishedAt)
+	if p.Kind == "user" {
+		if s.StartedAt != nil && s.ReadyAt != nil {
+			l.SetupSecs = math.Max(0, math.Round(s.ReadyAt.Sub(*s.StartedAt).Seconds()-s.WaitedSecs))
+		}
+		switch {
+		case s.SharedWith != "":
+			l.Room = "shared"
+		case s.HandedFrom != "":
+			l.Room = "handed on"
+		case s.Room != "":
+			l.Room = "own"
+		}
+	}
+	l.Data, l.Rooms, l.Version = c.Data, c.Rooms, c.Version
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true

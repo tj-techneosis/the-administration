@@ -516,5 +516,45 @@ class Sharing(Base):
         self.cli("close", cid)
 
 
+
+class Ledger(Base):
+    """What the books keep after prune: every seat's times, so runs can be
+    lined up against the machine's history long after their books go."""
+
+    def test_a_pruned_seat_keeps_its_times_room_and_version(self):
+        self.house()
+        self.hire_file("u")
+        self.hire_file("r", kind="critic")
+        ids = []
+        for i in range(2):
+            cid = self.place(f"run {i}", "--cast", "u,r", "--rooms", "u")
+            self.cli("wait", cid)
+            self.cli("close", cid)
+            ids.append(cid)
+            time.sleep(1.1)
+        self.cli("prune", "--keep", "1", "--older", "0s")
+        import glob
+        lines = [json.loads(l) for f in glob.glob(os.path.join(self.books, "ledgers", "*.jsonl")) for l in open(f)]
+        u = [l for l in lines if l["contract"] == ids[0] and l["name"] == "u"][0]
+        r = [l for l in lines if l["contract"] == ids[0] and l["name"] == "r"][0]
+        for k in ("started_at", "ready_at", "finished_at"):
+            self.assertRegex(u[k], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", (k, u))
+        self.assertGreaterEqual(u["setup_secs"], 0)
+        self.assertEqual(u["room"], "own")
+        self.assertEqual(u["rooms"], "u")
+        self.assertTrue(u["version"])
+        self.assertNotIn("room", r)  # a critic has no room
+        self.assertIn("finished_at", r)
+
+    def test_a_room_check_is_measured_with_its_projects_contracts(self):
+        self.house()
+        with open(os.path.join(self.project, ".administration", "roster.toml"), "a") as f:
+            f.write('\n[project]\nname = "shop"\n')
+        self.cli("room-check")
+        import glob
+        files = sorted(os.path.basename(f) for f in glob.glob(os.path.join(self.books, "ledgers", "*.rooms.json")))
+        self.assertEqual(files, ["shop.rooms.json"])
+
+
 if __name__ == "__main__":
     unittest.main()

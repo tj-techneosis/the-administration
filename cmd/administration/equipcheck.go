@@ -65,7 +65,9 @@ func cmdEquipmentCheck(args []string) error {
 	// Killed outright, it can't clean up; this says it's still running, and
 	// sweepChecks clears it once it isn't.
 	writeCheckPid(dir)
-	c := &contract{ID: id, Target: "equipment check", Project: project, PlacedAt: time.Now().UTC(), PlacedBy: placedBy(),
+	// Keyed and housed as a contract on the project is (roomcheck.go).
+	c := &contract{ID: id, Target: "equipment check", Project: project, Key: projectKey(project), House: outsideHouse(project),
+		PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Version: version,
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house", Uses: []string{eqName}, NoBrowser: !eq.NeedsApp}}}
 	ci := &c.Professionals[0]
 	// Held to the project's HEAD, as a contract placed now would be.

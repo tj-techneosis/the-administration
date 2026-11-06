@@ -53,6 +53,9 @@ type contract struct {
 	// The room plan (roomplan.go): which users share a room at once, which
 	// take one in turns, as place --rooms gave it.
 	Rooms string `json:"rooms,omitempty"`
+	// The Administration it was placed with ("v0.7.1"; "dev" for a build
+	// that isn't a release).
+	Version string `json:"version,omitempty"`
 	// The project's data set the rooms start from ([data] in roster.toml);
 	// empty is the setup hook's default.
 	Data string `json:"data,omitempty"`
@@ -595,7 +598,7 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// can take a while on a big project: a placement refused after it would
 	// pay for it each time it's tried again. The flags first, then the rooms.
 	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
-		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes}
+		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version}
 	for _, p := range cast {
 		ci := castItem{Name: p.Name, Kind: p.Kind, Source: p.Source, CoinsMin: p.CoinsMin, SignsInAs: p.SignsInAs, Sees: p.Sees,
 			Model: p.Model, Uses: p.Uses, NoBrowser: p.Kind == "user" && !p.Browser,

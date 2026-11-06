@@ -583,7 +583,12 @@ pick a room count:
 The books grow: a phone user's stream can pass 10MB in ten minutes.
 `administration prune` strips reviewed or old contracts to their summaries
 (`--keep 10`, `--older 30d`), and past `--keep` (the last to close are
-kept) to a line each in the project's ledger, so the stats outlive them. A
+kept) to a line each in the project's ledger, so the stats outlive them.
+Each line keeps the seat's times (started, room up, finished, in UTC), how
+long it waited and how long its room took to set up, where the room came
+from (its own, shared, handed on), the contract's data set and room plan,
+and the Administration it ran on: enough to line old runs up against the
+machine's history. A
 contract nobody has reviewed is kept whole until it's older than
 `--older`. Prune is refused (exit 4) while a place, close, verify,
 verdicts or resume is running, and leaves alone a build a room is
