@@ -85,6 +85,9 @@ func cmdRoomCheck(args []string) error {
 		if c.Changes, err = collectChanges(project, f.get("base"), "", filepath.Join(dir, contractHandout)); err != nil {
 			return err
 		}
+		// It builds the before app too, as a release check does: its turn
+		// covers both, and a before never measured goes alone with it.
+		c.Before = c.Changes != nil && c.Changes.MergeBase != ""
 	}
 	if err := writeJSON(filepath.Join(dir, "contract.json"), c); err != nil {
 		return err
@@ -100,6 +103,7 @@ func cmdRoomCheck(args []string) error {
 	// It sets up in turn with every other room on the machine, and says so
 	// while it waits; the wait isn't the setup's time.
 	paceSay = func(why string) { fmt.Printf("  %s\n", why) }
+	paceFirst = true
 	defer endSetupTurn()
 	t0 := time.Now()
 	m, berr := buildRoom(ctx, c, ci, pd, &s, save)

@@ -609,6 +609,8 @@ func checkDirectorOut(project, job, out string) []string {
 	}
 	cands, _ := filepath.Glob(filepath.Join(out, "candidates", "*.md"))
 	users := 0
+	// The cast as place will see it, for the rooms: line.
+	var castItems []castItem
 	for _, c := range cands {
 		b, _ := os.ReadFile(c)
 		if q := quoteColonItems(b); !bytes.Equal(q, b) {
@@ -626,6 +628,7 @@ func checkDirectorOut(project, job, out string) []string {
 		if nameOK != nil && !nameOK.MatchString(p.Name) {
 			problems = append(problems, fmt.Sprintf("candidates/%s: doesn't follow the house pattern %s", filepath.Base(c), pattern))
 		}
+		castItems = append(castItems, castItem{Name: p.Name, Kind: p.Kind, Uses: p.Uses, NoBrowser: p.Kind == "user" && !p.Browser})
 		if p.Kind == "user" {
 			users++
 			// A user at a screen has no page script to run: a recipe that
@@ -655,13 +658,27 @@ func checkDirectorOut(project, job, out string) []string {
 					if p.Kind == "user" && !named[p.Name] && regexp.MustCompile(`(^|[^a-z0-9-])`+regexp.QuoteMeta(p.Name)+`($|[^a-z0-9-])`).MatchString(l) {
 						named[p.Name] = true
 						users++
+						castItems = append(castItems, castItem{Name: p.Name, Kind: p.Kind, Uses: p.Uses, NoBrowser: !p.Browser})
 					}
 				}
 			}
 		}
 	}
-	if job == "cast" && users > maxRooms() {
-		problems = append(problems, fmt.Sprintf("the cast has %d users and a contract can have %d (the room limit, ADMINISTRATION_MAX_ROOMS): cast fewer, or say how to split it", users, maxRooms()))
+	// The rooms it needs: a room its rooms: line puts several in counts once.
+	need := users
+	if b, err := os.ReadFile(filepath.Join(out, "cast.md")); err == nil && job == "cast" {
+		if m := roomPlanLine.FindStringSubmatch(string(b)); m != nil {
+			if plan, err := parseRooms(m[1]); err == nil {
+				if _, err := checkRooms(plan, castItems, true); err != nil {
+					problems = append(problems, "cast.md: rooms: "+strings.TrimPrefix(err.Error(), "--rooms: ")+" (name only browser users of this cast, as their files are named)")
+				} else {
+					need = planRooms(plan, users)
+				}
+			}
+		}
+	}
+	if job == "cast" && need > maxRooms() {
+		problems = append(problems, fmt.Sprintf("the cast needs %d rooms and a contract can have %d (the room limit, ADMINISTRATION_MAX_ROOMS): put more of its users together or in turns on the rooms: line, cast fewer, or say how to split it", need, maxRooms()))
 	}
 	if b, err := os.ReadFile(filepath.Join(out, "roster.toml")); err == nil {
 		var cfg projectConfig
@@ -717,6 +734,11 @@ func checkDirectorOut(project, job, out string) []string {
 		if m := dataLine.FindStringSubmatch(string(b)); m != nil {
 			if _, ok := loadProjectConfig(project).Data[m[1]]; !ok {
 				problems = append(problems, fmt.Sprintf("cast.md: data: %s isn't one of the project's data sets", m[1]))
+			}
+		}
+		if m := roomPlanLine.FindStringSubmatch(string(b)); m != nil {
+			if _, err := parseRooms(m[1]); err != nil {
+				problems = append(problems, "cast.md: rooms: "+strings.TrimPrefix(err.Error(), "--rooms: "))
 			}
 		}
 	}

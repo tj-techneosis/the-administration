@@ -38,6 +38,13 @@ type verdict struct {
 	// A false finding the test room caused, not the app (a seed that
 	// didn't load, a setup that half ran, the wall blocking a font).
 	Room bool `json:"room,omitempty"`
+	// Another finding of this contract ("name #N") a check found to be the
+	// same bug, worded otherwise: the summary folds this one there
+	// (verify.go, Checking as they come back).
+	SameAs string `json:"same_as,omitempty"`
+	// The verdict was taken from that finding with the fold, not checked
+	// on its own: parted, it goes with it.
+	FromFold bool `json:"from_fold,omitempty"`
 	// Why a verifier decided a link the way it did; it goes with the link.
 	linkWhy string
 }
@@ -114,7 +121,7 @@ func cmdVerdicts(args []string) error {
 		n := readStatus(dir, name).Findings
 		for i := range vs {
 			// The session's own: whatever a copy of the books says.
-			vs[i].By = ""
+			vs[i].By, vs[i].FromFold = "", false
 		}
 		for _, v := range vs {
 			if v.Verdict != "confirmed" && v.Verdict != "likely" && v.Verdict != "false" {
@@ -128,6 +135,18 @@ func cmdVerdicts(args []string) error {
 			}
 			if v.Finding < 1 || v.Finding > n {
 				return usageError{fmt.Sprintf("%s has %d findings; there's no finding %d", name, n, v.Finding)}
+			}
+			// same_as folds it into another of this contract's findings, the
+			// same bug worded otherwise; "-" parts it from the one it was
+			// folded into.
+			if v.SameAs != "" && v.SameAs != "-" {
+				m := ownRef.FindStringSubmatch(v.SameAs)
+				if m == nil || !on[m[1]] {
+					return usageError{fmt.Sprintf("%s finding %d: same_as is another finding of this contract, as \"name #N\" (or \"-\" to part it)", name, v.Finding)}
+				}
+				if v.SameAs == fmt.Sprintf("%s #%d", name, v.Finding) {
+					return usageError{fmt.Sprintf("%s finding %d: same_as names itself", name, v.Finding)}
+				}
 			}
 			for _, ref := range append(append([]string{}, v.Also...), v.NotAlso...) {
 				if m := otherRef.FindStringSubmatch(ref); m != nil && m[1] == c.ID {
@@ -163,6 +182,14 @@ func cmdVerdicts(args []string) error {
 			// is kept for a later check that isn't false.
 			if o, ok := byN[v.Finding]; ok && v.Tag == "" {
 				v.Tag = o.Tag
+			}
+			// A fold a check made (same_as) stays under the session's own
+			// verdict, unless it gives another, or "-" to part it.
+			if o, ok := byN[v.Finding]; ok && v.SameAs == "" {
+				v.SameAs = o.SameAs
+			}
+			if v.SameAs == "-" {
+				v.SameAs = ""
 			}
 			byN[v.Finding] = v
 		}

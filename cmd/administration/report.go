@@ -592,9 +592,16 @@ func writeSummary(c *contract, dir string) (string, error) {
 	fmt.Fprintf(&b, "# Contract %s: %s\n\n", c.ID, c.Target)
 	fmt.Fprintf(&b, "Placed %s by %s, in %s.\n\n", c.PlacedAt.Local().Format(time.DateTime), c.PlacedBy, c.Project)
 	b.WriteString(provenanceNote(c, dir))
+	if p := c.plan(); len(p) > 0 {
+		fmt.Fprintf(&b, "Room plan: %s; anyone else in a room of their own.\n\n", p.Said())
+	}
 	// What each seat waited for the machine (a room, the setup turn,
-	// memory) before its coins started.
-	fmt.Fprintf(&b, "| professional | kind | outcome | findings | unreached | waited |\n|---|---|---|---|---|---|\n")
+	// memory) before its coins started, what the checks made of its
+	// findings so far, and where its room came from.
+	all, folded := gatherFindings(c, dir)
+	verdicts := seatVerdicts(c, dir, all)
+	fmt.Fprintf(&b, "Checked is each one's findings confirmed / likely / false, as the checks have them so far; room is where a user's room came from.\n\n")
+	fmt.Fprintf(&b, "| professional | kind | outcome | findings | unreached | waited | checked | room |\n|---|---|---|---|---|---|---|---|\n")
 	total, failed, failedF := 0, 0, 0
 	for _, p := range c.Professionals {
 		s := readStatus(dir, p.Name)
@@ -621,14 +628,17 @@ func writeSummary(c *contract, dir string) (string, error) {
 		if waited == "" {
 			waited = "-"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %s |\n", p.Name, p.Kind, strings.ReplaceAll(outcome, "|", "/"), s.Findings, s.Unreached, waited)
+		checkedBy := "-"
+		if v := verdicts[p.Name]; v != [3]int{} {
+			checkedBy = fmt.Sprintf("%d / %d / %d", v[0], v[1], v[2])
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %s | %s | %s |\n", p.Name, p.Kind, strings.ReplaceAll(outcome, "|", "/"), s.Findings, s.Unreached, waited, checkedBy, roomFrom(p, s))
 		total += s.Findings
 		if s.State == "failed" {
 			failed++
 			failedF += s.Findings
 		}
 	}
-	all, folded := gatherFindings(c, dir)
 	checked := map[string]int{}
 	for _, f := range all {
 		if f.verdict != "" {
@@ -923,6 +933,120 @@ type summed struct {
 	dissent   []string // other checks of it that disagree
 	links     []link   // the same bug in another contract
 	shared    []string // the shared servers behind it, when everyone who saw it was on one
+	// The finders a check judged the same bug worded otherwise, folded in
+	// (same_as), each as "b #3".
+	judged []string
+}
+
+// foldSameAs folds each finding a check judged the same bug as another
+// (same_as), worded too differently for the words to fold it, into that
+// one: by, verdicts and dissent, as a fold by words does. Chains (c the
+// same as b, b as a) end in one.
+func foldSameAs(all []*summed, sameAs map[string]string, folded map[string][]string) []*summed {
+	if len(sameAs) == 0 {
+		return all
+	}
+	bare := func(ref string) string { return strings.TrimSuffix(ref, ", failed") }
+	for changed := true; changed; {
+		changed = false
+		home := map[string]*summed{}
+		for _, f := range all {
+			for _, r := range f.by {
+				home[bare(r)] = f
+			}
+		}
+		for i, f := range all {
+			var into *summed
+			for _, r := range f.by {
+				if g := home[sameAs[bare(r)]]; g != nil && g != f {
+					into = g
+					break
+				}
+			}
+			if into == nil {
+				continue
+			}
+			for _, r := range f.by {
+				name, num, _ := strings.Cut(bare(r), " #")
+				folded[name] = append(folded[name], fmt.Sprintf("- #%s: %s", num, f.text))
+			}
+			into.by = append(into.by, f.by...)
+			into.judged = append(into.judged, f.by...)
+			into.judged = append(into.judged, f.judged...)
+			into.dissent = append(into.dissent, f.dissent...)
+			switch {
+			case f.verdict == "":
+			case f.verdict == into.verdict:
+				into.room = into.room && f.room
+			case into.verdict == "":
+				into.verdict, into.why, into.whose, into.checker = f.verdict, f.why, f.whose, f.checker
+				into.room = f.room
+			case verdictRank(f.verdict) < verdictRank(into.verdict):
+				into.dissent = append(into.dissent, dissentText(into.whose, into.verdict, into.why))
+				into.verdict, into.why, into.whose, into.checker = f.verdict, f.why, f.whose, f.checker
+				into.room = f.room
+			default:
+				into.dissent = append(into.dissent, dissentText(f.whose, f.verdict, f.why))
+			}
+			all = append(all[:i:i], all[i+1:]...)
+			changed = true
+			break
+		}
+	}
+	return all
+}
+
+// seatVerdicts is each professional's findings as the checks have them so
+// far: confirmed, likely, false, each finding once. A finder's own check of
+// it counts first, as stats counts it; one folded into another's checked
+// finding, with no check of its own, takes that one's.
+func seatVerdicts(c *contract, dir string, all []*summed) map[string][3]int {
+	own := map[string]verdict{}
+	for _, p := range c.Professionals {
+		var vl []verdict
+		if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vl) == nil {
+			for _, v := range vl {
+				if v.Verdict != "" && !v.FromFold {
+					own[fmt.Sprintf("%s #%d", p.Name, v.Finding)] = v
+				}
+			}
+		}
+	}
+	idx := map[string]int{"confirmed": 0, "likely": 1, "false": 2}
+	out := map[string][3]int{}
+	for _, f := range all {
+		for _, by := range f.by {
+			ref := strings.TrimSuffix(by, ", failed")
+			name, _, _ := strings.Cut(ref, " #")
+			verdict := f.verdict
+			if v, ok := own[ref]; ok {
+				verdict = v.Verdict
+			}
+			if k, ok := idx[verdict]; ok && name != "" {
+				v := out[name]
+				v[k]++
+				out[name] = v
+			}
+		}
+	}
+	return out
+}
+
+// roomFrom says where a seat's room came from: set up for it, handed on
+// to it from another's, or shared in another's (handon.go, share.go).
+func roomFrom(p castItem, s status) string {
+	switch {
+	case s.SharedWith != "":
+		return "shared " + s.SharedWith + "'s"
+	case s.HandedFrom != "":
+		return s.HandedFrom + "'s, put back"
+	case p.Kind == "user" && s.Room != "":
+		if s.SharedOn != "" || s.Hosted != "" {
+			return "its own, shared"
+		}
+		return "its own"
+	}
+	return "-"
 }
 
 // roomFalse counts the false findings a check put down to the test room:
@@ -955,6 +1079,7 @@ func dissentText(ref, verdict, why string) string {
 func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 	var all []*summed
 	folded := map[string][]string{}
+	sameAs := map[string]string{} // a finder's ref: the ref a check found it the same as
 	for _, p := range c.Professionals {
 		fs, ok := findingsOf(dir, p.Name)
 		if !ok {
@@ -975,6 +1100,14 @@ func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 			}
 			tag := findingTag(t)
 			v := vs[n+1]
+			if v.SameAs != "" {
+				sameAs[fmt.Sprintf("%s #%d", p.Name, n+1)] = v.SameAs
+				// A check copied with the fold is the other's: it goes in
+				// with that one's own, as it stands now, not this copy.
+				if v.FromFold {
+					v.Verdict, v.Why = "", ""
+				}
+			}
 			var into *summed
 			for _, f := range all {
 				if f.tag == tag && sameFinding(f.text, t) {
@@ -1069,7 +1202,7 @@ func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 			into.dissent = append(into.dissent, dissentText(f.whose, f.verdict, f.why))
 		}
 	}
-	all = kept
+	all = foldSameAs(kept, sameAs, folded)
 	for _, f := range all {
 		f.links = linksFor(ls, f.by)
 		// Seen only against a shared server: say so, as the server may be
@@ -1164,6 +1297,9 @@ func listFindings(fs []*summed) string {
 		}
 		if len(f.dissent) > 0 {
 			fmt.Fprintf(&b, " (but %s)", strings.Join(f.dissent, "; "))
+		}
+		if len(f.judged) > 0 {
+			fmt.Fprintf(&b, " (%s, worded otherwise, judged the same bug)", strings.Join(f.judged, "; "))
 		}
 		if len(f.shared) > 0 {
 			fmt.Fprintf(&b, " (seen against the shared server %s: it could be the server, not the app)", strings.Join(f.shared, ", "))

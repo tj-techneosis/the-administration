@@ -129,27 +129,56 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    If the Director's plan names a `data:` set, it's used; otherwise pick
    one with `--data <name>` when the default seed lacks what the tasks
    start from.
+   **Lay the browser users out across rooms** (`--rooms`) whenever there
+   are two or more of them. A room takes minutes to set up and a lot of
+   the machine's memory; a user in a room already up starts at once.
+   Critics have no room and never go in the plan; nor does a user with
+   equipment of its own. For each user, decide from what its task does
+   to the data (the data set's `about` in `roster.toml` says what's in
+   it, and the room's logins which accounts there are):
+   - **Together** (`a+b`): in one room at once. For users that don't
+     collide: work that only reads, a login each (the house's manifest
+     can give several per role), or different parts of the app. Two users
+     on one account, both changing it, are not together.
+   - **In turns** (`a>b`): in one room one after another, the house's
+     `reset` hook putting its data back between them. For users that use
+     something up the data holds once: a one-time gift, an invite, a
+     first order, a sign-up. Each gets it fresh. In turns needs a reset
+     hook (place says when the house has none); it's a promise they can
+     wait for each other, so a machine with room to spare may still give
+     the next one a room of its own.
+   - **Apart** (leave it out): a user that breaks the data on purpose
+     (fills the database, crashes a service), or that you can't tell
+     about.
+   Mix them: `--rooms "reader+browser, gift-a>gift-b>gift-c"`, or
+   `"a+b>c"` (a and b together, then c, put back). When unsure, apart is
+   always safe and only slower. **Say the plan and why** when you
+   propose the cast ("the two readers together; the three gift walkers
+   in turns, since each claims the same gift"), so the person can change
+   it.
 5. **Place it**: `administration place "<target>" --with <run> [--cast a,b]
-   [--changes] [--brief <name>="..."]... [--data <name>] [--coins 10m]`. It
+   [--changes] [--brief <name>="..."]... [--data <name>] [--rooms PLAN]
+   [--coins 10m]`. It
    prints the contract id and returns within a few seconds (it waits that
    long to see whether any room fails at once). The machine paces itself:
    when the rooms are taken, place says "Queued, N ahead" (exit 0), and
    its users take rooms by themselves, in the order contracts were placed,
-   as rooms free; rooms set up one at a time, as memory allows, and each
+   as rooms free; rooms set up side by side as far as memory allows, and each
    user's coins start only when its room is ready. So place the contract
    as the person wants it: don't split it to fit the rooms, wait for
    other contracts first, or place it again. Wait for it like any other
    (`status` says who is "waiting for a room", "waiting for setup (2
-   ahead)" or "waiting for memory"). Only a contract with more users than
-   there are rooms at all is refused (exit 1): split that one.
+   ahead)", "waiting to join a's room" or "waiting for memory"). Only a
+   contract needing more rooms than there are at all is refused (exit 1):
+   put more of its users together or in turns, or split it.
 6. **Wait in the background**: run `administration wait <id>` with
    `run_in_background` (a foreground wait dies at the Bash time limit). It
    prints a line as each professional's state changes, and returns early
    if one fails or is refused while the others work: tell the person who
    and why (its line says), then run the wait again for the rest. Tell
    the person it's placed, about how long it takes (the largest purse in
-   minutes, plus a few minutes to build each room, one room after another,
-   and longer when it was queued), and that in VS Code `/tasks` shows it
+   minutes, plus a few minutes to build each room, several at once when
+   the machine has the memory, and longer when it was queued), and that in VS Code `/tasks` shows it
    running. Then carry on with whatever else they want. If
    they ask how it's going, `administration status <id>`.
    **Watching**: in Herdr or tmux, place opens a watch tab with a pane per
@@ -207,7 +236,14 @@ When the wait finishes:
    that way: the books are outside the project, and reading them directly
    asks for a permission the command doesn't need.
 2. **Have the verifiers check every finding**: run `administration verify
-   <id>` with `run_in_background` (a few minutes). Walled verifiers read
+   <id>` with `run_in_background` (a minute or two: most findings were
+   checked already, as each professional came back, and it waits for
+   those checks to finish first). A finding folded into another as the
+   same bug worded otherwise says so in the summary; when you judge it a
+   different bug, part it with `"same_as": "-"` in its verdict. When verify
+   has more left than you'd expect, an early check may have failed: its
+   output is in `verify-early.log` in the contract's books (read it with
+   `administration report <id>` first; say what failed). Walled verifiers read
    the project's code, nothing else, and record **confirmed**, **likely**
    (the code agrees, but reading can't settle it) or **false** for each,
    with the line that decided it; the summary shows them as "by a
@@ -368,7 +404,14 @@ step after writes there and not into the project.
    app for themselves and that's heavy (it names the time and memory it
    measured): offer to write the house's `build` hook (the README's "The
    build hook"), so each commit is built once and every room, the before
-   app's too, only installs and starts it.
+   app's too, only installs and starts it. When a room takes minutes to
+   set up, offer a `reset` hook too (the README's "The reset hook"): it
+   puts a room's data back the way setup left it, so users planned in
+   turns (`--rooms a>b`) hand one room on instead of each setting up their
+   own. The setup usually keeps a dump of its database once seeded, for
+   reset to load. And offer more logins per role in the manifest
+   (`"logins"`), and in the data sets: users planned together each get
+   one of their own.
 4. **Equipment**, when what they test isn't a web app (a desktop window, a
    phone, a tool on another OS): see `docs/equipment.md`. When onboarding
    leaves agents out for want of equipment, or a cast needs some, the

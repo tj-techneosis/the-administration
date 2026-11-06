@@ -179,7 +179,24 @@ func buildLocked(ctx context.Context, c *contract, hook, sha, dir, lock, recipe 
 	}
 	_ = os.Remove(filepath.Join(dir, "recipe"))
 	_ = os.Remove(filepath.Join(dir, "failed"))
-	if _, err := runBuild(ctx, c, hook, sha, dir); err != nil {
+	// A build takes its turn in the line for setups, as a room's setup does
+	// (pace.go): it's often the heaviest thing a room needs, and is measured
+	// the same way.
+	had := holdsTurn()
+	p, err := paceSide(ctx, c, "build", func(why string) {
+		if f := say(why + " (to build " + short(sha) + ")"); f != nil {
+			f()
+		}
+	})
+	if err != nil {
+		return false, err
+	}
+	_, err = runBuild(ctx, c, hook, sha, dir)
+	p.done(err == nil)
+	if !had {
+		endSetupTurn()
+	}
+	if err != nil {
 		var hf hookFailed
 		if ctx.Err() == nil && errors.As(err, &hf) {
 			// For the rooms waiting on it: one failure, not one each. Only

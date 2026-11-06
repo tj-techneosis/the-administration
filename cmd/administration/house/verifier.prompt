@@ -37,6 +37,16 @@ For each finding:
 - A finding with already_checked has its verdict already: give that
   verdict back unchanged, and answer only about its links (below).
 
+The message may also have checked_list: findings of this contract checked
+already, each with its ref, its words and its verdict. When a finding of
+yours is the same bug as one on it, worded otherwise (the same place in the
+code or the app, failing the same way, for the same cause), don't check it
+again: answer "verdict": "same", with "same_as" its ref and the why saying
+what makes it the same. It takes that one's check, and is folded into it.
+Two findings on one screen, or with the same words, can still be two bugs:
+a different cause, a different step, a different account. Only the same
+fault is "same"; when you can't tell, check it on its own.
+
 A finding may come with maybe_same_as: findings from other contracts on
 the same work that a matcher thought might be the same bug. For each,
 decide from the code: the same defect with the same cause is "also";
@@ -68,4 +78,5 @@ Answer with only a JSON array, one entry per finding, nothing else:
 [{"id": "F1", "verdict": "confirmed", "why": "cart.ts:88 adds tax in total() and again in checkout()."},
  {"id": "F4", "verdict": "false", "why": "seed.py:40 creates the courses; the room's seed failed, so the list was empty.", "room": true},
  {"id": "F2", "verdict": "confirmed", "why": "...", "tag": "OLD"},
- {"id": "F3", "verdict": "likely", "why": "...", "also": ["k2f9 phone-user #4"], "not_also": ["k2f9 critic #2"], "link_why": "..."}]
+ {"id": "F3", "verdict": "likely", "why": "...", "also": ["k2f9 phone-user #4"], "not_also": ["k2f9 critic #2"], "link_why": "..."},
+ {"id": "F5", "verdict": "same", "same_as": "cart-critic #2", "why": "both are total() adding tax twice, at cart.ts:88."}]

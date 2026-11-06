@@ -1,7 +1,8 @@
 """Pacing: the Administration paces its rooms to the machine. One contract
 with three users once set up every room at once, two apps each, and the
 machine stopped answering for twenty minutes while the seats' coins ran
-out waiting. Run through tests/isolated.sh.
+out waiting; then one setup at a time left a machine with memory to spare
+setting up rooms in single file. Run through tests/isolated.sh.
 """
 import json
 import os
@@ -9,7 +10,7 @@ import subprocess
 import time
 import unittest
 
-from test_administration import Base, SETUP, running, write, setUpModule  # noqa: F401
+from test_administration import Base, SETUP, professional, running, write, setUpModule  # noqa: F401
 
 GB = 1 << 20  # in kB, as /proc/meminfo counts
 
@@ -28,9 +29,10 @@ class Pacing(Base):
         self.stamp_setup(log, 1.5)
         for n in ("a", "b", "c"):
             self.hire_file(n, fake="slow")
-        # Each setup takes 1.5s and the limit is 2.5s: the last waits about
-        # 3s for its turn, which mustn't count against its limit.
-        env = {"ADMINISTRATION_SETUP_TIMEOUT": "2500ms"}
+        # Each setup takes 1.5s and the limit is 2.5s. The house was never
+        # measured, so the first goes alone; the other two wait about 1.5s
+        # for it, which mustn't count against their limit, then go together.
+        env = {"ADMINISTRATION_SETUP_TIMEOUT": "2500ms", "ADMINISTRATION_MAX_SETUPS": "2"}
         cid = self.place("x", "--cast", "a,b,c", env=env)
         said = set()
         deadline = time.time() + 30
@@ -40,22 +42,22 @@ class Pacing(Base):
             if all(s["state"] in ("working", "out", "back") for s in st.values()):
                 break
             time.sleep(0.1)
-        self.assertTrue({"waiting for setup (1 ahead)", "waiting for setup (2 ahead)"} & said, said)
+        self.assertTrue([w for w in said if w.startswith("waiting for setup (")], said)
         self.assertIn("setting up", said)
         self.cli("wait", cid)
-        # Never two at once.
         spans = {}
         for line in open(log).read().split("\n"):
             if line:
                 what, who, t = line.split()
                 spans.setdefault(who, {})[what] = float(t)
         self.assertEqual(sorted(spans), ["a", "b", "c"])
-        order = sorted(spans.values(), key=lambda s: s["start"])
-        for one, two in zip(order, order[1:]):
-            self.assertLessEqual(one["end"], two["start"], spans)
+        first, two, three = sorted(spans.values(), key=lambda s: s["start"])
+        # The first alone, measured; then the other two side by side.
+        self.assertLessEqual(first["end"], two["start"], spans)
+        self.assertLess(three["start"], two["end"], spans)
         st = self.status(cid)["status"]
         last = max(st.values(), key=lambda s: s.get("waited_secs", 0))
-        self.assertGreaterEqual(last["waited_secs"], 2.5, last)
+        self.assertGreaterEqual(last["waited_secs"], 1, last)
         for name, s in st.items():
             # Out of coins, every one: a full purse (1 coin is 2s here) from
             # when its room was ready, however long it waited for its turn.
@@ -68,6 +70,23 @@ class Pacing(Base):
         report = self.cli("report", cid).stdout
         self.assertIn("| waited |", report)
         self.assertRegex(report, r"\| [abc] \| user \| out[^\n]*\| \d+s \|")
+
+    def test_one_setup_at_a_time_when_the_machine_says_so(self):
+        self.house()
+        log = os.path.join(self.tmp, "setups")
+        self.stamp_setup(log, 0.5)
+        for n in ("a", "b", "c"):
+            self.hire_file(n)
+        cid = self.place("x", "--cast", "a,b,c", env={"ADMINISTRATION_MAX_SETUPS": "1"})
+        self.cli("wait", cid)
+        spans = {}
+        for line in open(log).read().split("\n"):
+            if line:
+                what, who, t = line.split()
+                spans.setdefault(who, {})[what] = float(t)
+        order = sorted(spans.values(), key=lambda s: s["start"])
+        for one, two in zip(order, order[1:]):
+            self.assertLessEqual(one["end"], two["start"], spans)
 
     def test_the_before_build_is_made_once_for_every_room_and_reused(self):
         g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
@@ -257,6 +276,244 @@ class PersonsHooks(Base):
         self.assertIn("the closed hook", p.stderr)
         self.assertIn("failed (exit status 4)", p.stderr)
         self.assertIn("exited 4", open(os.path.join(self.books, "hooks.log")).read())
+
+
+
+class HandingOn(Base):
+    """A room takes minutes to set up and seconds to put back: a user who's
+    done hands its room on to the next user waiting for one."""
+
+    def house_with_reset(self, reset_body="exit 0"):
+        self.house()
+        log = os.path.join(self.tmp, "setups")
+        adm = os.path.join(self.project, ".administration")
+        setup = open(os.path.join(adm, "setup")).read()
+        write(os.path.join(adm, "setup"), setup.replace("set -e\n", f'set -e\necho "setup $ADMINISTRATION_PROFESSIONAL" >> "{log}"\n', 1), 0o755)
+        write(os.path.join(adm, "reset"),
+              f'#!/bin/sh\necho "reset $ADMINISTRATION_PROFESSIONAL $2" >> "{log}"\n'
+              'echo left > "$ADMINISTRATION_ROOM/desk/left-behind"\n' + reset_body + "\n", 0o755)
+        return log
+
+    def test_a_finished_room_is_put_back_and_handed_on(self):
+        log = self.house_with_reset()
+        self.hire_file("a")
+        self.hire_file("b")
+        cid = self.place("x", "--cast", "a,b", "--rooms", "a>b", env={"ADMINISTRATION_MAX_ROOMS": "1"})
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        a, b = st["a"], st["b"]
+        self.assertEqual((a["state"], b["state"]), ("back", "back"), st)
+        lines = open(log).read().split("\n")
+        # One setup, a's; one reset, by a, of the room's app; b took it.
+        self.assertEqual([l for l in lines if l.startswith("setup")], ["setup a"], lines)
+        self.assertEqual([l.split()[:2] for l in lines if l.startswith("reset")], [["reset", "a"]], lines)
+        self.assertEqual(a.get("handed_to"), "b", a)
+        self.assertEqual(b.get("handed_from"), "a", b)
+        self.assertEqual(b.get("resets"), 1, b)
+        self.assertEqual(b["room"], a["room"])
+        self.assertTrue(a["torn_down"] and b["torn_down"], st)
+        # The room was torn down once, by its last user, and what a left
+        # on the desk was cleared before b came in.
+        rooms = os.path.dirname(a["room"])
+        self.assertFalse(os.path.exists(os.path.join(a["room"], "a.torn")) or os.path.exists(os.path.join(rooms, "a.torn")))
+        self.assertTrue(os.path.exists(os.path.join(a["room"], "b.torn")), os.listdir(a["room"]))
+        self.assertFalse(os.path.exists(os.path.join(a["room"], "desk", "left-behind")))
+        # b's coins started when it took the room, and it waited for it.
+        self.assertIn("ready_at", b)
+        out = self.cli("status", cid).stdout
+        self.assertIn("in a's room, put back for it", out)
+        self.assertIn("handed its room on to b", out)
+        self.cli("close", cid)
+        self.assertIn("| a's, put back |", self.cli("report", cid).stdout)
+
+    def test_a_room_whose_reset_fails_is_torn_down_and_the_next_sets_up_its_own(self):
+        log = self.house_with_reset("exit 3")
+        self.hire_file("a")
+        self.hire_file("b")
+        cid = self.place("x", "--cast", "a,b", "--rooms", "a>b", env={"ADMINISTRATION_MAX_ROOMS": "1"})
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        self.assertEqual((st["a"]["state"], st["b"]["state"]), ("back", "back"), st)
+        lines = open(log).read().split("\n")
+        self.assertEqual([l for l in lines if l.startswith("setup")], ["setup a", "setup b"], lines)
+        self.assertNotIn("handed_to", st["a"])
+        self.assertNotIn("handed_from", st["b"])
+        self.assertIn("the room isn't handed on", open(os.path.join(self.pdir(cid, "a"), "reset.log")).read())
+        self.cli("close", cid)
+
+    def test_users_the_plan_doesnt_put_in_turns_keep_their_own_rooms(self):
+        log = self.house_with_reset()
+        self.hire_file("a")
+        self.hire_file("b")
+        # A reset hook, but no plan: each works apart, as ever.
+        p = self.cli("place", "x", "--cast", "a,b", check=1, env={"ADMINISTRATION_MAX_ROOMS": "1"})
+        self.assertIn("needs 2 rooms and there are 1", p.stderr)
+        self.assertIn("--rooms", p.stderr)
+        cid = self.place("x", "--cast", "a,b")
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        self.assertNotEqual(st["a"]["room"], st["b"]["room"])
+        self.assertNotIn("handed_from", st["b"])
+        self.assertNotIn("reset", open(log).read())
+        self.cli("close", cid)
+
+    def test_a_plan_in_turns_without_a_reset_hook_is_said_and_each_sets_up(self):
+        self.house()
+        self.hire_file("a")
+        self.hire_file("b")
+        p = self.cli("place", "x", "--cast", "a,b", "--rooms", "a>b")
+        self.assertIn("no reset hook", p.stderr)
+        cid = p.stdout.split()[1]
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        self.assertNotEqual(st["a"]["room"], st["b"]["room"])
+        self.cli("close", cid)
+
+    def test_a_plan_is_held_to_the_cast(self):
+        self.house()
+        self.hire_file("a")
+        self.hire_file("b")
+        self.hire_file("crit", kind="critic")
+        for plan, said in (("a+zed", "zed isn't on this contract's cast"), ("a+b, a", "a is in the plan twice"),
+                           ("a+crit", "crit is a critic"), ("a++b", "empty name")):
+            p = self.cli("place", "x", "--cast", "a,b,crit", "--rooms", plan, check=1)
+            self.assertIn(said, p.stderr, plan)
+
+class Sharing(Base):
+    """A house whose app takes several users at once shares its rooms: the
+    first user sets one up, the rest of the contract's join it."""
+
+    def share_house(self, reset=False):
+        self.house()
+        log = os.path.join(self.tmp, "setups")
+        adm = os.path.join(self.project, ".administration")
+        if reset:
+            write(os.path.join(adm, "reset"), f'#!/bin/sh\necho "reset $ADMINISTRATION_PROFESSIONAL" >> "{log}"\n', 0o755)
+        setup = SETUP.replace("set -e\n", f'set -e\necho "setup $ADMINISTRATION_PROFESSIONAL" >> "{log}"\n', 1)
+        setup = setup.replace('"password": "pw-staff"}}}', '"password": "pw-staff"}},\n "logins": {"member": [{"email": "member2@example.com", "password": "pw-member2"}]}}')
+        write(os.path.join(adm, "setup"), setup, 0o755)
+        return log
+
+    def test_users_share_one_room_each_with_a_login_of_its_own(self):
+        log = self.share_house()
+        for n in ("a", "b", "c"):
+            self.hire_file(n, signs_in_as="member", fake="slow", coins="2m")
+        cid = self.place("x", "--cast", "a,b,c", "--rooms", "a+b+c")
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        self.assertEqual({s["state"] for s in st.values()}, {"out"}, st)
+        # One room set up, by whichever got there first; the others joined it.
+        setups = [l for l in open(log).read().split("\n") if l]
+        self.assertEqual(len(setups), 1, setups)
+        owner = setups[0].split()[1]
+        o = st[owner]
+        joiners = sorted(set("abc") - {owner})
+        for n in joiners:
+            self.assertEqual(st[n].get("shared_with"), owner, st)
+            self.assertEqual(st[n]["shared_room"], o["room"])
+            self.assertNotEqual(st[n]["room"], o["room"])  # a desk and a browser of its own
+        # They worked at the same time.
+        t = lambda v: time.mktime(time.strptime(v, "%Y-%m-%dT%H:%M:%SZ"))
+        for n in joiners:
+            self.assertLessEqual(t(st[n]["ready_at"]), t(o["finished_at"]), st)
+        # A login each while there were any: the role's own, then the
+        # manifest's more; the third shares one, and is told so.
+        prompts = {n: self.call(cid, n)["prompt"] for n in "abc"}
+        self.assertIn("member@example.com", prompts[owner])
+        second = [n for n in joiners if "member2@example.com" in prompts[n]]
+        self.assertEqual(len(second), 1, prompts)
+        other = (set(joiners) - set(second)).pop()
+        self.assertIn("member@example.com", prompts[other])
+        self.assertIn("Another tester is signed in with the same login as you", prompts[other])
+        self.assertNotIn("Another tester is signed in with the same login", prompts[second[0]])
+        for p in prompts.values():
+            self.assertIn("Other testers may be using this app at the same time", p)
+        # The room was torn down once, as its owner's, by the last out.
+        self.assertTrue(os.path.exists(os.path.join(o["room"], owner + ".torn")), os.listdir(o["room"]))
+        for n in joiners:
+            self.assertFalse(os.path.exists(os.path.join(o["room"], n + ".torn")))
+        if t(o["finished_at"]) < min(t(st[n]["finished_at"]) for n in joiners):
+            # Done first, it left the room to the others.
+            self.assertTrue(o.get("shared_on"), o)
+        out = self.cli("status", cid).stdout
+        self.assertIn("sharing %s's room" % owner, out)
+        self.cli("close", cid)
+        self.assertIn("| shared %s's |" % owner, self.cli("report", cid).stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.books, "contracts", cid, ".rooms", owner + ".json")))
+
+    def test_together_then_in_turns(self):
+        log = self.share_house(reset=True)
+        for n in ("a", "b"):
+            self.hire_file(n, signs_in_as="member", fake="slow", coins="2m")
+        self.hire_file("c", signs_in_as="member")
+        # d outlasts a and b, so c's room can only come from them.
+        self.hire_file("d", signs_in_as="member", fake="slow", coins="5m")
+        # a and b together, then c, put back; d apart. d and a's room fill
+        # both rooms, so c waits for a and b's (with a room free, it would
+        # set up one of its own rather than wait: in turns is a promise it
+        # can wait, not an order to).
+        cid = self.place("x", "--cast", "d,a,b,c", "--rooms", "a+b>c", env={"ADMINISTRATION_MAX_ROOMS": "2"})
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        self.assertEqual({st[n]["state"] for n in "abcd"}, {"out", "back"}, st)
+        lines = [l for l in open(log).read().split("\n") if l]
+        self.assertEqual(sorted(l for l in lines if l.startswith("setup")), ["setup a", "setup d"], lines)
+        self.assertEqual(len([l for l in lines if l.startswith("reset")]), 1, lines)
+        self.assertEqual(st["b"].get("shared_with"), "a", st)
+        self.assertIn(st["c"].get("handed_from"), ("a",), st)
+        self.assertEqual(st["c"]["room"], st["a"]["room"])
+        self.assertNotIn("handed_from", st["d"])
+        out = self.cli("status", cid).stdout
+        self.assertIn("Room plan: a and b, then c, in turns, together where joined; anyone else in a room of their own.", out)
+        self.cli("close", cid)
+        report = self.cli("report", cid).stdout
+        self.assertIn("Room plan: a and b, then c", report)
+        self.assertIn("| a's, put back |", report)
+
+    def test_users_put_apart_never_join(self):
+        log = self.share_house()
+        for n in ("a", "b"):
+            self.hire_file(n, signs_in_as="member", fake="slow", coins="2m")
+        cid = self.place("x", "--cast", "a,b")
+        self.cli("wait", cid)
+        st = self.status(cid)["status"]
+        self.assertEqual(sorted(l for l in open(log).read().split("\n") if l), ["setup a", "setup b"])
+        self.assertNotIn("shared_with", st["b"])
+        self.assertNotIn("Other testers may be using", self.call(cid, "b")["prompt"])
+        self.cli("close", cid)
+
+    def test_the_directors_room_plan_is_taken_unless_rooms_is_given(self):
+        import re
+        self.share_house()
+        out = self.cli("director", "cast", "the forms", check=None).stdout
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        rd = os.path.join(self.books, "director", run, "out")
+        for n in ("a", "b"):
+            write(os.path.join(rd, "candidates", n + ".md"), professional(n, signs_in_as="member", fake="slow", coins="2m"))
+        write(os.path.join(rd, "cast.md"), "# Cast\n- a: forms\n- b: forms, read only\nrooms: a+b\n")
+        cid = self.place("the forms", "--with", run)
+        self.assertIn("Room plan: a and b together", self.cli("status", cid).stdout)
+        self.cli("wait", cid)
+        self.assertEqual(self.status(cid)["status"]["b"].get("shared_with"), "a")
+        self.cli("close", cid)
+        # --rooms "" places without it; a plan that doesn't fit the cast says whose it is.
+        cid = self.place("the forms", "--with", run, "--rooms", "")
+        self.assertNotIn("Room plan:", self.cli("status", cid).stdout)
+        self.cli("close", cid)
+        write(os.path.join(rd, "cast.md"), "# Cast\nrooms: a+zed\n")
+        p = self.cli("place", "the forms", "--with", run, check=1)
+        self.assertIn("the Director's rooms: line (a+zed): zed isn't on this contract's cast", p.stderr)
+
+    def test_a_plan_that_fits_isnt_counted_as_a_room_each(self):
+        self.share_house()
+        for n in ("a", "b", "c"):
+            self.hire_file(n, signs_in_as="member")
+        # Three users in one room, of two: it fits, and isn't queued.
+        p = self.cli("place", "x", "--cast", "a,b,c", "--rooms", "a+b+c", "--no-queue", env={"ADMINISTRATION_MAX_ROOMS": "2"})
+        self.assertNotIn("Queued", p.stdout)
+        cid = p.stdout.split()[1]
+        self.cli("wait", cid)
+        self.cli("close", cid)
 
 
 if __name__ == "__main__":

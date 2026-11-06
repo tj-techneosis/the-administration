@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,9 +26,10 @@ import (
 //   - a queue for rooms: a contract placed while the rooms are taken waits,
 //     and each of its users takes a room by itself, in the order the
 //     contracts were placed (ADMINISTRATION_MAX_ROOMS stays a hard cap);
-//   - one room setup at a time on the machine (a turn, kept in the rooms
-//     folder), the after and before sides alike, so a contract's rooms
-//     don't all build at once;
+//   - a line for setups (kept in the rooms folder), the after and before
+//     sides and the build hook's builds alike: they go in turn, as many at
+//     once as the memory covers (up to ADMINISTRATION_MAX_SETUPS), and a
+//     house never measured the way it sets up now goes alone once, to be;
 //   - memory: each setup is measured (how far the machine's available
 //     memory falls while it runs), per side, and kept with the house's
 //     records; a room sets up only when what's free, less a reserve for the
@@ -157,6 +160,28 @@ type sideCost struct {
 	SteadyMB int64     `json:"steady_mb"`
 	Secs     int       `json:"setup_secs"`
 	At       time.Time `json:"at"`
+	// How the room was set up: the house's setup hook and its build hook
+	// (sideRecipe). A measure made another way isn't this setup's: a build
+	// hook added since makes a setup far lighter.
+	Recipe string `json:"recipe,omitempty"`
+}
+
+// sideRecipe names how a side is set up now: the setup hook and, when the
+// house has one, the build hook and its env/ (buildRecipe); a build ("build")
+// is the build hook's recipe alone.
+func sideRecipe(c *contract, side string) string {
+	hook := buildHook(c)
+	if side == "build" {
+		return buildRecipe(c, hook)
+	}
+	h := sha256.New()
+	if b, err := os.ReadFile(filepath.Join(contractHouse(c), "setup")); err == nil {
+		h.Write(b)
+	}
+	if hook != "" {
+		fmt.Fprintf(h, "\x00build\x00%s", buildRecipe(c, hook))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // roomCosts is a house's measured setups, the last few of each side
@@ -198,8 +223,19 @@ func loadCosts(c *contract) roomCosts {
 // cost is what a side's setup takes, as measured: the largest of the kept
 // measures. ok is false for a side never measured.
 func (rc roomCosts) cost(side string) (sideCost, bool) {
+	return rc.costOf(side, "")
+}
+
+// costOf is cost, counting only the measures made by recipe ("" counts
+// every one). ok is false when there's none.
+func (rc roomCosts) costOf(side, recipe string) (sideCost, bool) {
 	var out sideCost
+	n := 0
 	for _, sc := range rc.Sides[side] {
+		if recipe != "" && sc.Recipe != recipe {
+			continue
+		}
+		n++
 		out.PeakMB = max(out.PeakMB, sc.PeakMB)
 		out.SteadyMB = max(out.SteadyMB, sc.SteadyMB)
 		out.Secs = max(out.Secs, sc.Secs)
@@ -207,7 +243,7 @@ func (rc roomCosts) cost(side string) (sideCost, bool) {
 			out.At = sc.At
 		}
 	}
-	return out, len(rc.Sides[side]) > 0
+	return out, n > 0
 }
 
 // recordCost adds a measured setup to the house's costs.
@@ -237,7 +273,7 @@ func heavySetup(c *contract) string {
 	if buildHook(c) != "" {
 		return ""
 	}
-	sc, ok := loadCosts(c).cost("after")
+	sc, ok := loadCosts(c).costOf("after", sideRecipe(c, "after"))
 	if !ok || sc.Secs < heavySecs && sc.PeakMB < heavyMB {
 		return ""
 	}
@@ -251,97 +287,365 @@ const (
 	heavyMB   = 1024
 )
 
-// The machine's setup turn, while this process holds it: a worker keeps it
-// from its room's first setup through its before app's, so its professional
-// starts as soon as it can.
+// The line for setups. Setups take their turns in the order they asked, and
+// several may run at once: as many as the machine's memory covers (each
+// one's measured cost, over the reserve, with the costs of those already
+// setting up counted as taken), up to maxSetups. A setup whose house was
+// never measured the way it sets up now (its setup or build hook changed)
+// goes alone, so what it takes is its own; it's measured then, and the
+// next ones go together.
+//
+// The line is a folder of tickets in the rooms folder's .pacing, one per
+// process waiting or setting up, each locked by its process for as long as
+// it lives, so a ticket whose process died is passed over and cleared. A
+// ticket says whether its setup is under way, alone or not, and what it was
+// admitted for. turn.lock beside them is held shared by each setup under
+// way, and exclusive by one that goes alone.
+
+// ticket is what a ticket file says.
+type ticket struct {
+	Up     bool  `json:"up,omitempty"`
+	Alone  bool  `json:"alone,omitempty"`
+	NeedMB int64 `json:"need_mb,omitempty"`
+	// Up, and waiting for the memory for its next side (a before app):
+	// two of them waiting on each other would wait for ever.
+	Waiting bool `json:"waiting,omitempty"`
+}
+
+// ticketSize is a ticket file's fixed length: it's written over in place,
+// in one write, so a reader never finds it empty halfway.
+const ticketSize = 128
+
+// turn is this process's place in the line, from its ticket until its
+// setups are done.
+type turn struct {
+	name   string
+	f      *os.File
+	t      ticket
+	unlock func() // turn.lock, once it's up
+}
+
 var (
-	turnMu   sync.Mutex
-	turnHeld func()
+	turnMu sync.Mutex
+	held   *turn
 )
 
 // paceSay, when it's set, hears each wait as it begins (room-check and
 // equipment-check print them).
 var paceSay func(string)
 
-// setupTurn waits for the machine's setup turn, in the order it was asked
-// for, and holds it until endSetupTurn. A turn already held is kept.
-// waiting hears how many are ahead each time that changes.
-//
-// The line is a folder of tickets in the rooms folder's .pacing, one per
-// process waiting or holding, each locked by its process for as long as it
-// lives, so a ticket whose process died is passed over and cleared; the
-// turn itself is a lock beside them.
-func setupTurn(ctx context.Context, waiting func(ahead int)) error {
-	turnMu.Lock()
-	held := turnHeld != nil
-	turnMu.Unlock()
-	if held {
-		return nil
+// paceFirst puts this process's setups at the front of the line: a
+// room-check or an equipment-check, which someone is sitting waiting for
+// and which ends in minutes, goes before the contracts' rooms (in the
+// order the checks asked, among themselves).
+var paceFirst bool
+
+// maxSetups is how many setups may run at once on the machine: half its
+// processors, and at least one; ADMINISTRATION_MAX_SETUPS says otherwise.
+func maxSetups() int {
+	if n, err := strconv.Atoi(os.Getenv("ADMINISTRATION_MAX_SETUPS")); err == nil && n > 0 {
+		return n
 	}
+	return max(1, runtime.NumCPU()/2)
+}
+
+func pacingDir() (string, error) {
 	rooms, err := roomsDir()
 	if err != nil {
-		return err
+		return "", err
 	}
-	pacing := filepath.Join(rooms, ".pacing")
+	return filepath.Join(rooms, ".pacing"), nil
+}
+
+// write puts the ticket's state in its file, over what was there.
+func (t *turn) write() {
+	b, _ := json.Marshal(t.t)
+	if len(b) < ticketSize {
+		b = append(b, []byte(strings.Repeat(" ", ticketSize-len(b)))...)
+	}
+	_, _ = t.f.WriteAt(b, 0)
+}
+
+// lineNow is the line as this ticket sees it: how many alive tickets are
+// ahead of it and not yet up, and of the others up, how many, how much they
+// were admitted for, and whether one is alone.
+func lineNow(line, me string) (ahead, up int, upMB int64, alone bool, stuck int, stuckMB int64) {
+	entries, _ := os.ReadDir(line)
+	for _, e := range entries {
+		n := e.Name()
+		if n == me {
+			continue
+		}
+		p := filepath.Join(line, n)
+		if !ticketAlive(p) {
+			continue
+		}
+		var t ticket
+		if b, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal([]byte(strings.TrimSpace(string(b))), &t)
+		}
+		switch {
+		case t.Up:
+			up++
+			upMB += t.NeedMB
+			alone = alone || t.Alone
+			if t.Waiting {
+				stuck++
+				stuckMB += t.NeedMB
+			}
+		case n < me:
+			// A ticket that says nothing (one being written, or an older
+			// Administration's, which holds turn.lock while it's in the
+			// line) is ahead, not up.
+			ahead++
+		}
+	}
+	return
+}
+
+// setupTurn waits for this process's turn to set up a side ("after",
+// "before", or "build"), in the order it was asked for, and holds it until
+// endSetupTurn. A turn already held (a worker's before app, after its own)
+// is kept, and waits only for the memory the side takes. waiting hears why
+// it waits each time that changes.
+func setupTurn(ctx context.Context, c *contract, side string, waiting func(string)) (alone bool, err error) {
+	turnMu.Lock()
+	t := held
+	turnMu.Unlock()
+	pacing, err := pacingDir()
+	if err != nil {
+		return false, err
+	}
 	line := filepath.Join(pacing, "line")
+	if t == nil {
+		if t, err = joinLine(pacing, line); err != nil {
+			return false, err
+		}
+	}
+	told := ""
+	say := func(why string) {
+		if why != told && waiting != nil {
+			waiting(why)
+		}
+		told = why
+	}
+	// What the side takes, worked out now, again whenever the setups under
+	// way change or it means to go alone (a measure may have landed), and
+	// every few seconds (the house's hooks and its
+	// env/ can change while it waits; hashing them every quarter second
+	// costs a big env/ dearly).
+	var need sideCost
+	var measured, goAlone bool
+	var recipe, beforeRecipe string
+	lastUp := -1
+	for tick := 0; ; tick++ {
+		ahead, up, upMB, someAlone, stuck, stuckMB := lineNow(line, t.name)
+		// The recipes (hashing the hooks and env/) every few seconds; the
+		// costs file whenever the setups under way change, or while it
+		// means to go alone, so a measure that lands is seen at once.
+		if tick%20 == 0 {
+			recipe = sideRecipe(c, side)
+			beforeRecipe = sideRecipe(c, "before")
+		}
+		if tick%20 == 0 || up != lastUp || goAlone {
+			lastUp = up
+			need, measured = sideNeedOf(c, side, recipe)
+			// A worker's turn covers its before app too: one never
+			// measured goes alone with the room's own, or it never would.
+			goAlone = !measured
+			if side == "after" && c.Before {
+				if _, ok := sideNeedOf(c, "before", beforeRecipe); !ok {
+					goAlone = true
+				}
+			}
+		}
+		why := ""
+		switch {
+		case t.unlock != nil:
+			// Already up: only the memory for this side. Every other setup
+			// under way waiting for memory too frees none of it.
+			// One waiting has its first side up: what it took is out of
+			// what's available already, so it isn't counted again.
+			why = memoryWait(need, measured, upMB-stuckMB, up-stuck, side)
+			if t.t.Waiting != (why != "") {
+				t.t.Waiting = why != ""
+				t.write()
+			}
+		case ahead > 0:
+			why = fmt.Sprintf("waiting for setup (%d ahead)", ahead)
+		case goAlone && up > 0:
+			why = fmt.Sprintf("waiting for setup (%d setting up; this house's setup goes alone once, to be measured)", up)
+		case someAlone:
+			why = "waiting for setup (1 setting up alone, to be measured)"
+		case up >= maxSetups():
+			why = fmt.Sprintf("waiting for setup (%d setting up, the most at once on this machine)", up)
+		default:
+			why = memoryWait(need, measured, upMB, up, side)
+		}
+		if why == "" && t.unlock == nil {
+			how := syscall.LOCK_SH
+			if goAlone {
+				how = syscall.LOCK_EX
+			}
+			// Up before the lock is taken, so one asking now (a check, ahead
+			// of every ticket) counts this one as setting up, not as nothing.
+			t.t = ticket{Up: true, Alone: goAlone, NeedMB: max(need.PeakMB, 0)}
+			t.write()
+			if unlock, ok := tryLock(filepath.Join(pacing, "turn.lock"), how); ok {
+				t.unlock = unlock
+				// Asked again now this one shows up: a check's ticket is
+				// ahead of everyone, so it doesn't wait for one behind it,
+				// and the two can pass at the same instant over the limit.
+				// The contract's backs out; the check never does. (One gone
+				// alone holds the lock exclusive, which no other can share.)
+				if _, up2, _, _, _, _ := lineNow(line, t.name); !paceFirst && !goAlone && up2 >= maxSetups() && up2 > up {
+					unlock()
+					t.unlock = nil
+					t.t = ticket{}
+					t.write()
+					why = "waiting for setup (another started at the same moment)"
+				}
+			} else {
+				t.t = ticket{}
+				t.write()
+				// Held by one not in the line (an older Administration's
+				// setup, or one gone alone): it's ahead all the same.
+				why = "waiting for setup (1 ahead)"
+			}
+		}
+		if why == "" {
+			t.t = ticket{Up: true, Alone: t.t.Alone, NeedMB: max(need.PeakMB, 0)}
+			t.write()
+			turnMu.Lock()
+			held = t
+			turnMu.Unlock()
+			return t.t.Alone, nil
+		}
+		say(why)
+		select {
+		case <-ctx.Done():
+			turnMu.Lock()
+			if held != t {
+				t.leave()
+			}
+			turnMu.Unlock()
+			return false, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// joinLine puts a new ticket for this process at the end of the line.
+func joinLine(pacing, line string) (*turn, error) {
 	if err := os.MkdirAll(line, 0o700); err != nil {
-		return err
+		return nil, err
+	}
+	// A ticket made by a process killed before it got into the line: nobody
+	// holds it, so it goes.
+	// (Only one a minute old: another process makes its ticket a moment
+	// before it locks it.)
+	if stale, _ := filepath.Glob(filepath.Join(pacing, "ticket-*")); len(stale) > 0 {
+		for _, p := range stale {
+			if st, err := os.Stat(p); err == nil && time.Since(st.ModTime()) > time.Minute {
+				ticketAlive(p)
+			}
+		}
 	}
 	name := fmt.Sprintf("%019d-%07d", time.Now().UnixNano(), os.Getpid())
+	if paceFirst {
+		// Before every time-named ticket, an older Administration's too.
+		name = "0-" + name
+	}
 	// Locked before it's in the line, so nobody finds it there unlocked and
 	// takes it for a dead one.
 	tmp := filepath.Join(pacing, "ticket-"+name)
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return err
+		return nil, err
 	}
-	ticket := filepath.Join(line, name)
-	if err := os.Rename(tmp, ticket); err != nil {
+	t := &turn{name: name, f: f}
+	t.write()
+	if err := os.Rename(tmp, filepath.Join(line, name)); err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return err
+		return nil, err
 	}
-	leave := func() {
-		_ = os.Remove(ticket)
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return t, nil
+}
+
+// sideNeed is what a side's setup takes on this machine, as the house's
+// setups made the way it's set up now were measured. measured is false for
+// one never measured so, and true wherever memory can't be read (nothing is
+// measured there, so nothing goes alone to be).
+func sideNeed(c *contract, side string) (sideCost, bool) {
+	return sideNeedOf(c, side, sideRecipe(c, side))
+}
+
+// sideNeedOf is sideNeed with the recipe already worked out.
+func sideNeedOf(c *contract, side, recipe string) (sideCost, bool) {
+	if _, ok := readMemory(); !ok {
+		return sideCost{}, true
+	}
+	return loadCosts(c).costOf(side, recipe)
+}
+
+// memoryWait is why a setup waits for memory, "" when it needn't: what's
+// available, less the reserve and what the setups under way were admitted
+// for, covers what this side took before. With nothing set up or at work,
+// nothing of this tool's will free any more, so it goes anyway: it can only
+// wait for itself.
+func memoryWait(need sideCost, measured bool, upMB int64, up int, side string) string {
+	m, ok := readMemory()
+	if !ok {
+		return ""
+	}
+	reserve := memReserve(m.Total)
+	free := m.Available - reserve - upMB<<20
+	if free >= need.PeakMB<<20 || up == 0 && roomsAtWork() == 0 {
+		return ""
+	}
+	if !measured || need.PeakMB == 0 {
+		return fmt.Sprintf("waiting for memory: %s is free, and %s is kept for the machine", gb(m.Available), gb(reserve))
+	}
+	what := map[string]string{"before": " the before app", "build": " (its build)"}[side]
+	taken := ""
+	if upMB > 0 {
+		taken = fmt.Sprintf(" and what the %d setting up take", up)
+	}
+	return fmt.Sprintf("waiting for memory: this house's rooms take about %s to set up%s, and %s is free over the %s kept for the machine%s",
+		gb(need.PeakMB<<20), what, gb(max(0, free)), gb(reserve), taken)
+}
+
+// tryLock takes a lock on path (how: syscall.LOCK_EX or LOCK_SH) if it's
+// free now.
+func tryLock(path string, how int) (unlock func(), ok bool) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false
+	}
+	if syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB) != nil {
 		f.Close()
+		return nil, false
 	}
-	last := -1
-	for {
-		ahead := 0
-		entries, _ := os.ReadDir(line)
-		for _, e := range entries {
-			if e.Name() < name && ticketAlive(filepath.Join(line, e.Name())) {
-				ahead++
-			}
-		}
-		if ahead == 0 {
-			if unlock, ok := tryLockFile(filepath.Join(pacing, "turn.lock")); ok {
-				turnMu.Lock()
-				turnHeld = func() { unlock(); leave() }
-				turnMu.Unlock()
-				return nil
-			}
-			// Held by one not in the line ahead of this (it was asked for
-			// in the same instant): it's ahead all the same.
-			ahead = 1
-		}
-		if ahead != last && waiting != nil {
-			waiting(ahead)
-		}
-		last = ahead
-		select {
-		case <-ctx.Done():
-			leave()
-			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
-		}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, true
+}
+
+// leave takes the ticket out of the line and lets turn.lock go.
+func (t *turn) leave() {
+	if t.unlock != nil {
+		t.unlock()
+		t.unlock = nil
 	}
+	if pacing, err := pacingDir(); err == nil {
+		_ = os.Remove(filepath.Join(pacing, "line", t.name))
+	}
+	_ = syscall.Flock(int(t.f.Fd()), syscall.LOCK_UN)
+	t.f.Close()
 }
 
 // ticketAlive says whether a ticket's process still holds it. One nobody
@@ -360,25 +664,51 @@ func ticketAlive(path string) bool {
 	return false
 }
 
-// endSetupTurn lets the next room set up. It does nothing when this process
+// holdsTurn says whether this process holds a turn now.
+func holdsTurn() bool {
+	turnMu.Lock()
+	defer turnMu.Unlock()
+	return held != nil
+}
+
+// endSetupTurn lets the next setups go. It does nothing when this process
 // holds no turn.
 func endSetupTurn() {
 	turnMu.Lock()
-	h := turnHeld
-	turnHeld = nil
+	t := held
+	held = nil
 	turnMu.Unlock()
-	if h != nil {
-		h()
+	if t != nil {
+		t.leave()
 	}
 }
 
+// othersSettingUp says whether a setup other than this process's is under
+// way: a measure taken then is partly theirs.
+func othersSettingUp() bool {
+	pacing, err := pacingDir()
+	if err != nil {
+		return false
+	}
+	turnMu.Lock()
+	me := ""
+	if held != nil {
+		me = held.name
+	}
+	turnMu.Unlock()
+	_, up, _, _, _, _ := lineNow(filepath.Join(pacing, "line"), me)
+	return up > 0
+}
+
 // meter follows the machine's available memory while a setup runs, to
-// measure what it takes.
+// measure what it takes. shared is whether another setup ran at any time
+// beside it, which makes the measure partly that one's.
 type meter struct {
 	ok        bool
 	start     int64
 	mu        sync.Mutex
 	low       int64
+	shared    bool
 	stop      chan struct{}
 	stopped   chan struct{}
 	once      sync.Once
@@ -393,6 +723,7 @@ func startMeter() *meter {
 		return m
 	}
 	m.ok, m.start, m.low = true, mem.Available, mem.Available
+	m.shared = othersSettingUp()
 	go func() {
 		defer close(m.stopped)
 		for {
@@ -406,13 +737,19 @@ func startMeter() *meter {
 				m.low = min(m.low, now.Available)
 				m.mu.Unlock()
 			}
+			if othersSettingUp() {
+				m.mu.Lock()
+				m.shared = true
+				m.mu.Unlock()
+			}
 		}
 	}()
 	return m
 }
 
 // finish stops the meter and says what the setup took: the deepest fall in
-// available memory since it started, and the fall now.
+// available memory since it started, and the fall now. ok is false when
+// memory can't be read, or another setup ran beside this one.
 func (m *meter) finish() (peak, steady int64, ok bool) {
 	m.once.Do(func() { close(m.stop) })
 	<-m.stopped
@@ -424,9 +761,9 @@ func (m *meter) finish() (peak, steady int64, ok bool) {
 		return 0, 0, false
 	}
 	m.mu.Lock()
-	low := min(m.low, now.Available)
+	low, shared := min(m.low, now.Available), m.shared
 	m.mu.Unlock()
-	return max(0, m.start-low), max(0, m.start-now.Available), true
+	return max(0, m.start-low), max(0, m.start-now.Available), !shared
 }
 
 // roomsAtWork counts the rooms whose professional is at work now, across
@@ -441,56 +778,20 @@ func roomsAtWork() int {
 	return n
 }
 
-// admitByMemory waits until the machine has the memory for a side's setup:
-// what's available, less the reserve, covers the most the house's rooms
-// have taken to set that side up. A house never measured needs only what's
-// over the reserve, and is measured as its room sets up. With no room at
-// work anywhere, nothing of this tool's will free any more, so the room
-// goes anyway: it can only wait for itself.
-func admitByMemory(ctx context.Context, c *contract, side string, waiting func(string)) error {
-	need, known := loadCosts(c).cost(side)
-	told := ""
-	for {
-		m, ok := readMemory()
-		if !ok {
-			return nil
-		}
-		reserve := memReserve(m.Total)
-		free := m.Available - reserve
-		if free >= need.PeakMB<<20 || roomsAtWork() == 0 {
-			return nil
-		}
-		why := fmt.Sprintf("waiting for memory: %s is free, and %s is kept for the machine", gb(m.Available), gb(reserve))
-		if known {
-			why = fmt.Sprintf("waiting for memory: this house's rooms take about %s to set up%s, and %s is free over the %s kept for the machine",
-				gb(need.PeakMB<<20), map[bool]string{true: " the before app", false: ""}[side == "before"], gb(max(0, free)), gb(reserve))
-		}
-		// Said again only when it changes by a tenth of a gigabyte or more.
-		if why != told && waiting != nil {
-			waiting(why)
-			told = why
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pollEvery()):
-		}
-	}
-}
-
 // pace is one side's setup, once the machine has room for it: done
 // measures it.
 type pace struct {
-	c    *contract
-	side string
-	m    *meter
-	once sync.Once
+	c      *contract
+	side   string
+	recipe string
+	m      *meter
+	once   sync.Once
 }
 
 // paceSetup waits for the machine to have room for a side's setup ("after"
-// or "before"): the machine's setup turn, then the memory. Its waits are
-// said in the room's status and added to what the seat waited. The setup
-// starts its own time limit after this returns, so waiting never uses it up.
+// or "before"): its turn in the line, and the memory. Its waits are said in
+// the room's status and added to what the seat waited. The setup starts its
+// own time limit after this returns, so waiting never uses it up.
 func paceSetup(ctx context.Context, c *contract, side string, s *status, save func()) (*pace, error) {
 	t0 := time.Now()
 	waited := false
@@ -502,10 +803,7 @@ func paceSetup(ctx context.Context, c *contract, side string, s *status, save fu
 			paceSay(why)
 		}
 	}
-	err := setupTurn(ctx, func(ahead int) { say(fmt.Sprintf("waiting for setup (%d ahead)", ahead)) })
-	if err == nil {
-		err = admitByMemory(ctx, c, side, say)
-	}
+	p, err := paceSide(ctx, c, side, say)
 	if waited {
 		s.WaitedSecs = roundSecs(s.WaitedSecs + time.Since(t0).Seconds())
 	}
@@ -517,11 +815,22 @@ func paceSetup(ctx context.Context, c *contract, side string, s *status, save fu
 		s.Reason = "setting up the before app"
 	}
 	save()
-	return &pace{c: c, side: side, m: startMeter()}, nil
+	return p, nil
 }
 
-// done ends a side's measure. A setup that came up (ok) is recorded as the
-// house's cost; one that failed only stops the meter.
+// paceSide takes a side's turn and starts its measure.
+func paceSide(ctx context.Context, c *contract, side string, say func(string)) (*pace, error) {
+	if _, err := setupTurn(ctx, c, side, say); err != nil {
+		return nil, err
+	}
+	// The recipe as it is now its turn has come, which is the hook that
+	// runs: one edited while it waited is measured as what it is.
+	return &pace{c: c, side: side, recipe: sideRecipe(c, side), m: startMeter()}, nil
+}
+
+// done ends a side's measure. A setup that came up (ok), with no other
+// beside it, is recorded as the house's cost; any other only stops the
+// meter.
 func (p *pace) done(ok bool) {
 	if p == nil {
 		return
@@ -530,7 +839,7 @@ func (p *pace) done(ok bool) {
 		peak, steady, measured := p.m.finish()
 		if ok && measured {
 			recordCost(p.c, p.side, sideCost{PeakMB: peak >> 20, SteadyMB: steady >> 20,
-				Secs: int(time.Since(p.m.startedAt).Seconds()), At: time.Now().UTC().Truncate(time.Second)})
+				Secs: int(time.Since(p.m.startedAt).Seconds()), At: time.Now().UTC().Truncate(time.Second), Recipe: p.recipe})
 		}
 	})
 }
@@ -549,6 +858,9 @@ type seat struct {
 	queued   bool // waiting for a room
 	held     bool // holding one
 	roomed   bool // has a room built or being built
+	// The room it holds, the same for users sharing one (share.go), so a
+	// shared room counts once.
+	room string
 }
 
 // before says whether a is ahead of b in the line for rooms.
@@ -595,9 +907,19 @@ func seats() []seat {
 			}
 			s := seatStatus(dir, p.Name)
 			st := seat{contract: c.ID, name: p.Name, order: contractOrder(c), index: i, state: s.State,
-				roomed: s.Room != "" && !s.TornDown}
+				roomed: s.Room != "" && !s.TornDown, room: c.ID + "/" + p.Name}
+			if s.SharedRoom != "" {
+				st.room = s.SharedRoom
+			} else if s.Room != "" {
+				st.room = s.Room
+			}
 			st.queued = !s.terminal() && s.Queued
 			st.held = !s.terminal() && !s.Queued || st.roomed
+			// A room handed on to it (handon.go) is held from when its
+			// papers are left, before its worker says so.
+			if !s.terminal() && (isFile(filepath.Join(dir, p.Name, "handoff.json")) || isFile(filepath.Join(dir, p.Name, "handoff.taken"))) {
+				st.held, st.queued = true, false
+			}
 			out = append(out, st)
 		}
 	}
@@ -636,12 +958,16 @@ func seatStatus(dir, name string) status {
 // for one, and the open contracts doing either, in line order.
 func roomUse() (held, waiting int, ids []string) {
 	seen := map[string]bool{}
+	rooms := map[string]bool{}
 	for _, st := range seats() {
 		if !st.held && !st.queued {
 			continue
 		}
 		if st.held {
-			held++
+			if !rooms[st.room] {
+				held++
+			}
+			rooms[st.room] = true
 		} else {
 			waiting++
 		}
@@ -659,12 +985,24 @@ func roomUse() (held, waiting int, ids []string) {
 // the last room.
 func awaitRoom(ctx context.Context, c *contract, name string, s *status, save func()) error {
 	t0 := time.Now()
+	var ci *castItem
+	for i := range c.Professionals {
+		if c.Professionals[i].Name == name {
+			ci = &c.Professionals[i]
+		}
+	}
+	books, err := booksDir()
+	if err != nil {
+		return err
+	}
+	cdir := filepath.Join(books, "contracts", c.ID)
 	for {
 		unlock, err := lockBooks()
 		if err != nil {
 			return err
 		}
 		ahead, held := 0, 0
+		rooms := map[string]bool{}
 		var me seat
 		all := seats()
 		for _, st := range all {
@@ -683,12 +1021,21 @@ func awaitRoom(ctx context.Context, c *contract, name string, s *status, save fu
 				continue
 			}
 			if st.held {
-				held++
+				if !rooms[st.room] {
+					held++
+				}
+				rooms[st.room] = true
 			} else if st.queued && st.before(me) {
 				ahead++
 			}
 		}
+		// A user of a contract whose rooms are shared waits for a place in
+		// one of its contract's (share.go) rather than set up its own.
+		why := ""
 		if ahead == 0 && held < maxRooms() {
+			why = shareWait(c, cdir, name, ci)
+		}
+		if ahead == 0 && held < maxRooms() && why == "" {
 			s.Queued = false
 			s.State, s.Reason = "setup", ""
 			if w := time.Since(t0).Seconds(); w >= 1 {
@@ -698,8 +1045,11 @@ func awaitRoom(ctx context.Context, c *contract, name string, s *status, save fu
 			unlock()
 			return nil
 		}
-		why := fmt.Sprintf("waiting for a room (%d ahead)", ahead)
-		if ahead == 0 {
+		switch {
+		case why != "":
+		case ahead > 0:
+			why = fmt.Sprintf("waiting for a room (%d ahead)", ahead)
+		default:
 			why = fmt.Sprintf("waiting for a room (all %d in use)", maxRooms())
 		}
 		if s.State != "waiting" || s.Reason != why || !s.Queued {

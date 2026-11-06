@@ -36,7 +36,7 @@ const usage = `administration: contracts for persona agents.
   administration place TARGET... --cast a,b | --with RUN [--coins 10m] [--model M]
                        [--changes [--base REF]] [--brief NAME=TASK]... [--only NAME=TASK]...
                        [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME]
-                       [--build SHA] [--no-queue]
+                       [--build SHA] [--no-queue] [--rooms PLAN]
       place a contract; prints its id. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare
       (--no-before doesn't), and warns when the branch is missing commits
@@ -51,8 +51,12 @@ const usage = `administration: contracts for persona agents.
       persona's checks, --only instead of them. The machine paces it:
       when the rooms it needs are taken it's placed all the same, says
       "Queued, N ahead", and its users take rooms by themselves, in
-      turn, as they free (exit 0); rooms set up one at a time, as memory
-      allows, and each user's coins start when its room is ready.
+      turn, as they free (exit 0); rooms set up side by side as far as
+      memory allows, and each user's coins start when its room is ready.
+      --rooms lays the users out across rooms: "a+b, c>d>e" puts a and b
+      in one room at once, and c, d and e in one room in turns, its data
+      put back between them by the house's reset hook; anyone it doesn't
+      name gets a room of their own.
       --no-queue refuses it instead (exit 4, naming who holds them).
       Exits 2 when someone fails in its first seconds (3 if any was
       refused); the contract is placed all the same

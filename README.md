@@ -130,7 +130,7 @@ hit a stub or ran out of coins says so. Silence is not a pass.
    whose app is another commit's is turned away at the door, and critics
    read the project as it was placed. Browser professionals each get a
    room first, and the house paces itself to the building: rooms are
-   made up one at a time, each when there's memory for it, and a contract
+   made up side by side as far as there's memory for them, and a contract
    placed while every room is taken waits in the lobby, then goes up by
    itself, in turn. Nobody's purse is touched while they wait: the coins
    start when the room is ready. The Administration runs
@@ -402,6 +402,27 @@ A house without one has every room build the app for itself; when that
 is heavy, `status` and `room-check` say so, with the time and memory they
 measured, and suggest the hook.
 
+**The reset hook.** A room takes minutes to set up and seconds to put
+back. A house's **`reset SRC APP`** runs where the setup ran, with the
+room's environment, and puts the room's data back the way the setup left
+it (a database loaded from a dump the setup kept, a mail catcher emptied),
+leaving the servers running. With it, users a contract plans in turns
+(below) hand one room on instead of each setting up their own: the
+Administration resets it, clears the desk and the browser's profile
+itself, checks the app still answers, and the next user starts on it at
+once. It runs in the project's folder (the before checkout's, for a
+release check's before app, with `ADMINISTRATION_SIDE=before`), with the
+setup's environment and the name of the user handing the room on as
+`ADMINISTRATION_PROFESSIONAL`, under the setup's time limit (15 minutes,
+`ADMINISTRATION_SETUP_TIMEOUT`); its output goes to that user's
+`reset.log` in the books. A reset that exits non-zero, runs out of time,
+or leaves the app not answering within a minute is torn down as before.
+
+**More logins.** The manifest can give a role more logins than its own:
+`"logins": {"member": [{"email": "member2@example.com", "password": "..."}]}`.
+Users sharing a room get one each, in turn, the role's own first; when
+they run out, they share one.
+
 `examples/demo/` is a complete house: a small app, its setup hook and two
 professionals. Try it with `administration place "sign up" --cast
 newcomer,reader --project examples/demo`.
@@ -484,7 +505,7 @@ instead: never dropped, never counted.
 | `administration watch ID [NAME] [--panes]` | follows each professional live: every action, every finding as it's written; `--panes` gives each one a pane in Herdr or tmux (or wherever your `watch` hook puts them), which closes when they're back |
 | `administration hire NAME\|FILE [--replace]` | puts a candidate on the roster |
 | `administration hire --from CONTRACT NAME` | keeps one of the Director's specialists from a contract by hand (one that found something joins the roster at close by itself), with the record it earned there |
-| `administration verify ID [--batch 12] [--coins 10m] [--model M]` | checks a closed contract's unchecked findings in the house: walled verifiers read the project's code (nothing else, no shell) and record confirmed, likely or false for each, with the line that decided it, a corrected mark when a finding's is wrong (an OLD marked NEW), and also or not_also for each link the matcher proposed; yours replace theirs |
+| `administration verify ID [--batch 12] [--coins 10m] [--model M]` | checks a closed contract's unchecked findings in the house: walled verifiers read the project's code (nothing else, no shell) and record confirmed, likely or false for each, with the line that decided it, a corrected mark when a finding's is wrong (an OLD marked NEW), and also or not_also for each link the matcher proposed; yours replace theirs. Most are checked already: each professional's findings are checked in the background as soon as it's back, while the others work, so this waits for that and checks what's left. Every verifier is given what's checked so far, and folds the same bug worded otherwise into it instead of checking it again; first, one pass over the whole list folds the rest of those, and parts any fold it finds wrong. Nothing is folded into a finding found false. The early checks' output, a verifier that failed among it, is in the contract's `verify-early.log` (the close's verify checks again whatever it left); while one runs, `prune` says the books are busy. `ADMINISTRATION_VERIFY_EARLY=off` leaves every check to the close, and `ADMINISTRATION_MAX_VERIFIERS` (4) caps the verifiers running at once on the machine |
 | `administration verdicts ID FILE\|-` | records the check of each finding, `{"name": [{"finding": 3, "verdict": "confirmed", "why": "...", "tag": "OLD", "also": ["ID NAME #N"], "not_also": [...]}]}`; `tag` refiles a finding whose mark is wrong; the summary shows each beside its finding, and `also` links it to the same bug in another contract, on both sides |
 | `administration check FILE...` | checks a professional's file |
 
@@ -510,22 +531,52 @@ the merged `summary.md`.
 only so much of it to give, so the house paces itself and nobody has to
 pick a room count:
 
-- **One setup at a time.** Rooms are made up in turn on the machine, the
-  app with the changes and the one before them alike. A professional whose
-  room is ready starts at once; the next room sets up behind it. `status`
-  says "setting up", or "waiting for setup (2 ahead)".
+- **Setups in turn, side by side.** Rooms are made up in the order they
+  were asked for, the app with the changes, the one before them and the
+  build hook's builds alike, as many at once as the memory covers (and at
+  most half the machine's processors, `ADMINISTRATION_MAX_SETUPS`). A
+  professional whose room is ready starts at once. `status` says "setting
+  up", or "waiting for setup (2 ahead)", or why it waits.
 - **By memory, learned per house.** Each setup is measured (how far the
   machine's available memory falls while it runs, containers included),
   and kept with the house's records. A room sets up only when what's free,
   less a reserve for the machine itself (15% of it, at least 2 GB),
-  covers what the house's rooms took before; a house never measured sets
-  up its first room alone, and is measured. "waiting for memory" says how
-  much it needs.
+  covers what the house's rooms took before, counting what the setups
+  under way took as taken. A house never measured the way it sets up now
+  (new, or its setup or build hook changed since) sets up its next room
+  alone, and is measured; the ones after it go together. One whose setup
+  never comes up (or never comes up alone) is never measured, so its
+  rooms keep setting up alone: `status` says why it waits. "waiting for
+  memory" says how much it needs.
+- **The room plan.** Which users share a room is decided for each run,
+  when it's cast, because it depends on what each does to the data:
+  `place --rooms "a+b, c>d>e"` puts a and b in one room at once
+  (**together**: they don't collide), and c, d and e in one room one after
+  another, its data put back between them by the reset hook (**in
+  turns**: each uses up something the data holds once, a one-time gift, an
+  invite). Anyone it doesn't name gets a room of their own (**apart**).
+  `a+b>c` is a and b together, then c. Each user in a room with others is
+  told they may be in the same data, so a change it didn't make isn't
+  reported as the app's; each gets a login of its own while the manifest
+  has any. In turns is a promise the users can wait for each other, not an
+  order to: with room to spare the machine sets the next one up a room of
+  its own, and when it's busy it hands the last one's on. The agent placing
+  the contract proposes the plan with the cast, and says why; the
+  Director writes one in its cast (`rooms:`), which `place --with` uses
+  unless `--rooms` is given (`--rooms ""` places without it). `status` and
+  the summary show it, and each seat's room: its own, shared, or handed on.
+- **Who goes next.** Contracts go in the order they were placed, and a
+  contract's users in its cast's order; a setup never passes one asked
+  for before it, so a big room isn't starved by small ones. `room-check`
+  and `equipment-check` go first: someone is sitting waiting for them,
+  and they're over in minutes. A user that joins a room, or takes one
+  handed on, doesn't need a setup turn at all.
 - **A queue, not a refusal.** Up to four rooms are held at once
   (`ADMINISTRATION_MAX_ROOMS`, a hard cap). A contract placed while
   they're taken is placed all the same, waiting, and its users take rooms
-  by themselves in the order contracts were placed. Only one with more
-  users than rooms is refused: split it.
+  by themselves in the order contracts were placed. Only one needing more
+  rooms than there are is refused (a room the plan shares counts once):
+  plan more of its users together or in turns, or split it.
 - **The coins start at the door.** A seat's purse starts when its room is
   ready, and a setup's 15 minutes when its turn comes, so waiting costs
   nothing; `status` and the summary say how long each seat waited.
@@ -544,12 +595,19 @@ never twice, so a prune cut off or failing loses no numbers; one that
 can't remove something carries on, then names it (exit 1).
 
 **Hooks.** The Administration tells nobody anything itself; it runs your
-hooks. An executable named after an event, `placed`, `closed`, `hired` or
-`director`, in the project's `.administration/hooks/` or the machine's
+hooks. An executable named after an event, `placed`, `closed`, `verified`,
+`hired` or `director`, in the project's `.administration/hooks/` or the machine's
 `~/.config/administration/hooks/`, hears it as JSON on stdin and as
 `ADMINISTRATION_*` variables (the contract, the summary's path). Post the
 summary to a chat, send it to your phone, open issues from confirmed
-findings: that's the hook's business. A hook that fails or hangs changes
+findings: that's the hook's business. `closed` comes before the close's
+own checks (the findings checked as each professional came back are in,
+the last ones aren't); `verified` comes when a verify at the close is
+done, with what it decided (`verdicts`) and how many verifiers didn't
+finish (`verifiers_failed`), and once even when there was nothing left to
+check, so a hook that reports on a run, verdicts and all, listens for
+that. A verify run again later fires it again whenever it had findings to
+check (`verifiers_failed` says if they didn't all finish). A hook that fails or hangs changes
 nothing (except `watch`, below); its output and its exit go in the
 books' `hooks.log`, and the command says in a line that it failed. A
 project's hook runs in the project; your own, the machine's, runs in its

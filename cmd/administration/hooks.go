@@ -31,7 +31,7 @@ import (
 // watch line instead.
 const hookLimit = 30 * time.Second
 
-var hookEvents = map[string]bool{"placed": true, "closed": true, "hired": true, "director": true}
+var hookEvents = map[string]bool{"placed": true, "closed": true, "verified": true, "hired": true, "director": true}
 
 func configDir() string {
 	if d := os.Getenv("ADMINISTRATION_CONFIG"); d != "" {

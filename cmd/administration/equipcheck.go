@@ -110,6 +110,11 @@ func cmdEquipmentCheck(args []string) error {
 		}
 	}
 
+	// In turn with every other room's setup on the machine, its build's
+	// too, ahead of the contracts' rooms (someone is waiting for it), and
+	// saying so while it waits.
+	paceSay = func(why string) { fmt.Printf("  %s\n", why) }
+	paceFirst = true
 	// The build first, as a contract's worker makes it: the app's setup
 	// hears of it too.
 	if bad := buildHookUnrunnable(c); bad != "" {
@@ -135,8 +140,6 @@ func cmdEquipmentCheck(args []string) error {
 	}
 	if eq.NeedsApp {
 		fmt.Printf("It reads the app's room, so building that first (up to %s)...\n", setupTimeout())
-		// In turn with every other room's setup on the machine.
-		paceSay = func(why string) { fmt.Printf("  %s\n", why) }
 		if _, err := buildRoom(ctx, c, ci, pd, &s, save); err != nil {
 			if e := interrupted(); e != nil {
 				return e

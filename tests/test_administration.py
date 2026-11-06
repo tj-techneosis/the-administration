@@ -127,6 +127,9 @@ class Base(unittest.TestCase):
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
             "ADMINISTRATION_MEMINFO": self.meminfo,
+            # Findings are checked at the close in the suite, unless a test
+            # checks them as they come back.
+            "ADMINISTRATION_VERIFY_EARLY": "off",
         }
         self.addCleanup(self.cleanup)
 
@@ -2440,6 +2443,144 @@ class Changes(Base):
                                                                             "b": [{"finding": 1, "verdict": "false", "why": "it saves on blur"}]}),
                        env=self.env, cwd=self.project, capture_output=True, text=True, check=True)
         self.assertIn("**[false: it saves on blur]**", self.cli("report", cid).stdout)
+
+    def test_verify_tells_the_verified_hook_and_the_summary_has_each_seats_verdicts(self):
+        got = os.path.join(self.tmp, "verified.json")
+        write(os.path.join(self.project, ".administration", "hooks", "verified"), f'#!/bin/sh\ncat > "{got}"\n', 0o755)
+        for n in ("a", "b"):
+            self.hire_file(n, kind="critic")
+        cid = self.place("x", "--cast", "a,b")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.assertFalse(os.path.exists(got))  # closed isn't verified
+        subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps({"b": [{"finding": 2, "verdict": "likely", "why": "mine"}]}),
+                       env=self.env, cwd=self.project, capture_output=True, text=True, check=True)
+        self.cli("verify", cid, "--batch", "1")
+        ev = json.load(open(got))
+        self.assertEqual((ev["event"], ev["contract"]), ("verified", cid))
+        self.assertEqual(ev["verdicts"], {"confirmed": 1, "likely": 0, "false": 0})
+        self.assertEqual(ev["verifiers_failed"], 0)
+        self.assertTrue(ev["summary"].endswith("summary.md"))
+        summary = self.cli("report", cid).stdout
+        self.assertIn("| waited | checked | room |", summary)
+        # Each found both (folded): one confirmed by the verifier, one likely
+        # by the session; each counts for both finders.
+        self.assertRegex(summary, r"\| a \| critic \|[^\n]*\| 1 / 1 / 0 \| - \|")
+        self.assertRegex(summary, r"\| b \| critic \|[^\n]*\| 1 / 1 / 0 \| - \|")
+        # A contract with nothing to check is verified all the same, once.
+        os.remove(got)
+        self.cli("verify", cid)
+        self.assertFalse(os.path.exists(got))
+
+    def says(self, name, *lines, **kw):
+        write(os.path.join(self.project, ".administration", "professionals", name + ".md"),
+              professional(name, kind="critic", **kw) + "\n" + "".join(f"SAY: {l}\n" for l in lines))
+
+    def test_findings_are_checked_as_their_professional_comes_back(self):
+        self.env["ADMINISTRATION_VERIFY_EARLY"] = "on"
+        self.says("quick")
+        self.says("slowpoke", "saving does nothing on the settings page", fake="slow", coins="3m")
+        cid = self.place("x", "--cast", "quick,slowpoke")
+        # quick is back and checked while slowpoke still works.
+        deadline = time.time() + 30
+        mine = os.path.join(self.pdir(cid, "quick"), "verdicts.json")
+        while not os.path.exists(mine):
+            self.assertLess(time.time(), deadline, "quick's findings weren't checked early")
+            time.sleep(0.2)
+        self.assertEqual(self.status(cid)["status"]["slowpoke"]["state"], "working")
+        self.assertFalse(os.path.exists(os.path.join(self.books, "contracts", cid, "summary.md")))
+        vs = {v["finding"]: v["verdict"] for v in json.load(open(mine))}
+        self.assertEqual(vs, {1: "confirmed", 2: "false"})
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        out = self.cli("verify", cid).stdout
+        # Only slowpoke's own words were left, checked when it ran out of
+        # coins or now; the verifier, given what's checked, found them the
+        # same bug as the save button.
+        self.assertTrue("Verifying 1 finding" in out or "checked already" in out, out)
+        summary = self.cli("report", cid).stdout
+        self.assertIn("(slowpoke #2, worded otherwise, judged the same bug)", summary)
+        self.assertIn("the save button does nothing on /settings (quick #1; slowpoke #1; slowpoke #2)", summary)
+        seen = [json.loads(l) for l in open(os.path.join(self.books, "contracts", cid, "fake-verifier-seen.jsonl"))]
+        self.assertEqual(len(seen), 2)  # quick's, then slowpoke's own words
+        self.assertTrue(any(c["ref"] == "quick #1" for c in seen[1]["checked_list"]), seen[1])
+
+    def test_verified_fires_once_when_everything_was_checked_as_it_came_back(self):
+        self.env["ADMINISTRATION_VERIFY_EARLY"] = "on"
+        got = os.path.join(self.tmp, "verified.jsonl")
+        write(os.path.join(self.project, ".administration", "hooks", "verified"), f'#!/bin/sh\ncat >> "{got}"\necho >> "{got}"\n', 0o755)
+        self.says("quick")
+        cid = self.place("x", "--cast", "quick")
+        self.cli("wait", cid)
+        mine = os.path.join(self.pdir(cid, "quick"), "verdicts.json")
+        deadline = time.time() + 30
+        while not os.path.exists(mine):
+            self.assertLess(time.time(), deadline, "quick's findings weren't checked early")
+            time.sleep(0.2)
+        self.assertFalse(os.path.exists(got))  # early checks fire nothing
+        self.cli("close", cid)
+        self.assertIn("checked already", self.cli("verify", cid).stdout)
+        evs = [json.loads(l) for l in open(got).read().split("\n") if l.strip()]
+        self.assertEqual([e["event"] for e in evs], ["verified"])
+        self.cli("verify", cid)
+        evs = [json.loads(l) for l in open(got).read().split("\n") if l.strip()]
+        self.assertEqual(len(evs), 1)  # once
+
+    def test_the_session_parts_a_fold_with_a_dash(self):
+        self.says("a", "the orders page is slow with many orders")
+        self.says("b", "the orders list takes ages to load")
+        self.says("c")
+        cid = self.place("x", "--cast", "a,b,c")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        verdicts = lambda body: subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps(body), env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(verdicts({"a": [{"finding": 2, "verdict": "likely", "why": "the query"}]}).returncode, 0)
+        self.cli("verify", cid)
+        self.assertIn("(b #2, worded otherwise, judged the same bug)", self.cli("report", cid).stdout)
+        verdicts = lambda body: subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps(body), env=self.env, cwd=self.project, capture_output=True, text=True)
+        p = verdicts({"b": [{"finding": 2, "verdict": "likely", "why": "a different query", "same_as": "-"}]})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        summary = self.cli("report", cid).stdout
+        self.assertNotIn("(b #2, worded otherwise", summary)
+        self.assertIn("- the orders list takes ages to load (b #2) **[likely: a different query]**", summary)
+        # A same_as must name another finding of this contract.
+        for bad in ("../x/a #1", "zed #1", "b #2"):
+            p = verdicts({"b": [{"finding": 2, "verdict": "likely", "same_as": bad}]})
+            self.assertEqual(p.returncode, 1, bad)
+
+    def test_the_close_folds_the_same_bug_in_other_words_and_parts_a_wrong_fold(self):
+        self.says("a", "the orders page is slow with many orders", "the receipt prints twice")
+        self.says("b", "the orders list takes ages to load")
+        self.says("c", "the receipt email never arrives")
+        cid = self.place("x", "--cast", "a,b,c")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        # Each wrote the save button first, its own words, then the save
+        # button again and the error. The session checked a's slow page; an
+        # earlier check folded c's email into a's receipt: wrongly.
+        p = subprocess.run([binary(), "verdicts", cid, "-"], input=json.dumps({"a": [{"finding": 2, "verdict": "likely", "why": "the query"}],
+                                                                               "c": [{"finding": 2, "verdict": "likely", "why": "mine", "same_as": "a #3"}]}),
+                           env=self.env, cwd=self.project, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        # (A fold the session made is the session's: the pass parts only its
+        # own and the verifiers', so this one is put down as a check's.)
+        vf = os.path.join(self.pdir(cid, "c"), "verdicts.json")
+        vs = json.load(open(vf))
+        for v in vs:
+            if v["finding"] == 2:
+                v["by"] = "verifier"
+        json.dump(vs, open(vf, "w"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("(c #2, worded otherwise, judged the same bug)", self.cli("report", cid).stdout)
+        out = self.cli("verify", cid).stdout
+        self.assertIn("Folded 1 finding into the same bug worded otherwise; parted 1.", out)
+        summary = self.cli("report", cid).stdout
+        self.assertIn("the orders page is slow with many orders (a #2; b #2) ", summary)
+        self.assertIn("(b #2, worded otherwise, judged the same bug)", summary)
+        self.assertNotIn("(c #2, worded otherwise", summary)
+        self.assertIn("- the receipt email never arrives (c #2) **[likely by a verifier: mine]**", summary)
+        dd = [json.loads(l) for l in open(os.path.join(self.books, "contracts", cid, "fake-deduper-seen.jsonl"))]
+        self.assertEqual(len(dd), 1)
 
     def test_a_rewritten_summary_keeps_the_open_rooms_of_its_close(self):
         self.hire_file("a", kind="critic")

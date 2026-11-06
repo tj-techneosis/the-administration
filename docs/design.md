@@ -253,6 +253,55 @@ changes" into CLI calls, and checks findings against the code afterwards.
   finding already checked goes back for that alone. Those decisions are
   recorded like the session's, marked the verifier's, and a session's
   decision is never replaced by one.
+- **Checking as they come back, and one list** (`verify.go`): a critic is
+  back in minutes and a contract's last user up to forty later, and
+  nothing was checked until the close, so a session closing a contract
+  then waited four minutes more for verifiers. Now a worker whose
+  professional is back (or out of coins) with findings starts `verify
+  --early` in the background, outside its tag (close doesn't stop it).
+  It waits for the contract's verify lock, and only one waits at a time
+  (`.verify.pending`): it checks every finding one of whose finders is
+  back by its turn, so any number back are one run. Early, links wait
+  for the close (the matcher proposes them then), and the summary is
+  close's to write, until the contract has closed. A verify at the close
+  that finds an early one running (`.verify.early`) waits for it, then
+  checks what's left. Every verifier is given the contract's findings
+  checked so far (`checked_list`: each finding's first finder, its words,
+  its verdict, at most 80), and answers "same" with the ref of one on it
+  for a finding that's the same bug worded otherwise: the finding takes
+  that check (`same_as` in its finders' verdicts, why "the same as ...")
+  and isn't checked again. The summary folds a finding with `same_as` into
+  the one it names, as a fold by words does (verdicts ranked, dissent
+  kept), and says which finders were "worded otherwise, judged the same
+  bug". At the close, before checking what's left, one pass over the
+  whole list (`house/deduper.prompt`: no tools, no code, the words alone)
+  joins the same bug worded otherwise that no check has met yet (the
+  later ones get `same_as` the first, and its check if they have none),
+  and parts a fold it finds wrong (`same_as` cleared, and a check it only
+  took from the other, so it's checked on its own); a list of fewer than
+  three findings, or from one professional, gets no pass. Nothing is
+  folded into a finding found false, nor a false one into another (a
+  real bug would take the false and vanish), and false findings aren't on
+  the checked list. A verdict taken with a fold is marked `from_fold`, and
+  goes with the fold when it's parted or re-pointed. A ref a model gives
+  is taken only when it names one of the contract's professionals. A
+  session's verdict keeps a fold under it unless it gives `"same_as":
+  "-"`, which parts it. A close's verify that finds nothing left fires
+  `verified` once (`.verified`); verifiers across all contracts take one
+  of `ADMINISTRATION_MAX_VERIFIERS` places (lock files in the books), so
+  early checks of several contracts can't crowd the rooms out. Both lean
+  apart: two findings that are one bug cost a reader a minute, one that
+  hides a second bug costs a fix. `ADMINISTRATION_VERIFY_EARLY=off`
+  leaves every check to the close. An early run holds the books' use lock
+  while it waits and checks, so `prune` meanwhile says they're busy; its
+  failures go to the contract's `verify-early.log`, and the close's verify
+  checks again what it left. A fold is made only into a finding already
+  checked (and not found false): two unchecked ones joined would be
+  checked on the first one's words alone. The pass parts only folds a
+  check made; the session's are the session's. A check copied with a fold
+  (`from_fold`) doesn't rank the joined line: the line takes the kept
+  finding's check as it stands. A joiner that shares a login (all of its
+  role's given out, or `any`) is told so in its brief.
 - **Links between contracts** (`links.go`): at close, contracts on the same
   work (the same project and merge base, or the same target, within a
   week) are found, and one small model call (Haiku, read-only) proposes
@@ -310,39 +359,67 @@ changes" into CLI calls, and checks findings against the code afterwards.
 - **Pacing** (`pace.go`): one contract with three users once set every
   room up at once, the app with the changes and the one before them in
   each, and the machine stopped answering while the seats' coins ran out.
-  So a room sets up only in its turn, and only with the memory for it:
-  - **The setup turn**: one room setup at a time on the machine (per
-    account: it's kept in the rooms folder), the after and before sides
-    alike. A worker keeps the turn from its room's first setup through
-    its before app's (and its equipment's), so its professional starts as
-    soon as its room is up, and lets it go then. The line is a folder of
-    tickets, one per process, each locked by its process (taken before
-    it's in the line, so it's never found unlocked), ordered by when it
-    was asked for; a ticket nobody holds is a process that died and is
-    cleared. The turn itself is a lock beside them. Builds are made before
-    a room takes its turn, never during: a room holds its build's lock
-    shared for as long as it runs, and a rebuild waiting for those rooms
-    while holding the turn would hold everyone else's setup up with it.
-    `room-check` and `equipment-check` take their turns the same way and
-    print the waits.
-  - **Memory, learned per house**: each side's setup is measured while
-    it's the only one running: the machine's available memory (Linux's
+  So a room sets up only in its turn, and only with the memory for it.
+  Then one setup at a time left a machine with half its memory free
+  setting up rooms in single file, each user's room ten minutes behind the
+  last, so setups go side by side as far as the memory covers:
+  - **The line for setups**: per account (it's kept in the rooms folder),
+    the after and before sides and the build hook's builds alike. Setups
+    go in the order they were asked for, the one at the head when the
+    memory covers it, the setups under way (each counted at what it was
+    admitted for) included, and fewer than `ADMINISTRATION_MAX_SETUPS`
+    are under way (half the processors, at least one). A setup never
+    passes one asked for before it, so a big room isn't passed by small
+    ones forever. A ticket says it's up before it takes `turn.lock`, so a
+    check's ticket ahead of everyone never misses it; one up and waiting
+    for its before app's memory says so (`waiting`), and when every other
+    setup under way is waiting too and no room is at work, it goes rather
+    than wait on them for ever. What a side takes is worked out again
+    whenever a setup ends and every few seconds while it waits, not every
+    quarter second, and tickets of processes killed before they got into
+    the line are cleared. A house never measured the way it sets up now (its
+    setup hook and build hook, and the build's env/, as `sideRecipe`
+    names them) goes alone, once nothing else is setting up, and nothing
+    goes beside it: it's measured, and the next ones go together. A
+    worker keeps its turn from its room's first setup through its before
+    app's (and its equipment's), so its professional starts as soon as
+    its room is up, and lets it go then; the before app waits only for
+    its memory. The line is a folder of tickets, one per process, each
+    locked by its process (taken before it's in the line, so it's never
+    found unlocked) and saying whether it's under way, alone, and what it
+    was admitted for, written over in place in one write so it's never
+    read empty; a ticket nobody holds is a process that died and is
+    cleared. `turn.lock` beside them is held shared by each setup under
+    way and exclusive by one alone, which also keeps an older
+    Administration's setup, which takes it exclusive, from running beside
+    these. A build hook's build takes its turn in the same line (a build
+    is often the heaviest thing a room needs) before its room's setup
+    takes another: a room holds its build's lock shared for as long as it
+    runs, and a rebuild waiting for those rooms while holding a turn
+    would hold the line up with it. `room-check` and `equipment-check`
+    take their turns the same way and print the waits.
+  - **Memory, learned per house**: each side's setup (and build) is
+    measured when it's the only one running (one that ran beside another,
+    at any moment, isn't kept: what it measured is partly the other's):
+    the machine's available memory (Linux's
     `MemAvailable`, macOS's free, inactive and speculative pages from
     `vm_stat`; both count containers, which a process tree wouldn't) is
     read when it starts and every quarter second while it runs; the
     deepest fall is its peak, and the fall when the room answers its
     steady cost. The last three of each side are kept with the house's
-    records in the books (`ledgers/<project>.rooms.json`), and the house's
-    cost is the largest of them, so one measured while something else
-    freed memory doesn't make it look cheap. A side sets up when what's
-    available, less a reserve for the machine (15% of its memory, at
-    least 2 GB), covers that peak; a house never measured needs only to
-    be over the reserve, and its first room, set up alone in its turn, is
-    measured. With no room at work anywhere, nothing of the
+    records in the books (`ledgers/<project>.rooms.json`), each with the
+    recipe it was set up by, and the house's cost is the largest of those
+    made the way it sets up now, so one measured while something else
+    freed memory doesn't make it look cheap, and a build hook added
+    since (which can take a setup from 8 GB to 2) isn't held to what the
+    rooms took before it. A side sets up when what's available, less a
+    reserve for the machine (15% of its memory, at least 2 GB) and what
+    the setups under way were admitted for, covers that peak; a house
+    never measured needs only to be over the reserve, and goes alone.
+    With no room at work and nothing else setting up, nothing of the
     Administration's will free memory, so the room goes anyway rather
-    than wait for itself. The wait holds the turn, so a big room isn't
-    passed by small ones forever. Where memory can't be read, nothing
-    waits for it.
+    than wait for itself. Where memory can't be read, nothing waits for
+    it, and nothing goes alone to be measured.
   - **The clock starts at the door**: a seat's coins start when its room
     is ready (`ready_at` in its status), the setup's time limit when its
     turn comes and the memory is there, so neither a queue nor a busy
@@ -529,6 +606,90 @@ changes" into CLI calls, and checks findings against the code afterwards.
   process group of its own); `prune` removes builds unused for its age. The
   hook builds commits, not working trees, because a cache keyed by
   anything less exact is a shared path again.
+- **The room plan** (`roomplan.go`, `handon.go`, `share.go`): one
+  project's room took four minutes to set up (its database's migrations,
+  three apps built and started), its users ran one after another, each
+  setting up a room the last had just torn down, and a room's servers
+  cost the machine far more than the browser in it. Whether two users can
+  share a room depends on what each does to the data in that run, so
+  it's decided when the run is cast, not by the house: `place --rooms`
+  takes rooms separated by commas, each of turns separated by `>`, each
+  of users joined by `+`. Every name must be a browser user on the cast
+  with no equipment, once; critics have no room. A user the plan doesn't
+  name works apart, as before. The plan is kept in the contract (`rooms`)
+  and shown in `status` and the summary.
+  - **Together** (`a+b`, one turn): the first of them to get a room opens
+    it for sharing once it's up: a record in the contract's `.rooms/`
+    (the room, its owner, its group and turn, who's in it, the logins
+    given out). One of its turn waiting for a room, or for its setup
+    turn, joins it, under the books' lock, through a lookout its worker
+    keeps while it waits (every quarter second): it gets copies of the
+    owner's manifests in its own folder, with the role's next login not
+    given out (the role's own, then the manifest's `logins` for it; all
+    taken, it shares the first), and a room folder of its own for its
+    desk and browser profile; it owns none of the room's servers and is
+    never torn down itself. While one of its turn ahead of it in the plan
+    is getting a room (past the line for rooms), it waits for that one
+    ("waiting to join a's room") instead of setting up its own; a room
+    without its role's login is no place for it. A shared room counts
+    once against `ADMINISTRATION_MAX_ROOMS`. A user leaving a room others
+    are still in only leaves it: the owner is counted torn down
+    (`shared_on` says to whom it left it). The brief tells each user with
+    turn-mates that others may be in the same data.
+  - **In turns** (`a>b`): with the house's `reset SRC APP` hook, the last
+    user out of a room (back, or out of coins) hands it to the first of
+    its room's users, in the plan's order, still waiting for a room or a
+    setup turn, with no room yet and signing in as a role the room's
+    manifest has. Its worker runs `reset` on the room's app (and the
+    before app's, with `ADMINISTRATION_SIDE=before`), with the room's
+    environment, where setup ran, under the setup's time limit; empties
+    the room's `desk/` and `tmp/`; and checks the app still answers.
+    Under the books' lock it leaves the room's papers with the taker:
+    `handoff.json` (the room, its ports and process groups, the setup
+    tags of every user it has passed through, its builds), the manifests
+    and ports copied, the cleanup files moved (whoever holds them takes
+    the stack down). The taker's lookout takes them (`handoff.json`
+    becomes `handoff.taken`, under the lock) only until its own setup
+    starts: a setup whose turn comes just as papers are taken is called
+    off before it makes a room. Papers not taken in ten seconds are taken
+    back and the room torn down. A seat with papers left for it holds a
+    room from that moment, so the room count never dips while one changes
+    hands. A last out who joined the room hands it on with its owner's
+    papers. The giver is `handed_to` the taker and counted torn down; the
+    taker is `handed_from`, with how many times the room was reset, and
+    its coins start when it takes the room; its turn-mates then join it.
+    Its teardown clears every tag the room's servers carry. In turns is a
+    promise the users can wait, not an order to: a user waiting in turn
+    goes through the line for rooms and setups like any other, and sets
+    up a room of its own if it gets there before one is handed on (a
+    machine with room to spare), or takes the one handed on (a busy one).
+    Without a reset hook, place says so and each sets up its own.
+  - A house whose setup never comes up, or never comes up alone, is never
+    measured, so its rooms go alone each time; `status` says why they
+    wait.
+  - What keeps a room from leaking or being torn down twice: a joiner is
+    known by its papers (`share.taken`), so one that fails before it makes
+    the room its own still leaves the room's list. The owner leaving it to
+    others says so (counted torn down) before it lets the books' lock go.
+    The last out keeps the room's record, marked closing (nobody joins
+    it), until it has handed it on or torn it down, so a worker that dies
+    doing it leaves it for close; and it writes only what it changes into
+    the owner's status, read afresh under the status's lock. A user that
+    couldn't join a room (its papers wouldn't copy) notes it
+    (`share.refused`) and stops waiting for it; one doesn't wait for a mate
+    that has no status yet, or works in a room it never opened. A room's
+    logins given out are rebuilt from those still in it. A giver says
+    where its papers are going (`papers.to`) before any move: its teardown
+    takes them back from a taker that never took them, and counts the room
+    the taker's if it did. A user that joined a room is never handed one.
+  - A contract needs as many rooms at once as the plan has rooms plus
+    the users apart; one needing more than `ADMINISTRATION_MAX_ROOMS` is
+    refused. Rooms stay within a contract: another's may be on another
+    commit, data set or before app. Close tears down any shared room
+    still standing, once.
+- **Checks first**: `room-check` and `equipment-check` take tickets that
+  sort before every contract's (`0-` before the time), so a person
+  sitting waiting for one isn't behind a contract's whole cast of setups.
 - **Equipment restart**: a screen's equipment can declare `restart`, run
   once by the screen's server when the device would otherwise be called
   lost (an emulator that crashed came back when booted again, each loss
@@ -648,6 +809,9 @@ which are time. Anyone who wants to track usage can read them from
 | `ADMINISTRATION_ROOMS` | `/Users/Shared/administration-<uid>` (macOS), `/var/tmp/administration-<uid>` | rooms; must be outside home, and the account's own |
 | `ADMINISTRATION_CLAUDE` | `claude` | the claude binary |
 | `ADMINISTRATION_MAX_ROOMS` | 4 | browser rooms at once |
+| `ADMINISTRATION_MAX_SETUPS` | half the processors, at least 1 | setups (and build hook builds) under way at once; memory may allow fewer |
+| `ADMINISTRATION_VERIFY_EARLY` | on | `off` checks every finding at the close, not as each professional comes back |
+| `ADMINISTRATION_MAX_VERIFIERS` | 4 | verifiers (and the close's pass for the same bug) running at once on the machine, across contracts |
 | `ADMINISTRATION_SETUP_TIMEOUT` | 15m | the setup hook's limit |
 | `ADMINISTRATION_BUILD_TIMEOUT` | 1h | the build hook's limit |
 | `ADMINISTRATION_RESTART_TIMEOUT` | 10m | an equipment's restart hook's limit |

@@ -50,6 +50,9 @@ type contract struct {
 	OpenAtClose []openRoom `json:"open_at_close,omitempty"`
 	// On changes, users also get the project as it was before them.
 	Before bool `json:"before,omitempty"`
+	// The room plan (roomplan.go): which users share a room at once, which
+	// take one in turns, as place --rooms gave it.
+	Rooms string `json:"rooms,omitempty"`
 	// The project's data set the rooms start from ([data] in roster.toml);
 	// empty is the setup hook's default.
 	Data string `json:"data,omitempty"`
@@ -157,6 +160,20 @@ type status struct {
 	BeforeBuildCommit   string `json:"before_build_commit,omitempty"`
 	// When its equipment was restarted after it stopped answering.
 	EquipmentRestarted string `json:"equipment_restarted,omitempty"`
+	// A room shared (share.go): the room it works in, someone else's, and
+	// whose; or, for the one who set it up and left first, who's still in it.
+	SharedRoom string `json:"shared_room,omitempty"`
+	SharedWith string `json:"shared_with,omitempty"`
+	SharedOn   string `json:"shared_on,omitempty"`
+	// Who shared its room while it was in it, when it was the last out.
+	Hosted string `json:"hosted,omitempty"`
+	// Its room, when it was handed on (handon.go): to whom, once this one
+	// was done, or from whom it came, how many times it had been reset by
+	// then, and the setup tags of what runs in it, for teardown to clear.
+	HandedTo   string   `json:"handed_to,omitempty"`
+	HandedFrom string   `json:"handed_from,omitempty"`
+	Resets     int      `json:"resets,omitempty"`
+	RoomTags   []string `json:"room_tags,omitempty"`
 }
 
 // partial says when someone came back with most of their plan undone: back,
@@ -388,7 +405,7 @@ func cmdPlace(args []string) error {
 // from one never placed, and let go of a lock it needed only until then.
 func placeContract(args []string, resumes string, placed func(id string)) error {
 	f, err := parseFlags(args, map[string]bool{"cast": true, "with": true, "coins": true, "model": true, "project": true, "dry-run": false,
-		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false})
+		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false, "rooms": true})
 	if err != nil {
 		return err
 	}
@@ -629,10 +646,38 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	if f.has("base") && !f.has("changes") {
 		return usageError{"--base goes with --changes"}
 	}
+	// The room plan: which users share a room at once, which take one in
+	// turns (roomplan.go). Held to the cast now, before anything is made.
+	spec, from := f.get("rooms"), "--rooms"
+	if !f.has("rooms") {
+		// The Director's, when it wrote one; --rooms "" places without it.
+		spec, from = directorRooms(f.get("with")), "the Director's rooms: line"
+	}
+	plan, err := parseRooms(spec)
+	if err != nil {
+		if from != "--rooms" {
+			return usageError{fmt.Sprintf("%s (%s): %s; give --rooms to lay the cast out yourself, or --rooms \"\" for a room each", from, spec, strings.TrimPrefix(err.Error(), "--rooms: "))}
+		}
+		return usageError{err.Error()}
+	}
+	if len(plan) > 0 {
+		warn, err := checkRooms(plan, c.Professionals, resetHook(held) != "")
+		if err != nil {
+			if from != "--rooms" {
+				return usageError{fmt.Sprintf("%s (%s): %v; give --rooms to lay the cast out yourself, or --rooms \"\" for a room each", from, spec, strings.TrimPrefix(err.Error(), "--rooms: "))}
+			}
+			return usageError{err.Error()}
+		}
+		if warn != "" {
+			fmt.Fprintf(os.Stderr, "administration: --rooms: %s\n", warn)
+		}
+		c.Rooms = plan.String()
+	}
 	if buildHookUnrunnable(held) != "" && rooms {
 		return usageError{buildHookUnrunnable(held)}
 	}
-	// More users than there are rooms never fits: split it. Fewer, but the
+	// More users than there are rooms never fits (counting a room the plan
+	// puts several in once: roomplan.go): split it. Fewer, but the
 	// rooms are taken (or others are in line for them): it's queued, and
 	// its users take rooms by themselves, in turn, as they free (pace.go).
 	// --no-queue refuses it instead, as busy, for a script that would
@@ -641,11 +686,13 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	queued := ""
 	roomsTaken := func() error {
 		queued = ""
-		if users > maxRooms() {
-			return usageError{fmt.Sprintf("this contract needs %d rooms and there are %d (ADMINISTRATION_MAX_ROOMS): place its users in two contracts, or raise the limit.", users, maxRooms())}
+		// The rooms it needs, counting one the plan puts several in once.
+		need := planRooms(plan, users)
+		if need > maxRooms() {
+			return usageError{fmt.Sprintf("this contract needs %d rooms and there are %d (ADMINISTRATION_MAX_ROOMS): put more of its users in a room together or in turns (--rooms), place them in two contracts, or raise the limit.", need, maxRooms())}
 		}
 		held, waiting, ids := roomUse()
-		if held+waiting+users <= maxRooms() || f.has("dry-run") {
+		if held+waiting+need <= maxRooms() || f.has("dry-run") || len(ids) == 0 {
 			return nil
 		}
 		inUse := fmt.Sprintf("%d of %d rooms are in use", held, maxRooms())
@@ -658,7 +705,7 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 				wait = "once enough of their users are back (administration wait on each in turn: " + strings.Join(ids, ", ") + ")"
 			}
 			return busy{fmt.Sprintf("%s (contract %s) and this contract needs %d: place it again %s, or with fewer users.",
-				inUse, holderNames(ids), users, wait)}
+				inUse, holderNames(ids), need, wait)}
 		}
 		queued = fmt.Sprintf("Queued, %d ahead: %s (contract %s). Its users take rooms by themselves, in turn, as they free; nothing needs placing again.",
 			len(ids), inUse, holderNames(ids))
@@ -1088,6 +1135,9 @@ func cmdStatus(args []string) error {
 		if t := vw.testedLine(); t != "" {
 			fmt.Println("  " + t)
 		}
+		if p := vw.plan(); len(p) > 0 {
+			fmt.Println("  Room plan: " + p.Said() + "; anyone else in a room of their own.")
+		}
 		// A house whose every room builds the app for itself, and heavily:
 		// said while its contract is open, with what was measured.
 		if vw.ClosedAt == nil {
@@ -1141,6 +1191,18 @@ func describe(s status) string {
 	}
 	if w := waitedFor(s); w != "" && s.State != "waiting" {
 		parts = append(parts, "waited "+w+" for the machine")
+	}
+	if s.HandedFrom != "" {
+		parts = append(parts, "in "+s.HandedFrom+"'s room, put back for it")
+	}
+	if s.HandedTo != "" {
+		parts = append(parts, "handed its room on to "+s.HandedTo)
+	}
+	if s.SharedWith != "" {
+		parts = append(parts, "sharing "+s.SharedWith+"'s room")
+	}
+	if s.SharedOn != "" {
+		parts = append(parts, "left its room to "+s.SharedOn)
 	}
 	if s.EquipmentRestarted != "" {
 		parts = append(parts, "equipment restarted at "+s.EquipmentRestarted)
@@ -1327,6 +1389,8 @@ func cmdClose(args []string) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	// A shared room still standing (share.go) goes first, once.
+	closeShares(c, dir)
 	for _, p := range c.Professionals {
 		s := readStatus(dir, p.Name)
 		tag := readTag(dir, p.Name)
@@ -1490,6 +1554,25 @@ func cmdReport(args []string) error {
 }
 
 var dataLine = regexp.MustCompile(`(?m)^data:\s*([a-z0-9][a-z0-9-]*)\s*$`)
+
+var roomPlanLine = regexp.MustCompile(`(?m)^rooms:\s*(\S.*?)\s*$`)
+
+// directorRooms is the "rooms:" line of a Director cast plan placed with
+// --with: its room plan, for a contract placed without --rooms.
+func directorRooms(with string) string {
+	for _, item := range strings.Split(with, ",") {
+		if item = strings.TrimSpace(item); runRE.MatchString(item) {
+			if _, rd, err := loadRun(item); err == nil {
+				if b, err := os.ReadFile(filepath.Join(rd, "out", "cast.md")); err == nil {
+					if m := roomPlanLine.FindStringSubmatch(string(b)); m != nil {
+						return m[1]
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
 
 // dataSet is the data the rooms start from: --data, or else the "data:"
 // line of a Director cast plan placed with --with; either has to be one the

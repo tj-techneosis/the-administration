@@ -42,6 +42,11 @@ type manifest struct {
 	// The commit the app was built from, when the setup knows better than
 	// the checkout's HEAD (provenance.go).
 	Build string `json:"build,omitempty"`
+	// More logins per role, for users sharing the room (share.go): each
+	// gets one of its own while there are any left.
+	Logins map[string][]role `json:"logins,omitempty"`
+	// Set in a joiner's copy when its login is another's too.
+	SharedLogin bool `json:"shared_login,omitempty"`
 }
 
 // A role's test login: a username or an email, and its local password.
@@ -103,8 +108,29 @@ func work(id, name string) error {
 	// The machine's setup turn, taken by the room's first setup, is let go
 	// once the room is up, or failed; this is for a way out that misses it.
 	defer endSetupTurn()
+	// A user waiting for a room, or for its setup turn, may be handed one
+	// by a user of the contract who's done with theirs (handon.go): it
+	// waits with wctx, which ends when it takes one.
+	var hw *handWatch
+	wctx := ctx
+	if _, planned := c.spot(name); planned && handsOn(ci) {
+		hw, wctx = watchHands(ctx, c, ci, dir, name)
+		defer hw.end()
+		commitRoom = func() bool {
+			if hw.setOpen(false) {
+				return false
+			}
+			// Its own setup starts: no room is handed to it from now on.
+			_ = os.WriteFile(filepath.Join(pd, "setting-up"), nil, 0o600)
+			return true
+		}
+	}
+	taken := false
 	if ci.Kind == "user" {
-		if err := awaitRoom(ctx, c, name, &s, save); err != nil {
+		hw.setOpen(true)
+		err := awaitRoom(wctx, c, name, &s, save)
+		taken = hw.setOpen(false)
+		if err != nil && !taken {
 			if ctx.Err() != nil {
 				finish("closed", "closed while waiting for a room")
 			} else {
@@ -124,7 +150,7 @@ func work(id, name string) error {
 		finish("failed", bad)
 		return nil
 	}
-	if hook := buildHook(c); hook != "" && (ci.Kind == "user" || len(ci.Uses) > 0) {
+	if hook := buildHook(c); hook != "" && !taken && (ci.Kind == "user" || len(ci.Uses) > 0) {
 		var release func()
 		s.BuildArtifact, s.BuildCommit, release, err = ensureBuild(ctx, c, hook, func(why string) {
 			s.Reason = why
@@ -188,8 +214,22 @@ func work(id, name string) error {
 		if ci.NoBrowser {
 			err = makeRoom(c, ci, pd, &s, save)
 		} else {
-			m, err = buildRoom(ctx, c, ci, pd, &s, save)
-			if err == nil && c.Before {
+			if !taken {
+				hw.setOpen(true)
+				m, err = buildRoom(wctx, c, ci, pd, &s, save)
+				// Handed a room while it waited for its turn (the wait
+				// cut short), or just as the turn came (the setup called
+				// off): that room is its own now.
+				if hw.setOpen(false) && (errors.Is(err, errHanded) || err != nil && ctx.Err() == nil) {
+					endSetupTurn()
+					taken, err = true, nil
+				}
+			}
+			if taken && hw.shared {
+				m, before, err = joinedRoom(c, dir, name, &s, save)
+			} else if taken {
+				m, before, err = takeRoom(c, dir, name, &s, save)
+			} else if err == nil && c.Before {
 				before, err = beforeRoom(ctx, c, ci, pd, &s, save)
 			}
 		}
@@ -200,7 +240,9 @@ func work(id, name string) error {
 			err = sealSandboxed(c, ci, s.Room)
 		}
 		if err != nil {
-			teardown(c, dir, name, &s)
+			if !leaveRoom(ctx, c, dir, name, &s, save, false) {
+				teardown(c, dir, name, &s)
+			}
 			var r refusal
 			if errors.As(err, &r) {
 				finish("refused", r.msg)
@@ -213,9 +255,13 @@ func work(id, name string) error {
 		}
 	}
 
-	// The room is up: the next room on the machine sets up, and this
+	// The room is up: the next room on the machine sets up, the
+	// contract's other users may share it (share.go), and this
 	// professional's coins start now.
 	endSetupTurn()
+	if ci.Kind == "user" {
+		offerRoom(c, dir, name, ci, &s)
+	}
 	ready := time.Now().UTC().Truncate(time.Second)
 	s.State, s.Reason, s.ReadyAt = "working", "", &ready
 	save()
@@ -231,9 +277,20 @@ func work(id, name string) error {
 		}
 	}
 	if ci.Kind == "user" || len(ci.Uses) > 0 {
-		teardown(c, dir, name, &s)
+		// Its room stays for those sharing it, or goes to the next user
+		// waiting for one, put back, or is torn down.
+		if !leaveRoom(ctx, c, dir, name, &s, save, state == "back" || state == "out") {
+			if !(state == "back" || state == "out") || !handOn(ctx, c, dir, name, ci, &s, m, before, save) {
+				teardown(c, dir, name, &s)
+			}
+		}
 	}
 	finish(state, reason)
+	// Its findings are checked now, while the contract's others still work,
+	// not only once the last is back (verify.go).
+	if s.Findings > 0 && ctx.Err() == nil {
+		startEarlyVerify(c, dir)
+	}
 	return nil
 }
 
@@ -378,6 +435,9 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		return nil, err
 	}
 	defer p.done(false)
+	if !commitRoom() {
+		return nil, errHanded
+	}
 	// A room is three folders. app is the copy of the app, built by setup and
 	// never writable by the professional. desk is the professional's working
 	// directory, where the browser may save screenshots. tmp holds the
@@ -661,6 +721,12 @@ func teardown(c *contract, dir, name string, s *status) {
 	if s.TornDown || s.Room == "" {
 		return
 	}
+	// A room whose papers were on their way to another user: the taker's,
+	// if it took them; this one's again otherwise.
+	if reclaimPapers(dir, name) {
+		s.TornDown = true
+		return
+	}
 	pd := filepath.Join(dir, name)
 	var ci *castItem
 	for i := range c.Professionals {
@@ -726,6 +792,12 @@ func teardown(c *contract, dir, name string, s *status) {
 	// started outside its own descendants (docker compose -d, a daemon) is
 	// teardown's job; if a port still answers, the books say so.
 	clearTagged(readTag(dir, name) + "/setup")
+	// A room handed on is also what earlier users' setups started.
+	for _, t := range s.RoomTags {
+		if validTag(t) {
+			clearTagged(t + "/setup")
+		}
+	}
 	// A process killed a moment ago can still hold its port: give it two
 	// seconds to let go before calling it a leftover.
 	open := listening(s.Ports)
@@ -1076,6 +1148,12 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 		default:
 			r := m.Roles[ci.SignsInAs]
 			fmt.Fprintf(&b, "Sign in as %s: %s / %s\n", ci.SignsInAs, r.id(), r.Password)
+		}
+		if len(c.mates(ci.Name)) > 0 && handsOn(ci) {
+			fmt.Fprintf(&b, "Other testers may be using this app at the same time as you, on the same data: a record you didn't make, or one that changed while you weren't looking, may be theirs. Before you report that, check it's the app's doing, not theirs.\n")
+			if m.SharedLogin {
+				fmt.Fprintf(&b, "Another tester is signed in with the same login as you, at the same time: don't change its password or email, or sign out everywhere, and expect what's in it to change under you.\n")
+			}
 		}
 		if before != nil && ci.SignsInAs != "" {
 			fmt.Fprintf(&b, "On the before app (%s), the logins are its own:\n", before.URL)

@@ -16,6 +16,7 @@ persona's body says: a line "FAKE: <mode>" picks the mode.
   partial    a plan of four, one covered and the rest unreached
   record     keeps its record with the house's tools, not FINDING: lines
   room       a finding the test room caused (its seed never loaded)
+Each "SAY: <words>" line of the body is a finding of its own, too.
 
 With --input-format stream-json the brief comes as the first message on
 stdin; each later message (the Administration sending it back) is recorded
@@ -53,8 +54,14 @@ if os.path.basename(persona) == "verifier.md":
     out = []
     with open(os.path.join(os.getcwd(), "..", "..", "fake-verifier-seen.jsonl"), "a") as seen:
         seen.write(json.dumps(data) + "\n")
+    listed = data.get("checked_list", [])
     for f in data["findings"]:
         a = None
+        # The same bug as one checked already, in other words: folded.
+        twin = [c for c in listed if "save button" in c["text"]]
+        if "saving does nothing" in f["text"] and twin and not f.get("already_checked"):
+            out.append({"id": f["id"], "verdict": "same", "same_as": twin[0]["ref"], "why": "settings.js:12, the same missing save()"})
+            continue
         if f.get("already_checked"):
             a = {"id": f["id"], "verdict": f["already_checked"], "why": "as before"}
         elif "save button" in f["text"]:
@@ -77,6 +84,22 @@ if os.path.basename(persona) == "verifier.md":
         if a:
             out.append(a)
     say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "result": "Checked.\n" + json.dumps(out)})
+    sys.exit(0)
+
+if os.path.basename(persona) == "deduper.md":
+    # The pass for the same bug in other words: the slow page, said two
+    # ways, is one; anything judged the same that says "receipt" is parted.
+    data = json.loads(prompt)
+    assert args[args.index("--tools") + 1] == "", "the deduper has no tools"
+    contract = os.getcwd()
+    while not os.path.exists(os.path.join(contract, "contract.json")):
+        contract = os.path.dirname(contract)
+    with open(os.path.join(contract, "fake-deduper-seen.jsonl"), "a") as f:
+        f.write(json.dumps(data) + "\n")
+    slow = [g["id"] for g in data["findings"] if "page is slow" in g["text"] or "takes ages to load" in g["text"]]
+    same = [{"ids": slow, "why": "both the list's unpaged query"}] if len(slow) > 1 else []
+    apart = [{"ref": r, "why": "a different fault"} for g in data["findings"] for r in g.get("judged_same", []) if "receipt" in g["text"]]
+    say({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": json.dumps({"same": same, "apart": apart})})
     sys.exit(0)
 
 if os.path.basename(persona) == "matcher.md":
@@ -132,6 +155,10 @@ if mode == "hoard":
                 f.write(json.dumps(message_text(line)) + "\n")
     sys.exit(0)
 text("Looking around.\n**FINDING:** the save button does nothing on /settings\n")
+# Findings of the test's own words: each "SAY: ..." line of the persona.
+for line in body.split("\n"):
+    if line.startswith("SAY: "):
+        text("FINDING: " + line[5:])
 if mode == "slow":
     text("UNREACHED: the billing page, ran out of time")
     while True:

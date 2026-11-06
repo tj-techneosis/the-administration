@@ -223,6 +223,17 @@ specialist with a concrete checklist doesn't.
    the before app (without the change) is seeded from the same set: when
    the set holds records only the change's code can make, the setup hook
    must skip them there, and if it doesn't, say so under the risks.
+   When the cast has two or more browser users, lay them out across rooms
+   on its own line, `rooms: <plan>`: `a+b` for users in one room at once
+   (they don't collide: work that only reads, a login each, different
+   parts of the app), `a>b` for users in one room one after another, its
+   data put back between them (each uses up something the data holds
+   once: a one-time gift, an invite, a first order), rooms separated by
+   commas, and `a+b>c` mixing them. Leave out critics, users with
+   equipment, and a user that breaks the data on purpose: each works in a
+   room of its own. Say why, in a line, beside the professionals it
+   concerns. A room takes minutes to set up; a user in one already up
+   starts at once.
 5. **Equipment the contract needs.** When a risk can only be seen by
    running something nothing here reaches (a desktop window, a phone, a
    tool on another OS), or the equipment there is lacks what the checks

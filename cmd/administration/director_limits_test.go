@@ -36,12 +36,24 @@ func TestTheDirectorsCastIsHeldToWhatUsersCanDo(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(project, ".administration", "professionals", "regular.md"), []byte("---\nname: regular\ndescription: \"regular takes contracts on forms.\"\nadministration:\n  kind: user\n  coins: 5m\n  knows:\n    - forms\n    - phones\n---\nA regular.\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(out, "cast.md"), []byte("# Cast\n\n> **Also cast:** regular, and regular again\n"), 0o644)
 	got = strings.Join(checkDirectorOut(project, "cast", out), "\n")
-	for _, want := range []string{"candidates/uploader.md: tells a user who sees the screen to run page script (new File(", "candidates/sneaky.md: tells a user", "the cast has 5 users and a contract can have 4"} {
+	for _, want := range []string{"candidates/uploader.md: tells a user who sees the screen to run page script (new File(", "candidates/sneaky.md: tells a user", "the cast needs 5 rooms and a contract can have 4"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("want %q in:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "user-1.md") || strings.Contains(got, "careful.md") {
 		t.Errorf("a plain user was flagged:\n%s", got)
+	}
+	// Laid out in fewer rooms by its rooms: line, the cast fits.
+	_ = os.WriteFile(filepath.Join(out, "cast.md"), []byte("# Cast\n\n> **Also cast:** regular\nrooms: uploader+careful, sneaky>user-1>regular\n"), 0o644)
+	got = strings.Join(checkDirectorOut(project, "cast", out), "\n")
+	if strings.Contains(got, "rooms and a contract can have") {
+		t.Errorf("a cast laid out in 2 rooms was counted as 5:\n%s", got)
+	}
+	// A name that isn't on the cast is caught here, not at place.
+	_ = os.WriteFile(filepath.Join(out, "cast.md"), []byte("# Cast\nrooms: uploader+nobody\n"), 0o644)
+	got = strings.Join(checkDirectorOut(project, "cast", out), "\n")
+	if !strings.Contains(got, "cast.md: rooms: nobody isn't on this contract's cast") {
+		t.Errorf("a stranger on the rooms: line passed:\n%s", got)
 	}
 }
