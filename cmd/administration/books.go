@@ -274,6 +274,11 @@ type ledgerLine struct {
 	Data    string `json:"data,omitempty"`
 	Rooms   string `json:"rooms,omitempty"`
 	Version string `json:"version,omitempty"`
+	// What it was placed on: the commit (the build under test), branch and
+	// pull request, so it can be joined to other records of the change.
+	Commit string `json:"commit,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	PR     int    `json:"pr,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -310,6 +315,7 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 		}
 	}
 	l.Data, l.Rooms, l.Version = c.Data, c.Rooms, c.Version
+	l.Commit, l.Branch, l.PR = c.want(), c.Branch, c.PR
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true

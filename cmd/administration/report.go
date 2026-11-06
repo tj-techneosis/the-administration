@@ -592,6 +592,9 @@ func writeSummary(c *contract, dir string) (string, error) {
 	fmt.Fprintf(&b, "# Contract %s: %s\n\n", c.ID, c.Target)
 	fmt.Fprintf(&b, "Placed %s by %s, in %s.\n\n", c.PlacedAt.Local().Format(time.DateTime), c.PlacedBy, c.Project)
 	b.WriteString(provenanceNote(c, dir))
+	if l := c.branchLine(); l != "" {
+		b.WriteString(l + ".\n\n")
+	}
 	if p := c.plan(); len(p) > 0 {
 		fmt.Fprintf(&b, "Room plan: %s; anyone else in a room of their own.\n\n", p.Said())
 	}

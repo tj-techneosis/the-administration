@@ -556,5 +556,41 @@ class Ledger(Base):
         self.assertEqual(files, ["shop.rooms.json"])
 
 
+    def test_a_contract_keeps_its_branch_and_pull_request(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        asked = os.path.join(self.tmp, "gh-asked")
+        gh = os.path.join(self.tmp, "fake-gh")
+        write(gh, f'#!/bin/sh\necho "$*" >> "{asked}"\n[ "$3" = "feature" ] && echo 42\n', 0o755)
+        self.env["ADMINISTRATION_GH"] = gh
+        self.hire_file("r", kind="critic")
+        write(os.path.join(self.project, "a.txt"), "1\n")
+        g("add", "."), g("commit", "-qm", "a")
+        # On main: no pull request is asked for.
+        cid = self.place("on main", "--cast", "r")
+        c = json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))
+        self.assertEqual((c.get("branch"), c.get("pr")), ("main", None))
+        self.assertFalse(os.path.exists(asked))
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        g("checkout", "-qb", "feature")
+        head = g("rev-parse", "HEAD")
+        cid2 = self.place("on the branch", "--cast", "r")
+        c = json.load(open(os.path.join(self.books, "contracts", cid2, "contract.json")))
+        self.assertEqual((c["branch"], c["pr"], c["commit"]), ("feature", 42, head))
+        self.assertIn("On branch feature, pull request #42", self.cli("status", cid2).stdout)
+        self.cli("wait", cid2)
+        self.cli("close", cid2)
+        self.assertIn("On branch feature, pull request #42.", self.cli("report", cid2).stdout)
+        time.sleep(1.1)
+        cid3 = self.place("last", "--cast", "r")
+        self.cli("wait", cid3)
+        self.cli("close", cid3)
+        self.cli("prune", "--keep", "1", "--older", "0s")
+        import glob
+        lines = [json.loads(l) for f in glob.glob(os.path.join(self.books, "ledgers", "*.jsonl")) for l in open(f)]
+        l = [x for x in lines if x["contract"] == cid2][0]
+        self.assertEqual((l["commit"], l["branch"], l["pr"]), (head, "feature", 42))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,6 +70,10 @@ type contract struct {
 	// the person chose with --build, and the copy of the project as it was
 	// placed that critics and verifiers read.
 	Commit   string `json:"commit,omitempty"`
+	// The branch checked out and its pull request (branch.go), for joining
+	// the books to what else works on the same change.
+	Branch   string `json:"branch,omitempty"`
+	PR       int    `json:"pr,omitempty"`
 	Work     string `json:"work,omitempty"`
 	Build    string `json:"build,omitempty"`
 	Checkout string `json:"checkout,omitempty"`
@@ -788,6 +792,10 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 		}
 	}()
 	c.Commit, c.Work, c.Build, c.Tested, c.Checkout = held.Commit, held.Work, held.Build, held.Tested, held.Checkout
+	if c.Commit != "" {
+		c.Branch = branchOf(project)
+		c.PR = prOf(project, c.Branch)
+	}
 	dir := filepath.Join(books, "contracts", id)
 	if f.has("changes") {
 		// A --build contract's changes are the commit's alone, as its copy
@@ -1137,6 +1145,9 @@ func cmdStatus(args []string) error {
 		fmt.Printf("Contract %s (%s), on %q, placed %s%s\n", vw.ID, state, vw.Target, vw.PlacedAt.Local().Format("Mon 15:04"), by)
 		if t := vw.testedLine(); t != "" {
 			fmt.Println("  " + t)
+		}
+		if b := vw.branchLine(); b != "" {
+			fmt.Println("  " + b)
 		}
 		if p := vw.plan(); len(p) > 0 {
 			fmt.Println("  Room plan: " + p.Said() + "; anyone else in a room of their own.")

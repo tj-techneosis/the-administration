@@ -792,7 +792,12 @@ at the machine needs: `started_at`, `ready_at` and `finished_at` (UTC),
 `waited_secs`, a user's `setup_secs` (room up, less its wait) and `room`
 (`own`, `shared`, `handed on`), and the contract's `data`, `rooms` and
 `version` (the Administration it was placed with, also in its
-`contract.json`). `room-check` and `equipment-check` are keyed and housed
+`contract.json`), and what it was placed on: `commit` (the build under
+test), `branch` (the branch checked out, from `git symbolic-ref`) and `pr`
+(the pull request for that branch, asked of the GitHub CLI, `gh pr view`,
+with no prompts and a five-second limit; never for main or master; 0 with no
+`gh` or no answer; `ADMINISTRATION_GH` names another CLI). Any other record
+of the same change, by commit, branch or pull request, joins to these. `room-check` and `equipment-check` are keyed and housed
 as the project's contracts are, so their setups are measured with theirs:
 a worktree's check isn't a house of its own, and doesn't go alone to be
 measured again.

@@ -587,8 +587,11 @@ kept) to a line each in the project's ledger, so the stats outlive them.
 Each line keeps the seat's times (started, room up, finished, in UTC), how
 long it waited and how long its room took to set up, where the room came
 from (its own, shared, handed on), the contract's data set and room plan,
-and the Administration it ran on: enough to line old runs up against the
-machine's history. A
+the Administration it ran on, and what it was placed on: the commit, the
+branch and, when the GitHub CLI knows one, its pull request. Enough to line
+old runs up against the machine's history, and against any other record of
+the same change. `status` and the
+summary name the branch and pull request when it isn't the default branch. A
 contract nobody has reviewed is kept whole until it's older than
 `--older`. Prune is refused (exit 4) while a place, close, verify,
 verdicts or resume is running, and leaves alone a build a room is
