@@ -249,6 +249,10 @@ type ledgerLine struct {
 	CoinsMin  float64  `json:"coins_min"`
 	CostUSD   *float64 `json:"cost_usd,omitempty"` // raw usage, for anyone who wants it
 	Turns     int      `json:"turns,omitempty"`
+	// Tokens as status.json keeps them: fresh input, output, cache.
+	TokensIn    int `json:"tokens_in,omitempty"`
+	TokensOut   int `json:"tokens_out,omitempty"`
+	TokensCache int `json:"tokens_cache,omitempty"`
 	Findings  int      `json:"findings"`
 	Unreached int      `json:"unreached"`
 	Confirmed int      `json:"confirmed"`
@@ -285,6 +289,7 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 	s := readStatus(dir, p.Name)
 	l := ledgerLine{Contract: c.ID, Target: c.Target, Placed: c.PlacedAt.Format(time.RFC3339), Name: p.Name,
 		Kind: p.Kind, State: s.State, CoinsMin: p.CoinsMin, CostUSD: s.CostUSD, Turns: s.Turns,
+		TokensIn: s.TokensIn, TokensOut: s.TokensOut, TokensCache: s.TokensCache,
 		Findings: s.Findings, Unreached: s.Unreached, Dossier: p.Dossier}
 	// The coins it used: from when its room was ready, so what it waited
 	// for the machine isn't counted against it.
@@ -515,10 +520,7 @@ func cmdStats(args []string) error {
 		// Usage is kept for whoever wants it, as each status.json keeps a
 		// professional's: the checking around them (verifiers, the matcher)
 		// is here, never printed.
-		checking := map[string]any{}
-		for who, t := range projectSpend(key, project) {
-			checking[who] = map[string]any{"cost_usd": t[0], "runs": int(t[1]), "unfinished": int(t[2])}
-		}
+		checking := projectSpend(key, project)
 		return printJSON(map[string]any{"project": project, "contracts": countContracts(lines), "professionals": st, "checking": checking})
 	}
 	if len(st) == 0 {
@@ -564,15 +566,16 @@ type spend struct {
 	State     string   `json:"state"`
 	CostUSD   *float64 `json:"cost_usd,omitempty"`
 	Turns     int      `json:"turns,omitempty"`
-	TokensIn  int      `json:"tokens_in,omitempty"`
-	TokensOut int      `json:"tokens_out,omitempty"`
+	TokensIn    int      `json:"tokens_in,omitempty"`
+	TokensOut   int      `json:"tokens_out,omitempty"`
+	TokensCache int      `json:"tokens_cache,omitempty"`
 }
 
 // recordSpend adds a headless run to its contract's spend.jsonl.
 func recordSpend(dir, who string, findings int, model, state string, rep *report) spend {
 	sp := spend{At: time.Now().UTC().Format(time.RFC3339), Who: who, Findings: findings, Model: model, State: state}
 	if rep != nil {
-		sp.CostUSD, sp.Turns, sp.TokensIn, sp.TokensOut = rep.cost, rep.turns, rep.tokensIn, rep.tokensOut
+		sp.CostUSD, sp.Turns, sp.TokensIn, sp.TokensOut, sp.TokensCache = rep.cost, rep.turns, rep.tokensIn, rep.tokensOut, rep.tokensCache
 	}
 	if f, err := os.OpenFile(filepath.Join(dir, "spend.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 		b, _ := json.Marshal(sp)
@@ -583,11 +586,9 @@ func recordSpend(dir, who string, findings int, model, state string, rep *report
 }
 
 // projectSpend is what checking cost on a project's contracts still in the
-// books: each kind of run's dollars and count.
-// The three numbers are dollars, runs, and runs that didn't finish (counted
-// in runs; one that never started costs nothing).
-func projectSpend(key, project string) map[string][3]float64 {
-	out := map[string][3]float64{}
+// books: each kind of run's totals (spent).
+func projectSpend(key, project string) map[string]spent {
+	out := map[string]spent{}
 	books, err := booksDir()
 	if err != nil {
 		return out
@@ -610,15 +611,27 @@ func projectSpend(key, project string) map[string][3]float64 {
 
 // contractSpend is what checking cost on one contract, as projectSpend
 // counts it.
-func contractSpend(dir string) map[string][3]float64 {
-	out := map[string][3]float64{}
+func contractSpend(dir string) map[string]spent {
+	out := map[string]spent{}
 	if b, err := os.ReadFile(filepath.Join(dir, "spend.jsonl")); err == nil {
 		addSpend(out, b)
 	}
 	return out
 }
 
-func addSpend(out map[string][3]float64, b []byte) {
+// spent is one kind of checking run's totals: dollars, runs, runs that
+// didn't finish (counted in runs; one that never started costs nothing),
+// and tokens as each run reported them.
+type spent struct {
+	CostUSD     float64 `json:"cost_usd"`
+	Runs        int     `json:"runs"`
+	Unfinished  int     `json:"unfinished"`
+	TokensIn    int     `json:"tokens_in,omitempty"`
+	TokensOut   int     `json:"tokens_out,omitempty"`
+	TokensCache int     `json:"tokens_cache,omitempty"`
+}
+
+func addSpend(out map[string]spent, b []byte) {
 	for _, l := range strings.Split(string(b), "\n") {
 		var sp spend
 		if json.Unmarshal([]byte(l), &sp) != nil {
@@ -626,12 +639,15 @@ func addSpend(out map[string][3]float64, b []byte) {
 		}
 		t := out[sp.Who]
 		if sp.CostUSD != nil {
-			t[0] += *sp.CostUSD
+			t.CostUSD += *sp.CostUSD
 		}
-		t[1]++
+		t.Runs++
 		if sp.State != "done" {
-			t[2]++
+			t.Unfinished++
 		}
+		t.TokensIn += sp.TokensIn
+		t.TokensOut += sp.TokensOut
+		t.TokensCache += sp.TokensCache
 		out[sp.Who] = t
 	}
 }

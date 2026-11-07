@@ -150,8 +150,11 @@ type status struct {
 	// nowhere. Nil when the professional was shown out before it could say.
 	CostUSD    *float64   `json:"cost_usd,omitempty"`
 	Turns      int        `json:"turns,omitempty"`
-	TokensIn   int        `json:"tokens_in,omitempty"`
-	TokensOut  int        `json:"tokens_out,omitempty"`
+	// tokens_in is fresh input; tokens_cache what was read from or
+	// written to the prompt cache (before 0.7.5, tokens_in held both).
+	TokensIn    int `json:"tokens_in,omitempty"`
+	TokensOut   int `json:"tokens_out,omitempty"`
+	TokensCache int `json:"tokens_cache,omitempty"`
 	TornDown   bool       `json:"torn_down,omitempty"`
 	// When its equipment was lost mid-contract, and why: "back" then
 	// means back with part of the work undone.
@@ -1710,11 +1713,6 @@ func statusAll(f *flags) error {
 		return err
 	}
 	from := time.Now().Add(-since)
-	type checking struct {
-		CostUSD    float64 `json:"cost_usd"`
-		Runs       int     `json:"runs"`
-		Unfinished int     `json:"unfinished"`
-	}
 	type record struct {
 		ID       string              `json:"id"`
 		Target   string              `json:"target"`
@@ -1730,7 +1728,7 @@ func statusAll(f *flags) error {
 		Data     string              `json:"data,omitempty"`
 		Rooms    string              `json:"rooms,omitempty"`
 		Seats    []ledgerLine        `json:"seats"`
-		Checking map[string]checking `json:"checking"`
+		Checking map[string]spent `json:"checking"`
 	}
 	out := []record{}
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
@@ -1741,12 +1739,9 @@ func statusAll(f *flags) error {
 		}
 		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),
 			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
-			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: map[string]checking{}}
+			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: contractSpend(dir)}
 		for _, p := range c.Professionals {
 			r.Seats = append(r.Seats, lineFor(c, dir, p))
-		}
-		for who, t := range contractSpend(dir) {
-			r.Checking[who] = checking{CostUSD: t[0], Runs: int(t[1]), Unfinished: int(t[2])}
 		}
 		out = append(out, r)
 	}

@@ -46,8 +46,9 @@ type report struct {
 	// From claude's closing event; absent if it was shown out first.
 	cost      *float64
 	turns     int
-	tokensIn  int
-	tokensOut int
+	tokensIn    int // fresh input
+	tokensOut   int
+	tokensCache int // cache reads and writes
 	// Browser tool calls, and how many pages loaded (browser_navigate came
 	// back without an error), so a user whose browser never worked is told
 	// apart from one who found nothing. Closing, listing tabs or resizing
@@ -273,7 +274,8 @@ func (r *report) add(line []byte) bool {
 			r.cost = ev.Cost
 		}
 		r.turns += ev.Turns
-		r.tokensIn += ev.Usage.In + ev.Usage.CacheRead + ev.Usage.CacheCreate
+		r.tokensIn += ev.Usage.In
+		r.tokensCache += ev.Usage.CacheRead + ev.Usage.CacheCreate
 		r.tokensOut += ev.Usage.Out
 		if ev.IsError {
 			r.isError = strings.TrimSpace("claude ended with an error: " + ev.Subtype + " " + oneLine(ev.Result, 200))

@@ -817,14 +817,19 @@ measured again.
 
 Every professional's `status.json`, every ledger line and every Director
 run's `run.json` keep what claude reports at the end of a session: `turns`,
-`tokens_in`, `tokens_out` and `cost_usd` (Claude Code's estimate at list
-prices; absent when a professional was shown out before it could report).
+`tokens_in` (fresh input), `tokens_cache` (prompt-cache reads and writes),
+`tokens_out` and `cost_usd` (Claude Code's own `total_cost_usd`: its estimate
+at API list prices, whatever the account pays; absent when a professional
+was shown out before it could report). Before 0.7.5 `tokens_in` held the
+cache too and there was no `tokens_cache`, so `tokens_in + tokens_cache` is
+the whole input either way.
 A session ends once for its brief and once more for each send-back: the
 cost each end reports is the session's so far, but its turns and tokens
 are only that answer's, so those are added up over every end. The
 verifiers and the matcher, whose folders go once they answer, keep theirs
-in the contract's `spend.jsonl`, one line a run; `stats --json` sums them
-under `checking`. Nothing shows them: the budget a person sees is coins,
+in the contract's `spend.jsonl`, one line a run; `stats --json` and
+`status --all --json` sum them under `checking` (dollars, runs, unfinished
+runs and the three token counts), and `status --all` gives each seat's too. Nothing shows them: the budget a person sees is coins,
 which are time. Anyone who wants to track usage can read them from
 `status --json`, `stats --json`, `spend.jsonl` or the ledgers in
 `ledgers/`.

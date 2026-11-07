@@ -1734,7 +1734,7 @@ wait:
 		_ = os.Remove(filepath.Join(pd, "findings.jsonl"))
 		fmt.Fprintf(os.Stderr, "writing the record: %v; its report stands instead\n", err)
 	}
-	s.CostUSD, s.Turns, s.TokensIn, s.TokensOut = rep.cost, rep.turns, rep.tokensIn, rep.tokensOut
+	s.CostUSD, s.Turns, s.TokensIn, s.TokensOut, s.TokensCache = rep.cost, rep.turns, rep.tokensIn, rep.tokensOut, rep.tokensCache
 	if state == "back" && rep.final == "" {
 		state = "failed"
 		reason = "ended without a report"

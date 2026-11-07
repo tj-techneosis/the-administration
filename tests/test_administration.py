@@ -630,6 +630,11 @@ class Critic(Base):
         subprocess.run([binary(), "verdicts", done, "-"], env=self.env, cwd=self.project, check=True, capture_output=True, text=True,
                        input=json.dumps({"reader": [{"finding": 1, "verdict": "confirmed"}, {"finding": 2, "verdict": "false", "why": "it saves"}]}))
         self.cli("close", done)
+        # Two checking runs, as the verifiers record them.
+        with open(os.path.join(self.books, "contracts", done, "spend.jsonl"), "a") as f:
+            for i in range(2):
+                f.write(json.dumps({"at": "2026-01-01T00:00:00Z", "who": "verifier", "state": "done", "cost_usd": 0.5,
+                                    "tokens_in": 10 + i, "tokens_out": 20, "tokens_cache": 300}) + "\n")
         old = self.place("y", "--cast", "reader")
         self.cli("wait", old)
         self.cli("close", old)
@@ -647,7 +652,9 @@ class Critic(Base):
         self.assertEqual((seat["name"], seat["kind"], seat["state"]), ("reader", "critic", "back"))
         self.assertEqual((seat["findings"], seat["confirmed"], seat["false"], seat["checked"]), (2, 1, 1, True))
         self.assertTrue(seat["started_at"] and seat["finished_at"])
-        self.assertIsInstance(r["checking"], dict)
+        self.assertEqual((seat["tokens_in"], seat["tokens_out"], seat["tokens_cache"]), (20, 340, 1090))
+        self.assertEqual(r["checking"], {"verifier": {"cost_usd": 1.0, "runs": 2, "unfinished": 0,
+                                                       "tokens_in": 21, "tokens_out": 40, "tokens_cache": 600}})
         ids = [r["id"] for r in json.loads(self.cli("status", "--all", "--since", "100000d", "--json").stdout)]
         self.assertEqual(sorted(ids), sorted([done, old]))
         self.assertIn(done, self.cli("status", "--all").stdout)
@@ -2795,7 +2802,9 @@ class Books(Base):
         # Turns and tokens add up over its closing events (the brief, then
         # two send-backs, each reporting only its own answer's); the cost
         # each reports is the session's so far.
-        self.assertEqual((s["cost_usd"], s["turns"], s["tokens_in"], s["tokens_out"]), (0.0125, 9, 1110, 340))
+        # Fresh input apart from the prompt cache's reads and writes.
+        self.assertEqual((s["cost_usd"], s["turns"], s["tokens_in"], s["tokens_out"], s["tokens_cache"]),
+                         (0.0125, 9, 20, 340, 1090))
         self.assertNotIn("--max-budget-usd", self.call(cid, "a")["argv"])
         for out in (self.cli("stats").stdout, self.cli("status", cid).stdout, self.cli("wait", cid).stdout,
                     open(self.cli("close", cid).stdout.strip()).read()):

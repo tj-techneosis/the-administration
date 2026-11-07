@@ -497,7 +497,7 @@ instead: never dropped, never counted.
 | `administration build [REF]` | the house's build hook's build of REF (HEAD by default), from the books or made now; prints its path |
 | `administration wait ID [--timeout 3h]` | waits until everyone is back or out of coins, with a line as each one's state changes; returns early (2, or 3 if refused) when one fails while others still work |
 | `administration status [ID] [--json]` | who's working and who's back, who's waiting for the machine (a room, the setup turn, memory) and how long each waited, and who placed it; with no ID, every open contract and a `Rooms:` line saying how many are free and how many users wait for one |
-| `administration status --all [--since 7d] [--json]` | every contract placed in the window, open and closed, newest first: each professional's line as the ledger keeps it (times, room, findings and their checks) and what checking cost. For a board of the books |
+| `administration status --all [--since 7d] [--json]` | every contract placed in the window, open and closed, newest first: each professional's line as the ledger keeps it (times, room, findings and their checks, tokens) and what checking cost in dollars and tokens. For a board of the books |
 | `administration close ID [--keep]` | stops anyone still working, merges the reports, puts the Director's specialists who found something on the roster and clears the rooms; prints the summary's path |
 | `administration report ID [NAME]` | prints the summary once closed, or one professional's report |
 | `administration sweep [--dry-run]` | stops what rooms left behind still run (their room folder and working folder both gone, no open contract owning them); `place` does it too. Linux |

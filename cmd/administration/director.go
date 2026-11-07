@@ -42,6 +42,9 @@ type directorRun struct {
 	Reason   string    `json:"reason,omitempty"`
 	CostUSD  *float64  `json:"cost_usd,omitempty"` // as claude reports it; shown nowhere
 	Turns    int       `json:"turns,omitempty"`
+	TokensIn    int    `json:"tokens_in,omitempty"`
+	TokensOut   int    `json:"tokens_out,omitempty"`
+	TokensCache int    `json:"tokens_cache,omitempty"`
 	Problems []string  `json:"problems,omitempty"` // what the checks found in ./out
 	Repaired bool      `json:"repaired,omitempty"` // a second round fixed what the first left wrong
 	Applied  bool      `json:"applied,omitempty"`
@@ -283,6 +286,7 @@ func directorJob(job string, args []string) (int, error) {
 	tag := newTag(id, "director")
 	rep, state, reason := runHeadless(rd, claudeArgs, tag, coins)
 	run.State, run.Reason, run.CostUSD, run.Turns = state, reason, rep.cost, rep.turns
+	run.TokensIn, run.TokensOut, run.TokensCache = rep.tokensIn, rep.tokensOut, rep.tokensCache
 	if job == "onboard" {
 		run.Problems = assembleConversions(in, out)
 	}
@@ -300,6 +304,7 @@ func directorJob(job string, args []string) (int, error) {
 			run.CostUSD = &total
 		}
 		run.Turns += rep2.turns
+		run.TokensIn, run.TokensOut, run.TokensCache = run.TokensIn+rep2.tokensIn, run.TokensOut+rep2.tokensOut, run.TokensCache+rep2.tokensCache
 		if state2 == "done" {
 			run.Repaired = true
 			run.Problems = nil
