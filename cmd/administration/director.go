@@ -527,7 +527,7 @@ func unreviewed(project string) []string {
 	for _, file := range files {
 		dir := filepath.Dir(file)
 		c, _, err := loadContract(filepath.Base(dir))
-		if err != nil || contractKey(c) != projectKey(project) || c.ClosedAt == nil {
+		if err != nil || !sameProject(c, project) || c.ClosedAt == nil {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, "reviewed")); err == nil {

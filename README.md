@@ -604,6 +604,18 @@ refused. A contract's ledger lines are written before it's removed, and
 never twice, so a prune cut off or failing loses no numbers; one that
 can't remove something carries on, then names it (exit 1).
 
+The books file a project under one name, so every clone and worktree of
+it is one project, with one ledger, one build cache and one set of setup
+measurements: the house's `[project] name` in `roster.toml` when it has
+one, else its origin repository's name (`shop` for `github.com/acme/shop`;
+`shop-apps-web` for a project in that repository's `apps/web`), else its
+path. Books from before 0.7.6 filed a project with no name by its path;
+its history still counts. Anything else that keeps records of the same
+work can join on that name and the branch. `place --ticket SHOP-12
+--requested-by alice --release v0.6.4` adds what the contract was for
+(a tracker's id, who asked for it, the version it reviews) to its record,
+its ledger lines, `status --all` and the summary.
+
 A room whose teardown never ran (its setup run by hand, then its folder
 deleted with its cleanup in it) leaves its servers running, and nobody is
 left to send them home. Each `place` first stops what such rooms still

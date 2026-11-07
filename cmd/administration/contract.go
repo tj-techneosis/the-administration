@@ -86,6 +86,11 @@ type contract struct {
 	// What place warned about the changes' base (a branch missing the
 	// local default branch's commits), kept for whoever triages later.
 	BaseWarnings []string `json:"base_warnings,omitempty"`
+	// What it's for, as other records name it (place --ticket,
+	// --requested-by, --release): joined on, never shown as prose.
+	Ticket      string `json:"ticket,omitempty"`
+	RequestedBy string `json:"requested_by,omitempty"`
+	Release     string `json:"release,omitempty"`
 	// The rooms left behind that place stopped before it began (sweep.go):
 	// each one's folder, how many processes, the memory they held.
 	Swept []string `json:"swept,omitempty"`
@@ -418,7 +423,8 @@ func cmdPlace(args []string) error {
 // from one never placed, and let go of a lock it needed only until then.
 func placeContract(args []string, resumes string, placed func(id string)) error {
 	f, err := parseFlags(args, map[string]bool{"cast": true, "with": true, "coins": true, "model": true, "project": true, "dry-run": false,
-		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false, "rooms": true})
+		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false, "rooms": true,
+		"ticket": true, "requested-by": true, "release": true})
 	if err != nil {
 		return err
 	}
@@ -609,6 +615,23 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// pay for it each time it's tried again. The flags first, then the rooms.
 	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
 		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version}
+	// What the contract is for, as other records name it: a ticket, who
+	// asked for it, and the release it reviews. Short words only: they're
+	// joined on, never shown as prose.
+	for _, m := range []struct {
+		flag string
+		re   *regexp.Regexp
+		to   *string
+	}{{"ticket", ticketRE, &c.Ticket}, {"requested-by", nameRE, &c.RequestedBy}, {"release", versionRE, &c.Release}} {
+		if !f.has(m.flag) {
+			continue
+		}
+		v := strings.TrimSpace(f.get(m.flag))
+		if !m.re.MatchString(v) {
+			return usageError{fmt.Sprintf("--%s %q: give a short name (%s)", m.flag, v, m.re)}
+		}
+		*m.to = v
+	}
 	for _, p := range cast {
 		ci := castItem{Name: p.Name, Kind: p.Kind, Source: p.Source, CoinsMin: p.CoinsMin, SignsInAs: p.SignsInAs, Sees: p.Sees,
 			Model: p.Model, Uses: p.Uses, NoBrowser: p.Kind == "user" && !p.Browser,
@@ -1725,6 +1748,9 @@ func statusAll(f *flags) error {
 		Commit   string              `json:"commit,omitempty"`
 		Branch   string              `json:"branch,omitempty"`
 		PR       int                 `json:"pr,omitempty"`
+		Ticket      string           `json:"ticket,omitempty"`
+		RequestedBy string           `json:"requested_by,omitempty"`
+		Release     string           `json:"release,omitempty"`
 		Data     string              `json:"data,omitempty"`
 		Rooms    string              `json:"rooms,omitempty"`
 		Seats    []ledgerLine        `json:"seats"`
@@ -1739,6 +1765,7 @@ func statusAll(f *flags) error {
 		}
 		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),
 			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
+			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release,
 			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: contractSpend(dir)}
 		for _, p := range c.Professionals {
 			r.Seats = append(r.Seats, lineFor(c, dir, p))

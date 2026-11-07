@@ -283,6 +283,10 @@ type ledgerLine struct {
 	Commit string `json:"commit,omitempty"`
 	Branch string `json:"branch,omitempty"`
 	PR     int    `json:"pr,omitempty"`
+	// What the contract was for: place --ticket, --requested-by, --release.
+	Ticket      string `json:"ticket,omitempty"`
+	RequestedBy string `json:"requested_by,omitempty"`
+	Release     string `json:"release,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -321,6 +325,7 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 	}
 	l.Data, l.Rooms, l.Version = c.Data, c.Rooms, c.Version
 	l.Commit, l.Branch, l.PR = c.want(), c.Branch, c.PR
+	l.Ticket, l.RequestedBy, l.Release = c.Ticket, c.RequestedBy, c.Release
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true
@@ -400,7 +405,18 @@ func history(project string) ([]ledgerLine, error) {
 	}
 	var lines []ledgerLine
 	seen := map[string]bool{}
-	if f, err := os.Open(projectLedger(books, projectKey(project))); err == nil {
+	// A project filed by its path before it had a name (books from before
+	// 0.7.6 key a project with no roster name by its path) keeps that
+	// history: its old ledger is read too.
+	ledgers := []string{projectLedger(books, projectKey(project))}
+	if old := projectLedger(books, project); old != ledgers[0] {
+		ledgers = append(ledgers, old)
+	}
+	for _, ledger := range ledgers {
+		f, err := os.Open(ledger)
+		if err != nil {
+			continue
+		}
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
 			// A line written twice (by a prune before appendLedger
@@ -416,7 +432,7 @@ func history(project string) ([]ledgerLine, error) {
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 	for _, file := range files {
 		c, dir, err := loadContract(filepath.Base(filepath.Dir(file)))
-		if err != nil || contractKey(c) != projectKey(project) {
+		if err != nil || !sameProject(c, project) {
 			continue
 		}
 		for _, p := range c.Professionals {
@@ -1157,6 +1173,12 @@ func lockFile(path string) (func(), error) {
 		return nil, err
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+// sameProject is whether a contract is the project's: filed under its key,
+// or placed from this very folder under the path it was keyed by before.
+func sameProject(c *contract, project string) bool {
+	return contractKey(c) == projectKey(project) || c.Project == project && contractKey(c) == project
 }
 
 func contractKey(c *contract) string {

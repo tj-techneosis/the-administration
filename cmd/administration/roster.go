@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 	"time"
 
@@ -675,13 +677,47 @@ func cmdMatch(f *flags) error {
 }
 
 // projectKey is what the books file a project under: its name from
-// roster.toml, or its path.
+// roster.toml; else its origin repository's name ("shop" for
+// github.com/acme/shop), so every clone and worktree of it is one project
+// in the books, as its kept house is one house; else its path. A project
+// in a subfolder of its repository (apps/web in a monorepo) is
+// "<repo>-<subfolder>", so two projects in one repository stay apart.
 func projectKey(project string) string {
 	if n := loadProjectConfig(project).Project.Name; n != "" && nameRE.MatchString(n) {
 		return n
 	}
+	if n := originName(project); n != "" {
+		return n
+	}
 	return project
 }
+
+var originNames sync.Map // project → originName
+
+// originName is the project's name taken from its origin remote, or "" when
+// it has none or the name can't be made one (nameRE).
+func originName(project string) string {
+	if v, ok := originNames.Load(project); ok {
+		return v.(string)
+	}
+	name := ""
+	if o := originOf(project); o != "" {
+		name = path.Base(o)
+		if sub, err := git(project, "rev-parse", "--show-prefix"); err == nil {
+			if clean := path.Clean(strings.TrimSpace(sub)); clean != "." && clean != "" && !strings.HasPrefix(clean, "..") {
+				name += "-" + clean
+			}
+		}
+		name = strings.Trim(nonName.ReplaceAllString(strings.ToLower(strings.TrimSuffix(name, ".git")), "-"), "-")
+		if !nameRE.MatchString(name) {
+			name = ""
+		}
+	}
+	originNames.Store(project, name)
+	return name
+}
+
+var nonName = regexp.MustCompile(`[^a-z0-9-]+`)
 
 // A sandboxed equipment's commands are names or paths, one program each. Never a
 // shell, an interpreter or anything that runs another command for it: any of

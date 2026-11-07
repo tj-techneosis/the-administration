@@ -815,6 +815,14 @@ as the project's contracts are, so their setups are measured with theirs:
 a worktree's check isn't a house of its own, and doesn't go alone to be
 measured again.
 
+A project's **name in the books** is the house's `[project] name`, else
+its origin repository's name (with `-<subfolder>` for a project inside a
+repository), else its path: worktrees and clones of one repository are
+one project. A project keyed by its path before 0.7.6 still finds that
+history (its old ledger, and contracts placed from the same folder).
+`place --ticket`, `--requested-by` and `--release` record what a contract
+was for, on the contract and on each ledger line, for joining.
+
 Every professional's `status.json`, every ledger line and every Director
 run's `run.json` keep what claude reports at the end of a session: `turns`,
 `tokens_in` (fresh input), `tokens_cache` (prompt-cache reads and writes),

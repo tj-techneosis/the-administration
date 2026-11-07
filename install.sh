@@ -13,7 +13,7 @@
 #
 #   ./install.sh                 install (and the browser)
 #   ./install.sh --no-browser    skip the browser (critics only, or already installed)
-#   ./install.sh --version v0.7.5   that release rather than the latest (download only)
+#   ./install.sh --version v0.7.6   that release rather than the latest (download only)
 #
 # A checkout with no Go (or mise) installs the latest release instead.
 set -eu

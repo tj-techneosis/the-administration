@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,14 +36,36 @@ func ghBin() string {
 // branchLine says what branch and pull request a contract was placed on,
 // "" for the default branch or none.
 func (c *contract) branchLine() string {
-	if c.Branch == "" || c.Branch == "main" || c.Branch == "master" {
+	var parts []string
+	if c.Branch != "" && c.Branch != "main" && c.Branch != "master" {
+		on := "On branch " + c.Branch
+		if c.PR > 0 {
+			on += ", pull request #" + strconv.Itoa(c.PR)
+		}
+		parts = append(parts, on)
+	}
+	if c.Ticket != "" {
+		parts = append(parts, "ticket "+c.Ticket)
+	}
+	if c.Release != "" {
+		parts = append(parts, "release "+c.Release)
+	}
+	if c.RequestedBy != "" {
+		parts = append(parts, "asked for by "+c.RequestedBy)
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	if c.PR > 0 {
-		return "On branch " + c.Branch + ", pull request #" + strconv.Itoa(c.PR)
-	}
-	return "On branch " + c.Branch
+	s := strings.Join(parts, "; ")
+	return strings.ToUpper(s[:1]) + s[1:]
 }
+
+// The shapes place's --ticket and --release take: a tracker's id (SHOP-12,
+// acme/shop#12) and a version (v0.6.3, 2.1.0-rc1).
+var (
+	ticketRE  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/#-]{0,63}$`)
+	versionRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,39}$`)
+)
 
 // prOf is the number of the pull request for a branch, asked of the GitHub
 // CLI in the project, 0 when there's none, no gh, or no answer within a few

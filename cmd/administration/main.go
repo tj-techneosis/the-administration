@@ -37,7 +37,10 @@ const usage = `administration: contracts for persona agents.
                        [--changes [--base REF]] [--brief NAME=TASK]... [--only NAME=TASK]...
                        [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME]
                        [--build SHA] [--no-queue] [--rooms PLAN]
-      place a contract; prints its id. --changes puts it on the branch's
+                       [--ticket ID] [--requested-by NAME] [--release VERSION]
+      place a contract; prints its id. --ticket, --requested-by and
+      --release record what it's for (a tracker's id, who asked for it,
+      the version it reviews), so other records can be joined to it. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare
       (--no-before doesn't), and warns when the branch is missing commits
       the local default branch has. The contract is on the project's HEAD

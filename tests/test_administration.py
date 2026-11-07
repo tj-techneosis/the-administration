@@ -347,6 +347,64 @@ class LeftBehind(Base):
         self.assertIn(f"- At place: stopped a room left behind, {gone}: 1 process", self.cli("report", cid).stdout)
 
 
+
+class ProjectKey(Base):
+    """The books file a project under one name, so every clone and worktree
+    of it is one project: its roster name, else its origin repository's
+    name, else its path. What a contract is for (a ticket, who asked, the
+    release) rides along for other records to join on."""
+
+    def key(self, cwd=None):
+        return json.loads(self.cli("place", "x", "--cast", "c", "--dry-run", cwd=cwd).stdout)["key"]
+
+    def git(self, *args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd or self.project, check=True, env=self.env, capture_output=True)
+
+    def test_the_key_is_the_roster_name_else_the_origin_name_else_the_path(self):
+        self.hire_file("c", kind="critic")
+        self.assertEqual(self.key(), self.project)
+        self.git("remote", "add", "origin", "git@github.com:Acme/Shop.git")
+        self.assertEqual(self.key(), "shop")
+        # A worktree of it is the same project.
+        self.git("commit", "-q", "--allow-empty", "-m", "first")
+        wt = os.path.join(self.tmp, "wt-feature")
+        self.git("worktree", "add", "-q", "-b", "feature-x", wt)
+        write(os.path.join(wt, ".administration", "professionals", "c.md"), professional("c", kind="critic"))
+        self.assertEqual(self.key(cwd=wt), "shop")
+        # A project in a subfolder of its repository keeps apart from the rest.
+        sub = os.path.join(self.project, "apps", "web")
+        write(os.path.join(sub, ".administration", "professionals", "c.md"), professional("c", kind="critic"))
+        self.assertEqual(json.loads(self.cli("place", "x", "--cast", "c", "--dry-run", "--project", sub).stdout)["key"], "shop-apps-web")
+        # The roster's own name comes first.
+        write(os.path.join(self.project, ".administration", "roster.toml"), '[project]\nname = "storefront"\n')
+        self.assertEqual(self.key(), "storefront")
+
+    def test_a_project_named_later_keeps_its_history(self):
+        self.hire_file("c", kind="critic")
+        cid = self.place("before it had a remote", "--cast", "c")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.git("remote", "add", "origin", "https://github.com/acme/shop.git")
+        st = json.loads(self.cli("stats", "--json").stdout)
+        self.assertEqual((st["contracts"], [p["name"] for p in st["professionals"]]), (1, ["c"]))
+        cid2 = self.place("after", "--cast", "c")
+        self.cli("wait", cid2)
+        self.cli("close", cid2)
+        self.assertEqual(json.loads(self.cli("stats", "--json").stdout)["contracts"], 2)
+
+    def test_what_a_contract_is_for_is_recorded(self):
+        self.hire_file("c", kind="critic")
+        cid = self.place("x", "--cast", "c", "--ticket", "SHOP-12", "--requested-by", "alice", "--release", "v0.6.4")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        r = [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == cid][0]
+        self.assertEqual((r["ticket"], r["requested_by"], r["release"]), ("SHOP-12", "alice", "v0.6.4"))
+        self.assertEqual(r["seats"][0]["ticket"], "SHOP-12")
+        self.assertIn("Ticket SHOP-12; release v0.6.4; asked for by alice", self.cli("report", cid).stdout)
+        for flag, bad in (("--ticket", "two words"), ("--requested-by", "Not A Name"), ("--release", "1.0 beta")):
+            self.assertIn(f"{flag} ", self.cli("place", "x", "--cast", "c", flag, bad, "--dry-run", check=1).stderr)
+
+
 class Roster(Base):
     def test_a_critic_named_like_a_hire_is_a_problem(self):
         self.hire_file("dup")
