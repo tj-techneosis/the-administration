@@ -457,11 +457,15 @@ class Sharing(Base):
         st = self.status(cid)["status"]
         self.assertEqual({st[n]["state"] for n in "abcd"}, {"out", "back"}, st)
         lines = [l for l in open(log).read().split("\n") if l]
-        self.assertEqual(sorted(l for l in lines if l.startswith("setup")), ["setup a", "setup d"], lines)
+        # a and b's room was set up by whichever of them got there first.
+        setups = sorted(l for l in lines if l.startswith("setup"))
+        self.assertIn(setups, (["setup a", "setup d"], ["setup b", "setup d"]), lines)
+        owner = setups[0].split()[1]
+        joiner = "b" if owner == "a" else "a"
         self.assertEqual(len([l for l in lines if l.startswith("reset")]), 1, lines)
-        self.assertEqual(st["b"].get("shared_with"), "a", st)
-        self.assertIn(st["c"].get("handed_from"), ("a",), st)
-        self.assertEqual(st["c"]["room"], st["a"]["room"])
+        self.assertEqual(st[joiner].get("shared_with"), owner, st)
+        self.assertEqual(st["c"].get("handed_from"), owner, st)
+        self.assertEqual(st["c"]["room"], st[owner]["room"])
         self.assertNotIn("handed_from", st["d"])
         out = self.cli("status", cid).stdout
         self.assertIn("Room plan: a and b, then c, in turns, together where joined; anyone else in a room of their own.", out)
@@ -494,7 +498,9 @@ class Sharing(Base):
         cid = self.place("the forms", "--with", run)
         self.assertIn("Room plan: a and b together", self.cli("status", cid).stdout)
         self.cli("wait", cid)
-        self.assertEqual(self.status(cid)["status"]["b"].get("shared_with"), "a")
+        # Whichever got there first set the room up; the other joined it.
+        st = self.status(cid)["status"]
+        self.assertIn((st["a"].get("shared_with"), st["b"].get("shared_with")), ((None, "a"), ("b", None)), st)
         self.cli("close", cid)
         # --rooms "" places without it; a plan that doesn't fit the cast says whose it is.
         cid = self.place("the forms", "--with", run, "--rooms", "")

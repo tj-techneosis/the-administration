@@ -5,6 +5,8 @@
 # unless ADMINISTRATION_TEST_UNSAFE=1, because it starts and kills real
 # processes.
 #   tests/isolated.sh [unittest args...]
+# ADMINISTRATION_TEST_VERSION=v0.7.7 stamps the binary as that release, as
+# scripts/package.sh does, so a release's own build is what's tested.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 if [ "$(uname)" != Linux ]; then
@@ -12,7 +14,7 @@ if [ "$(uname)" != Linux ]; then
   exit 1
 fi
 bin=$(mktemp -d)/administration
-(cd "$here" && CGO_ENABLED=0 mise exec -- go build -o "$bin" ./cmd/administration)
+(cd "$here" && CGO_ENABLED=0 mise exec -- go build -ldflags "-X main.version=${ADMINISTRATION_TEST_VERSION:-dev}" -o "$bin" ./cmd/administration)
 exec unshare --user --map-root-user --pid --fork --mount-proc --kill-child \
   env ADMINISTRATION_BIN="$bin" ADMINISTRATION_TEST_ISOLATED=1 \
   sh -c 'cd "$1"; shift; if [ $# -eq 0 ]; then mise exec -- go test ./... || exit 1; set -- discover tests; fi; exec python3 -W ignore -m unittest "$@"' sh "$here" "$@"

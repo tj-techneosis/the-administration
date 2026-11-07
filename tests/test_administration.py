@@ -585,12 +585,26 @@ class Upgrade(Base):
         p = self.cli("upgrade", "--check", check=5)
         self.assertIn("1 commit behind", p.stdout)
         self.assertNotIn("installing", p.stdout)  # only asked
-        # No checkout: the latest release's VERSION, and this build isn't one.
+        # No checkout: the latest release's VERSION, against this build's.
         shutil.rmtree(mine)
         rel = os.path.join(self.tmp, "releases")
-        write(os.path.join(rel, "latest", "download", "VERSION"), "v0.5.0\n")
-        p = self.cli("upgrade", "--check", check=1, env={"ADMINISTRATION_RELEASES": "file://" + rel})
-        self.assertIn("The latest release is v0.5.0; this build (dev) isn't a release", p.stdout)
+        latest = lambda v: write(os.path.join(rel, "latest", "download", "VERSION"), v + "\n")
+        env = {"ADMINISTRATION_RELEASES": "file://" + rel}
+        mine_v = self.cli("version").stdout.split()[-1]
+        if mine_v == "dev":
+            latest("v0.5.0")
+            p = self.cli("upgrade", "--check", check=1, env=env)
+            self.assertIn("The latest release is v0.5.0; this build (dev) isn't a release", p.stdout)
+        else:
+            # A release build (tests/isolated.sh with ADMINISTRATION_TEST_VERSION).
+            major = int(mine_v.lstrip("v").split(".")[0])
+            latest(f"v{major + 1}.0.0")
+            p = self.cli("upgrade", "--check", check=5, env=env)
+            self.assertIn(f"v{major + 1}.0.0 is out (this is {mine_v})", p.stdout)
+            latest("v0.0.0")
+            self.assertIn("newer than the latest release (v0.0.0)", self.cli("upgrade", "--check", env=env).stdout)
+            latest(mine_v)
+            self.assertIn(f"Up to date: {mine_v} is the latest release", self.cli("upgrade", "--check", env=env).stdout)
         p = self.cli("upgrade", "--check", check=1, env={"ADMINISTRATION_RELEASES": "file://" + os.path.join(self.tmp, "none")})
         self.assertIn("couldn't find out the latest release", p.stderr)
 
