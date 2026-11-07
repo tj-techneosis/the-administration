@@ -75,10 +75,13 @@ const usage = `administration: contracts for persona agents.
       place would. A part is resumed
       once: again, it names the contract that picked it up, to resume
       from that one
-  administration status [ID] [--json]
+  administration status [ID] [--json] | status --all [--since 7d] [--json]
       who's working, who's back, who's waiting for the machine (a room,
       the setup turn, memory) and how long each waited; with no ID, every
-      open contract and how many rooms are free
+      open contract and how many rooms are free; --all, every contract
+      placed in the last 7 days (or --since), open and closed, each
+      professional's times, room, findings and checks, and what checking
+      cost, for a board of the books (--json)
   administration close ID [--keep]
       stop anyone still working, merge the reports, clear the rooms;
       prints the summary's path

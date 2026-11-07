@@ -603,23 +603,37 @@ func projectSpend(key, project string) map[string][3]float64 {
 		if cb, err := os.ReadFile(filepath.Join(dir, "contract.json")); err != nil || json.Unmarshal(cb, &o) != nil || contractKey(&o) != key && o.Project != project {
 			continue
 		}
-		for _, l := range strings.Split(string(b), "\n") {
-			var sp spend
-			if json.Unmarshal([]byte(l), &sp) != nil {
-				continue
-			}
-			t := out[sp.Who]
-			if sp.CostUSD != nil {
-				t[0] += *sp.CostUSD
-			}
-			t[1]++
-			if sp.State != "done" {
-				t[2]++
-			}
-			out[sp.Who] = t
-		}
+		addSpend(out, b)
 	}
 	return out
+}
+
+// contractSpend is what checking cost on one contract, as projectSpend
+// counts it.
+func contractSpend(dir string) map[string][3]float64 {
+	out := map[string][3]float64{}
+	if b, err := os.ReadFile(filepath.Join(dir, "spend.jsonl")); err == nil {
+		addSpend(out, b)
+	}
+	return out
+}
+
+func addSpend(out map[string][3]float64, b []byte) {
+	for _, l := range strings.Split(string(b), "\n") {
+		var sp spend
+		if json.Unmarshal([]byte(l), &sp) != nil {
+			continue
+		}
+		t := out[sp.Who]
+		if sp.CostUSD != nil {
+			t[0] += *sp.CostUSD
+		}
+		t[1]++
+		if sp.State != "done" {
+			t[2]++
+		}
+		out[sp.Who] = t
+	}
 }
 
 func countContracts(lines []ledgerLine) int {

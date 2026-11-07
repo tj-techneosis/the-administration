@@ -1080,9 +1080,18 @@ func spawnWorker(self, dir, id, name string) (*exec.Cmd, error) {
 }
 
 func cmdStatus(args []string) error {
-	f, err := parseFlags(args, map[string]bool{"json": false})
+	f, err := parseFlags(args, map[string]bool{"json": false, "all": false, "since": true})
 	if err != nil {
 		return err
+	}
+	if f.has("since") && !f.has("all") {
+		return errors.New("--since goes with --all")
+	}
+	if f.has("all") {
+		if len(f.pos) > 0 {
+			return errors.New("--all lists the books: give it no ID")
+		}
+		return statusAll(f)
 	}
 	var ids []string
 	if len(f.pos) > 0 {
@@ -1672,4 +1681,84 @@ func handoutRules(project string) string {
 		fmt.Fprintf(&b, "\nThese are in ./handout/ too, but not here, as they aren't text or there's too much: %s.\n", strings.Join(left, ", "))
 	}
 	return b.String()
+}
+
+// statusAll is every contract placed in a window (7 days unless --since
+// says), newest first: open and closed, each professional's line as the
+// ledger keeps it (times, room, findings and their checks) and what
+// checking cost. For a board of the books; the text form is a line each.
+func statusAll(f *flags) error {
+	since := 7 * 24 * time.Hour
+	if f.has("since") {
+		d, err := parseAge(f.get("since"))
+		if err != nil || d <= 0 {
+			return fmt.Errorf("--since %q: give an age like 6h or 7d", f.get("since"))
+		}
+		since = d
+	}
+	books, err := booksDir()
+	if err != nil {
+		return err
+	}
+	from := time.Now().Add(-since)
+	type checking struct {
+		CostUSD    float64 `json:"cost_usd"`
+		Runs       int     `json:"runs"`
+		Unfinished int     `json:"unfinished"`
+	}
+	type record struct {
+		ID       string              `json:"id"`
+		Target   string              `json:"target"`
+		Key      string              `json:"key"`
+		Project  string              `json:"project"`
+		PlacedAt time.Time           `json:"placed_at"`
+		PlacedBy string              `json:"placed_by,omitempty"`
+		ClosedAt *time.Time          `json:"closed_at,omitempty"`
+		Version  string              `json:"version,omitempty"`
+		Commit   string              `json:"commit,omitempty"`
+		Branch   string              `json:"branch,omitempty"`
+		PR       int                 `json:"pr,omitempty"`
+		Data     string              `json:"data,omitempty"`
+		Rooms    string              `json:"rooms,omitempty"`
+		Seats    []ledgerLine        `json:"seats"`
+		Checking map[string]checking `json:"checking"`
+	}
+	out := []record{}
+	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
+	for _, file := range files {
+		c, dir, err := loadContract(filepath.Base(filepath.Dir(file)))
+		if err != nil || c.PlacedAt.Before(from) {
+			continue
+		}
+		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),
+			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
+			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: map[string]checking{}}
+		for _, p := range c.Professionals {
+			r.Seats = append(r.Seats, lineFor(c, dir, p))
+		}
+		for who, t := range contractSpend(dir) {
+			r.Checking[who] = checking{CostUSD: t[0], Runs: int(t[1]), Unfinished: int(t[2])}
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PlacedAt.After(out[j].PlacedAt) })
+	if f.has("json") {
+		return printJSON(out)
+	}
+	if len(out) == 0 {
+		fmt.Printf("No contracts placed in the last %s.\n", strings.TrimSuffix(since.String(), "0m0s"))
+		return nil
+	}
+	for _, r := range out {
+		state := "open"
+		if r.ClosedAt != nil {
+			state = "closed"
+		}
+		finds := 0
+		for _, s := range r.Seats {
+			finds += s.Findings
+		}
+		fmt.Printf("%s  %s  %-6s  %-12s  %d seats, %d findings  %s\n", r.ID, r.PlacedAt.Local().Format("Mon 15:04"), state, r.Key, len(r.Seats), finds, r.Target)
+	}
+	return nil
 }

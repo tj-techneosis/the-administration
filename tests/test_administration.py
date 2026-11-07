@@ -548,6 +548,38 @@ class Critic(Base):
         self.assertEqual(self.cli("status", "--json").stdout.strip(), "[]")
         self.assertEqual(json.loads(self.cli("stats", "--json", "--project", self.tmp).stdout)["professionals"], [])
 
+    def test_status_all_lists_the_books_in_a_window_with_checks(self):
+        self.hire_file("reader", kind="critic")
+        done = self.place("x", "--cast", "reader")
+        self.cli("wait", done)
+        subprocess.run([binary(), "verdicts", done, "-"], env=self.env, cwd=self.project, check=True, capture_output=True, text=True,
+                       input=json.dumps({"reader": [{"finding": 1, "verdict": "confirmed"}, {"finding": 2, "verdict": "false", "why": "it saves"}]}))
+        self.cli("close", done)
+        old = self.place("y", "--cast", "reader")
+        self.cli("wait", old)
+        self.cli("close", old)
+        # Placed long ago: outside the window.
+        cpath = os.path.join(self.books, "contracts", old, "contract.json")
+        c = json.load(open(cpath))
+        c["placed_at"] = "2020-01-01T00:00:00Z"
+        json.dump(c, open(cpath, "w"))
+        rows = json.loads(self.cli("status", "--all", "--json").stdout)
+        self.assertEqual([r["id"] for r in rows], [done])
+        r = rows[0]
+        self.assertIsNotNone(r["closed_at"])
+        self.assertEqual(r["target"], "x")
+        seat = r["seats"][0]
+        self.assertEqual((seat["name"], seat["kind"], seat["state"]), ("reader", "critic", "back"))
+        self.assertEqual((seat["findings"], seat["confirmed"], seat["false"], seat["checked"]), (2, 1, 1, True))
+        self.assertTrue(seat["started_at"] and seat["finished_at"])
+        self.assertIsInstance(r["checking"], dict)
+        ids = [r["id"] for r in json.loads(self.cli("status", "--all", "--since", "100000d", "--json").stdout)]
+        self.assertEqual(sorted(ids), sorted([done, old]))
+        self.assertIn(done, self.cli("status", "--all").stdout)
+        self.assertIn("--since goes with --all", self.cli("status", "--since", "7d", check=1).stderr)
+        self.assertIn("give it no ID", self.cli("status", done, "--all", check=1).stderr)
+        self.assertIn("give an age", self.cli("status", "--all", "--since", "soon", check=1).stderr)
+
     def test_each_brief_names_the_others_and_only_replaces_the_checks(self):
         for n in ("a", "b"):
             self.hire_file(n, kind="critic")
