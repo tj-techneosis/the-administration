@@ -91,6 +91,10 @@ type contract struct {
 	Ticket      string `json:"ticket,omitempty"`
 	RequestedBy string `json:"requested_by,omitempty"`
 	Release     string `json:"release,omitempty"`
+	// Where it was placed: the office (office.go), "" when none is set, and
+	// the operating system its rooms ran on.
+	Office string `json:"office,omitempty"`
+	OS     string `json:"os,omitempty"`
 	// The rooms left behind that place stopped before it began (sweep.go):
 	// each one's folder, how many processes, the memory they held.
 	Swept []string `json:"swept,omitempty"`
@@ -615,6 +619,11 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// pay for it each time it's tried again. The flags first, then the rooms.
 	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
 		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version}
+	office, err := officeName()
+	if err != nil {
+		return err
+	}
+	c.stampWhere(office)
 	// What the contract is for, as other records name it: a ticket, who
 	// asked for it, and the release it reviews. Short words only: they're
 	// joined on, never shown as prose.
@@ -1193,6 +1202,9 @@ func cmdStatus(args []string) error {
 		if b := vw.branchLine(); b != "" {
 			fmt.Println("  " + b)
 		}
+		if w := vw.whereLine(); w != "" {
+			fmt.Println("  " + w)
+		}
 		if p := vw.plan(); len(p) > 0 {
 			fmt.Println("  Room plan: " + p.Said() + "; anyone else in a room of their own.")
 		}
@@ -1751,6 +1763,8 @@ func statusAll(f *flags) error {
 		Ticket      string           `json:"ticket,omitempty"`
 		RequestedBy string           `json:"requested_by,omitempty"`
 		Release     string           `json:"release,omitempty"`
+		Office   string              `json:"office,omitempty"`
+		OS       string              `json:"os,omitempty"`
 		Data     string              `json:"data,omitempty"`
 		Rooms    string              `json:"rooms,omitempty"`
 		Seats    []ledgerLine        `json:"seats"`
@@ -1765,7 +1779,7 @@ func statusAll(f *flags) error {
 		}
 		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),
 			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
-			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release,
+			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release, Office: c.Office, OS: c.OS,
 			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: contractSpend(dir)}
 		for _, p := range c.Professionals {
 			r.Seats = append(r.Seats, lineFor(c, dir, p))

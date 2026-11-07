@@ -24,6 +24,10 @@ func cmdResume(args []string) error {
 	if len(f.pos) != 2 {
 		return usageError{"resume ID NAME [--coins 10m]"}
 	}
+	// A wrong office stops it before it says it's going ahead (office.go).
+	if _, err := officeName(); err != nil {
+		return err
+	}
 	// Until the new contract is placed from this one's persona and desk:
 	// prune would strip them in between.
 	unuse, err := useBooks()

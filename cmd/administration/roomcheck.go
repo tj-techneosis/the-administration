@@ -31,6 +31,12 @@ func cmdRoomCheck(args []string) error {
 	if f.has("base") && !f.has("changes") {
 		return usageError{"--base goes with --changes"}
 	}
+	// The office first, before anything is changed: a setting that's wrong
+	// stops the check as it stops place (office.go).
+	office, err := officeName()
+	if err != nil {
+		return err
+	}
 	project, err := projectDir(f.get("project"))
 	if err != nil {
 		return err
@@ -83,6 +89,7 @@ func cmdRoomCheck(args []string) error {
 	c := &contract{ID: id, Target: "room check", Project: project, Key: projectKey(project), House: outsideHouse(project),
 		PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Data: data, Version: version,
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house"}}}
+	c.stampWhere(office)
 	ci := &c.Professionals[0]
 	if f.has("changes") {
 		if c.Changes, err = collectChanges(project, f.get("base"), "", filepath.Join(dir, contractHandout)); err != nil {

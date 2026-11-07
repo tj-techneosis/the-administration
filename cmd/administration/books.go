@@ -287,6 +287,9 @@ type ledgerLine struct {
 	Ticket      string `json:"ticket,omitempty"`
 	RequestedBy string `json:"requested_by,omitempty"`
 	Release     string `json:"release,omitempty"`
+	// Where: the contract's office and operating system (office.go).
+	Office string `json:"office,omitempty"`
+	OS     string `json:"os,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -326,6 +329,7 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 	l.Data, l.Rooms, l.Version = c.Data, c.Rooms, c.Version
 	l.Commit, l.Branch, l.PR = c.want(), c.Branch, c.PR
 	l.Ticket, l.RequestedBy, l.Release = c.Ticket, c.RequestedBy, c.Release
+	l.Office, l.OS = c.Office, c.OS
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true

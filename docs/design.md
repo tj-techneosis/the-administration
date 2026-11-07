@@ -823,6 +823,24 @@ history (its old ledger, and contracts placed from the same folder).
 `place --ticket`, `--requested-by` and `--release` record what a contract
 was for, on the contract and on each ledger line, for joining.
 
+The **office** (`ADMINISTRATION_OFFICE`, or `office` in the config folder)
+is for books kept on several machines and read together. Contract ids are
+four characters, drawn free only within one machine's books, so two
+machines' records collide sooner or later; (office, id) doesn't. The tool
+never names the machine itself, since a hostname is the person's to share
+or not. The system the rooms ran on is recorded beside it, because a
+review that passed on one system says little about another. Both are
+stamped when a contract is placed and never filled in afterwards, so books
+copied to another machine, or pruned there, keep the office they were
+placed at; a label set wrong is refused rather than read as none.
+Pooling books shares more than the office, though. Every contract also
+keeps who placed it (`placed_by`: `ADMINISTRATION_PLACED_BY`, else
+`GIT_AUTHOR_NAME`, else `user:` and the account name, with the first eight
+characters of the Claude Code session's id after it when there is one), the
+project's full path, and the
+`PATH` it was placed with. Read them before sending a machine's records
+anywhere.
+
 Every professional's `status.json`, every ledger line and every Director
 run's `run.json` keep what claude reports at the end of a session: `turns`,
 `tokens_in` (fresh input), `tokens_cache` (prompt-cache reads and writes),

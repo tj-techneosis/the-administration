@@ -599,6 +599,9 @@ func writeSummary(c *contract, dir string) (string, error) {
 	if l := c.branchLine(); l != "" {
 		b.WriteString(l + ".\n\n")
 	}
+	if l := c.whereLine(); l != "" {
+		b.WriteString(l + ".\n\n")
+	}
 	if p := c.plan(); len(p) > 0 {
 		fmt.Fprintf(&b, "Room plan: %s; anyone else in a room of their own.\n\n", p.Said())
 	}

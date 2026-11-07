@@ -616,6 +616,22 @@ work can join on that name and the branch. `place --ticket SHOP-12
 (a tracker's id, who asked for it, the version it reviews) to its record,
 its ledger lines, `status --all` and the summary.
 
+Someone who keeps books on more than one machine can name each one an
+**office**: `ADMINISTRATION_OFFICE`, or the first line of `office` in the
+config folder (`$ADMINISTRATION_CONFIG`, else
+`$XDG_CONFIG_HOME/administration`, else `~/.config/administration`). A
+contract id is only unique within one machine's books, so records brought
+together from several are joined on the office and the id. Each contract
+records its office and the system its rooms ran on (`linux`, `darwin`)
+when it's placed, on its ledger lines, in `status --all` and in the
+summary. A resume is a new contract in this machine's books, so it takes
+this machine's office, and names the contract it picks up from. What's
+recorded is never filled in later: with no office set, none is made up,
+and a contract placed before 0.7.7 has none. An office that's set but
+blank, unreadable or not a short name (lowercase letters, digits and `-`,
+up to 64) stops `place`, `resume`, `room-check` and `equipment-check`
+before they change anything, and says where it came from.
+
 A room whose teardown never ran (its setup run by hand, then its folder
 deleted with its cleanup in it) leaves its servers running, and nobody is
 left to send them home. Each `place` first stops what such rooms still

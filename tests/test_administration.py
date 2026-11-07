@@ -404,6 +404,103 @@ class ProjectKey(Base):
         for flag, bad in (("--ticket", "two words"), ("--requested-by", "Not A Name"), ("--release", "1.0 beta")):
             self.assertIn(f"{flag} ", self.cli("place", "x", "--cast", "c", flag, bad, "--dry-run", check=1).stderr)
 
+    def test_the_office_a_contract_was_placed_at_is_recorded(self):
+        import platform
+        system = platform.system().lower()
+        self.hire_file("c", kind="critic")
+        self.hire_file("reader", kind="critic")
+        record = lambda cid: [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == cid][0]
+        def placed(*args, env=None):
+            cid = self.place("x", "--cast", "c", *args, env=env)
+            self.cli("wait", cid)
+            self.cli("close", cid)
+            return cid
+        # No office set: none is made up, but the system is still recorded.
+        cid = placed()
+        bare = self.place("z", "--cast", "reader")
+        self.cli("wait", bare)
+        r = record(cid)
+        self.assertNotIn("office", r)
+        self.assertEqual((r["os"], r["seats"][0]["os"]), (system, system))
+        self.assertIn(f"Placed on {system}", self.cli("report", cid).stdout)
+        # The config folder's office file, then ADMINISTRATION_OFFICE over it.
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        write(os.path.join(cfg, "office"), "north\n")
+        cid2 = placed()
+        self.assertEqual((record(cid2)["office"], record(cid2)["seats"][0]["office"]), ("north", "north"))
+        self.assertIn(f"Placed at office north ({system})", self.cli("report", cid2).stdout)
+        self.assertIn(f"Placed at office north ({system})", self.cli("status", cid2).stdout)
+        self.assertEqual(record(placed(env={"ADMINISTRATION_OFFICE": "south"}))["office"], "south")
+        # What was recorded is never filled in later: not a contract placed
+        # with none, nor one from before offices were recorded.
+        self.assertNotIn("office", record(cid))
+        old = os.path.join(self.books, "contracts", cid2, "contract.json")
+        c = json.load(open(old))
+        del c["office"], c["os"]
+        c["version"] = "v0.7.6"
+        json.dump(c, open(old, "w"))
+        self.assertNotIn("office", record(cid2))
+        # Its ledger line, written at prune, keeps what it recorded too.
+        self.cli("prune", "--keep", "0", "--older", "0s")
+        import glob
+        lines = [json.loads(l) for f in glob.glob(os.path.join(self.books, "ledgers", "*.jsonl")) for l in open(f)]
+        self.assertEqual({(l["contract"], l.get("office")) for l in lines if l["contract"] in (cid, cid2)}, {(cid, None), (cid2, None)})
+        # A resume is a new contract in these books, with an id drawn here:
+        # it takes this office, whatever the one it picks up from had, and
+        # names that one in resumes.
+        cid3 = self.place("y", "--cast", "reader")
+        self.cli("wait", cid3)
+        out = self.cli("resume", cid3, "reader", env={"ADMINISTRATION_OFFICE": "south"}).stdout
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        c = json.load(open(os.path.join(self.books, "contracts", new, "contract.json")))
+        self.assertEqual((c["office"], c["os"], c["resumes"]), ("south", system, cid3 + " reader"))
+        self.cli("close", new)
+        self.cli("close", cid3)
+        out = self.cli("resume", bare, "reader", env={"ADMINISTRATION_OFFICE": "south"}).stdout
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        self.assertEqual(json.load(open(os.path.join(self.books, "contracts", new, "contract.json")))["office"], "south")
+        self.cli("close", new)
+        self.cli("close", bare)
+        # A setting that's wrong stops a resume before it says it's going ahead.
+        p = self.cli("resume", new, "reader", check=1, env={"ADMINISTRATION_OFFICE": ""})
+        self.assertIn("the office in ADMINISTRATION_OFFICE is blank", p.stderr)
+        self.assertEqual(p.stdout, "")
+        # A marked or \r\n value in the variable says the same as in the file.
+        self.assertEqual(record(placed(env={"ADMINISTRATION_OFFICE": "\ufeffeast\r\n"}))["office"], "east")
+        # A label set wrong is refused, saying where it came from, never
+        # passed over as none: malformed, blank, or unreadable.
+        dry = lambda env=None: self.cli("place", "x", "--cast", "c", "--dry-run", check=1, env=env).stderr
+        self.assertIn('the office in ADMINISTRATION_OFFICE is "Not An Office"', dry({"ADMINISTRATION_OFFICE": "Not An Office"}))
+        self.assertIn("up to 64", dry({"ADMINISTRATION_OFFICE": "x" * 65}))
+        self.assertIn("the office in ADMINISTRATION_OFFICE is blank", dry({"ADMINISTRATION_OFFICE": " "}))
+        office = os.path.join(cfg, "office")
+        with open(office, "w") as fh:
+            fh.write("\nnorth\n")
+        self.assertIn(f"the office in {office} is blank", dry())
+        # A file an editor marked as UTF-8, or ended with \r\n, says the same.
+        with open(office, "w", newline="") as fh:
+            fh.write("\ufeffnorth\r\n")
+        self.assertEqual(record(placed())["office"], "north")
+        os.remove(office)
+        os.makedirs(office)
+        self.assertIn(f"the office in {office} can't be read", dry())
+
+    def test_the_checks_refuse_a_wrong_office_before_changing_anything(self):
+        self.house()
+        hook = os.path.join(self.project, ".administration", "setup")
+        os.chmod(hook, 0o644)
+        bad = {"ADMINISTRATION_OFFICE": "Bad Office"}
+        self.assertIn("the office in ADMINISTRATION_OFFICE", self.cli("room-check", check=1, env=bad).stderr)
+        self.assertEqual(os.stat(hook).st_mode & 0o777, 0o644)  # not made executable
+        # Before it even looks for the equipment.
+        self.assertIn("the office in ADMINISTRATION_OFFICE", self.cli("equipment-check", "nothing", check=1, env=bad).stderr)
+        contracts = os.path.join(self.books, "contracts")
+        self.assertEqual(os.listdir(contracts) if os.path.isdir(contracts) else [], [])
+        self.assertIn("Cleared away", self.cli("room-check", env={"ADMINISTRATION_OFFICE": "north"}).stdout)
+
 
 class Roster(Base):
     def test_a_critic_named_like_a_hire_is_a_problem(self):

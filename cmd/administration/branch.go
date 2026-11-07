@@ -60,6 +60,20 @@ func (c *contract) branchLine() string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+// whereLine says where a contract was placed (office.go): its office and
+// the system its rooms ran on, "" for one placed before either was kept.
+func (c *contract) whereLine() string {
+	switch {
+	case c.Office != "" && c.OS != "":
+		return "Placed at office " + c.Office + " (" + c.OS + ")"
+	case c.Office != "":
+		return "Placed at office " + c.Office
+	case c.OS != "":
+		return "Placed on " + c.OS
+	}
+	return ""
+}
+
 // The shapes place's --ticket and --release take: a tracker's id (SHOP-12,
 // acme/shop#12) and a version (v0.6.3, 2.1.0-rc1).
 var (

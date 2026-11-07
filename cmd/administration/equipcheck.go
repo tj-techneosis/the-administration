@@ -30,6 +30,12 @@ func cmdEquipmentCheck(args []string) error {
 	if len(f.pos) != 1 {
 		return usageError{"equipment-check NAME [--project DIR] [--shot FILE]"}
 	}
+	// The office first, before anything is changed: a setting that's wrong
+	// stops the check as it stops place (office.go).
+	office, err := officeName()
+	if err != nil {
+		return err
+	}
 	project, err := projectDir(f.get("project"))
 	if err != nil {
 		return err
@@ -69,6 +75,7 @@ func cmdEquipmentCheck(args []string) error {
 	c := &contract{ID: id, Target: "equipment check", Project: project, Key: projectKey(project), House: outsideHouse(project),
 		PlacedAt: time.Now().UTC(), PlacedBy: placedBy(), Version: version,
 		Professionals: []castItem{{Name: name, Kind: "user", Source: "house", Uses: []string{eqName}, NoBrowser: !eq.NeedsApp}}}
+	c.stampWhere(office)
 	ci := &c.Professionals[0]
 	// Held to the project's HEAD, as a contract placed now would be.
 	if err := recordCommit(c, ""); err != nil {
