@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -755,7 +757,6 @@ func writeSummary(c *contract, dir string) (string, error) {
 }
 
 var (
-	wordRE = regexp.MustCompile(`[a-z0-9_]{4,}`)
 	// A file a finding cites, and the line or lines right after it, however
 	// it's written: "watch.go:410", "`watch.go` new lines 410-415",
 	// "README lines 30-39".
@@ -864,13 +865,42 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
+// wordSet is the words of four or more letters, digits or underscores in
+// s, lowercased: each whole run of them, as `[a-z0-9_]{4,}` would find.
+// Folding a contract's findings compares every pair, so each text's set
+// is worked out once and kept (read-only: no caller changes it); the keep
+// is emptied when it grows large, as a long-running worker sees many.
 func wordSet(s string) map[string]bool {
-	m := map[string]bool{}
-	for _, w := range wordRE.FindAllString(strings.ToLower(s), -1) {
-		m[w] = true
+	if m, ok := wordSets.Load(s); ok {
+		return m.(map[string]bool)
 	}
+	m := map[string]bool{}
+	low := strings.ToLower(s)
+	start := -1
+	for i := 0; i <= len(low); i++ {
+		word := i < len(low) && (low[i] >= 'a' && low[i] <= 'z' || low[i] >= '0' && low[i] <= '9' || low[i] == '_')
+		switch {
+		case word && start < 0:
+			start = i
+		case !word && start >= 0:
+			if i-start >= 4 {
+				m[low[start:i]] = true
+			}
+			start = -1
+		}
+	}
+	if wordSetCount.Add(1) > 4096 {
+		wordSets.Clear()
+		wordSetCount.Store(0)
+	}
+	wordSets.Store(s, m)
 	return m
 }
+
+var (
+	wordSets     sync.Map
+	wordSetCount atomic.Int64
+)
 
 var (
 	// A heading in a model's prose: markdown, a bold line, or a short line

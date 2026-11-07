@@ -86,6 +86,9 @@ type contract struct {
 	// What place warned about the changes' base (a branch missing the
 	// local default branch's commits), kept for whoever triages later.
 	BaseWarnings []string `json:"base_warnings,omitempty"`
+	// The rooms left behind that place stopped before it began (sweep.go):
+	// each one's folder, how many processes, the memory they held.
+	Swept []string `json:"swept,omitempty"`
 }
 
 type castItem struct {
@@ -833,6 +836,12 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	if f.has("dry-run") {
 		os.RemoveAll(dir)
 		return printJSON(c)
+	}
+	// Rooms whose teardown never ran hold memory nothing will give back,
+	// and pacing would count it as taken: stopped before this one sets up.
+	c.Swept = sweepRooms()
+	for _, l := range c.Swept {
+		fmt.Fprintln(os.Stderr, "administration: "+l)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

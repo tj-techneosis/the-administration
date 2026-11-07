@@ -272,6 +272,81 @@ class Cleanup(Base):
         self.assertFalse(running(fake), "the critic's claude is still running")
 
 
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "rooms left behind are found by /proc")
+class LeftBehind(Base):
+    """A room whose teardown never ran (its setup run by hand, its folder
+    deleted with its cleanup in it) leaves servers nothing owns. sweep, and
+    every place, stop them: only when the room's folder and the process's
+    own working folder are both gone, and no open contract owns it."""
+
+    def room_process(self, room, *, env=None, ignore_term=False, cwd=None):
+        os.makedirs(room, exist_ok=True)
+        script = "trap '' TERM; while :; do sleep 1; done" if ignore_term else "exec sleep 300"
+        p = subprocess.Popen(["/bin/sh", "-c", script], cwd=cwd or room,
+                             env={**os.environ, "ADMINISTRATION_ROOM": room, **(env or {})})
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        return p
+
+    def gone(self, p, within=10):
+        deadline = time.time() + within
+        while time.time() < deadline:
+            if p.poll() is not None or not running(p.pid):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_sweep_stops_only_what_a_gone_room_left(self):
+        self.hire_file("slow", kind="critic", fake="slow", coins="30m")
+        cid = self.place("x", "--cast", "slow")
+        self.wait_state(cid, "slow", {"working"})
+        gone = os.path.join(self.tmp, "hand-room")
+        left = self.room_process(gone)
+        stubborn = self.room_process(gone, ignore_term=True)
+        kept = os.path.join(self.tmp, "still-here")
+        here = self.room_process(kept)
+        elsewhere = os.path.join(self.tmp, "moved-room")
+        os.makedirs(os.path.join(self.tmp, "live-cwd"))
+        live_cwd = self.room_process(elsewhere, cwd=os.path.join(self.tmp, "live-cwd"))
+        owned_room = os.path.join(self.tmp, "owned-room")
+        owned = self.room_process(owned_room, env={"ADMINISTRATION_CONTRACT": cid})
+        for d in (gone, elsewhere, owned_room):
+            shutil.rmtree(d)
+        time.sleep(0.3)
+
+        p = self.cli("sweep", "--dry-run")
+        # Both, and what the stubborn one has running under it.
+        self.assertRegex(p.stdout, rf"Left behind: {re.escape(gone)}: [2-9] processes, \d+ MB")
+        self.assertEqual(p.stdout.count("Left behind:"), 1, p.stdout)
+        self.assertIsNone(left.poll(), "a dry run stopped something")
+
+        p = self.cli("sweep", timeout=30)
+        self.assertRegex(p.stdout, rf"Stopped a room left behind, {re.escape(gone)}: [2-9] processes")
+        self.assertTrue(self.gone(left), "the room's process is still running")
+        self.assertTrue(self.gone(stubborn), "the process that ignores SIGTERM is still running")
+        for name, q in (("its room's folder exists", here), ("its working folder exists", live_cwd),
+                        ("an open contract owns it", owned)):
+            self.assertTrue(running(q.pid), f"stopped a process although {name}")
+        self.assertIn("No rooms left behind.", self.cli("sweep").stdout)
+        self.cli("close", cid)
+
+    def test_place_stops_a_room_left_behind_and_the_summary_says_so(self):
+        self.hire_file("reader", kind="critic")
+        gone = os.path.join(self.tmp, "hand-room")
+        left = self.room_process(gone)
+        shutil.rmtree(gone)
+        time.sleep(0.3)
+        p = self.cli("place", "x", "--cast", "reader")
+        cid = p.stdout.split()[1]
+        self.assertIn(f"stopped a room left behind, {gone}: 1 process", p.stderr)
+        self.assertTrue(self.gone(left), "place left the room's process running")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        with open(os.path.join(self.books, "contracts", cid, "contract.json")) as f:
+            self.assertEqual(len(json.load(f)["swept"]), 1)
+        self.assertIn(f"- At place: stopped a room left behind, {gone}: 1 process", self.cli("report", cid).stdout)
+
+
 class Roster(Base):
     def test_a_critic_named_like_a_hire_is_a_problem(self):
         self.hire_file("dup")

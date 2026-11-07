@@ -819,6 +819,9 @@ func provenanceNote(c *contract, dir string) string {
 	for _, w := range c.BaseWarnings {
 		fmt.Fprintf(&b, "- At place: %s\n", w)
 	}
+	for _, l := range c.Swept {
+		fmt.Fprintf(&b, "- At place: %s\n", l)
+	}
 	if b.Len() > 0 {
 		b.WriteString("\n")
 	}

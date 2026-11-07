@@ -500,6 +500,7 @@ instead: never dropped, never counted.
 | `administration status --all [--since 7d] [--json]` | every contract placed in the window, open and closed, newest first: each professional's line as the ledger keeps it (times, room, findings and their checks) and what checking cost. For a board of the books |
 | `administration close ID [--keep]` | stops anyone still working, merges the reports, puts the Director's specialists who found something on the roster and clears the rooms; prints the summary's path |
 | `administration report ID [NAME]` | prints the summary once closed, or one professional's report |
+| `administration sweep [--dry-run]` | stops what rooms left behind still run (their room folder and working folder both gone, no open contract owning them); `place` does it too. Linux |
 | `administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]` | builds one room with the setup hook, checks it comes up on seed data, shows its address and logins (not the passwords), and clears it away: the test for a hook you just wrote. `--changes` also builds the app before them, as a release check does |
 | `administration resume ID NAME [--coins 10m]` | a new contract for one professional on only what contract ID left undone: what they couldn't reach, and their plan's steps never answered, or their whole part when they wrote nothing down (out of coins, failed, equipment lost). A part is resumed once; what that leaves is resumed from the new contract |
 | `administration equipment-check NAME [--shot FILE]` | starts one piece of equipment in a fresh room, says what its setup printed, takes one picture through a screen and clears it away: room-check for equipment |
@@ -602,6 +603,15 @@ aside, and removes them after. `--dry-run` only looks, so it's never
 refused. A contract's ledger lines are written before it's removed, and
 never twice, so a prune cut off or failing loses no numbers; one that
 can't remove something carries on, then names it (exit 1).
+
+A room whose teardown never ran (its setup run by hand, then its folder
+deleted with its cleanup in it) leaves its servers running, and nobody is
+left to send them home. Each `place` first stops what such rooms still
+run, and the summary says so: the room, how many processes, the memory
+they held. Only this user's processes whose room folder and working folder
+are both gone, and that no open contract owns, so a room being set up
+again is never touched. `administration sweep` does the same for a timer
+on a quiet machine (`--dry-run` only lists them). Linux only.
 
 **Hooks.** The Administration tells nobody anything itself; it runs your
 hooks. An executable named after an event, `placed`, `closed`, `verified`,

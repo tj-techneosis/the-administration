@@ -1,6 +1,8 @@
 package main
 
 import (
+	"maps"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -242,5 +244,26 @@ func TestASandboxFailureSaysWhatToDo(t *testing.T) {
 	}
 	if other := browserFailure("Socket directory path is too long"); other != "Socket directory path is too long" {
 		t.Fatalf("a hint on another error: %s", other)
+	}
+}
+
+// wordSet's scanner finds what the pattern it replaced found, on prose,
+// code references, punctuation, short runs and non-ASCII letters.
+func TestWordSetMatchesThePattern(t *testing.T) {
+	re := regexp.MustCompile(`[a-z0-9_]{4,}`)
+	for _, s := range []string{
+		"", "abc", "abcd", "NEW: `watch.go:410` panics when ROOM_ID is empty",
+		"Help and README disagree on --since (7d vs 30d)", "a_b_c_d__ x1y2z3 übergröße Straße naïve café",
+		"İstanbul KELVIN sign: KKKK", "trailing word1234", "1234-5678_90ab",
+	} {
+		want := map[string]bool{}
+		for _, w := range re.FindAllString(strings.ToLower(s), -1) {
+			want[w] = true
+		}
+		for range 2 { // the second time from the keep
+			if got := wordSet(s); !maps.Equal(got, want) {
+				t.Errorf("wordSet(%q) = %v, want %v", s, got, want)
+			}
+		}
 	}
 }

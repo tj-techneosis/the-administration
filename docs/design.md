@@ -63,6 +63,19 @@ changes" into CLI calls, and checks findings against the code afterwards.
   bad mark can only mean killing less. (An empty room once made the mark
   "/", which matched every process and ended a desktop session.) PIDs can
   be reused, so a recorded group is never signalled on its number alone.
+- **Rooms left behind** (`sweep.go`): a room whose teardown never ran (its
+  setup run by hand, its folder deleted with its cleanup in it) leaves
+  servers that nothing owns, holding memory pacing then counts as taken.
+  `place`, before it sets up, and `sweep`, for a timer on a quiet machine,
+  stop them: this user's processes whose `ADMINISTRATION_ROOM` names a
+  folder that's gone and whose own working folder is gone too, that no open
+  contract owns (by its id, its tag or its rooms). The room is read from
+  the process, not the books, so a room set up by hand counts. SIGTERM, a
+  grace period, then SIGKILL for what's still left behind, checked again
+  first. One line per room (its folder, how many processes, the memory they
+  held) goes in the contract's summary. Linux only: it needs `/proc` to see
+  a working folder. What a room's setup started outside it, like a
+  container stack, isn't its processes, and stays the house's cleanup's.
 - **Sandboxed equipment** (a user's command-line tool): `--tools Bash` (plus
   `Read` with a handout) with a `Bash(cmd)` and `Bash(cmd *)` allow rule per
   listed command (a relative path resolved inside the room's

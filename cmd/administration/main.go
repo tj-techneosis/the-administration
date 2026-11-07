@@ -134,6 +134,10 @@ const usage = `administration: contracts for persona agents.
       each professional's record: runs, findings, how many held up, coins used
   administration prune [--keep 10] [--older 30d] [--dry-run]
       strip reviewed or old contracts to their summaries; past --keep, to the ledger
+  administration sweep [--dry-run]
+      stop what rooms left behind still run: processes whose room folder and
+      working folder are both gone, that no open contract owns (Linux).
+      place does it too; this is for a timer on a quiet machine
   administration check FILE...
       check professional files (what the Director writes)
   administration version
@@ -228,6 +232,8 @@ func run(args []string) int {
 		err = cmdStats(args[1:])
 	case "prune":
 		err = cmdPrune(args[1:])
+	case "sweep":
+		err = cmdSweep(args[1:])
 	case "_screen":
 		err = cmdScreen(args[1:])
 	case "_equip":
