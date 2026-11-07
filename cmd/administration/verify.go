@@ -568,7 +568,7 @@ func fireVerified(c *contract, dir string, count map[string]int, failed int) {
 	p := contractPayload(c, dir)
 	p["verdicts"] = map[string]int{"confirmed": count["confirmed"], "likely": count["likely"], "false": count["false"]}
 	p["verifiers_failed"] = failed
-	fireHooks("verified", c.Project, p)
+	contractHooks(c, "verified", p)
 }
 
 // anyBack says whether a finder of a finding is back (or out, or otherwise

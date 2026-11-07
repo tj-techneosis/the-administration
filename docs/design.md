@@ -833,6 +833,20 @@ review that passed on one system says little about another. Both are
 stamped when a contract is placed and never filled in afterwards, so books
 copied to another machine, or pruned there, keep the office they were
 placed at; a label set wrong is refused rather than read as none.
+A **read-only** contract (`place --read-only`) is for code the machine
+shouldn't run, such as a branch someone else pushed. The wall keeps
+professionals from running anything, but the contract itself runs the
+house's code as the person: setup and builds for rooms, equipment for a
+critic that `uses` it, and the project's event hooks. Read-only refuses
+the first two by casting only reading critics, skips the project's hooks
+(not the machine's, which are the person's own), and writes nothing back
+into the project. Each record says `read_only`, and records on changes
+carry `base`, the commit the changes were measured from (the merge base):
+on `status --all --json`, the ledger and stats. `status ID --json` keeps
+the contract's own `changes`, where `base` is the ref as it was typed and
+`merge_base` the commit. Ledger lines pruned before 0.7.8 have neither
+`read_only` nor `base`.
+
 Pooling books shares more than the office, though. Every contract also
 keeps who placed it (`placed_by`: `ADMINISTRATION_PLACED_BY`, else
 `GIT_AUTHOR_NAME`, else `user:` and the account name, with the first eight

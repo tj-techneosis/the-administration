@@ -493,7 +493,7 @@ instead: never dropped, never counted.
 | command | does |
 |---|---|
 | `administration roster [--match tags] [--json] [--project DIR]` | who's hired, what they know, the open rooms; `--match` drafts a cast |
-| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--build SHA] [--no-queue]` | places a contract on the project's HEAD (and any uncommitted work) and prints its id; a room whose build is another commit's is refused, unless `--build` names that commit on purpose; `--changes` warns when the branch is missing commits the local default branch has; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work. When the rooms are taken it's queued ("Queued, N ahead", exit 0) and its users start by themselves, in turn; `--no-queue` exits 4 instead |
+| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--build SHA] [--no-queue] [--read-only]` | places a contract on the project's HEAD (and any uncommitted work) and prints its id; a room whose build is another commit's is refused, unless `--build` names that commit on purpose; `--changes` warns when the branch is missing commits the local default branch has; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work. When the rooms are taken it's queued ("Queued, N ahead", exit 0) and its users start by themselves, in turn; `--no-queue` exits 4 instead; `--read-only` is for code the machine shouldn't run (see below) |
 | `administration build [REF]` | the house's build hook's build of REF (HEAD by default), from the books or made now; prints its path |
 | `administration wait ID [--timeout 3h]` | waits until everyone is back or out of coins, with a line as each one's state changes; returns early (2, or 3 if refused) when one fails while others still work |
 | `administration status [ID] [--json]` | who's working and who's back, who's waiting for the machine (a room, the setup turn, memory) and how long each waited, and who placed it; with no ID, every open contract and a `Rooms:` line saying how many are free and how many users wait for one |
@@ -506,7 +506,7 @@ instead: never dropped, never counted.
 | `administration equipment-check NAME [--shot FILE]` | starts one piece of equipment in a fresh room, says what its setup printed, takes one picture through a screen and clears it away: room-check for equipment |
 | `administration watch ID [NAME] [--panes]` | follows each professional live: every action, every finding as it's written; `--panes` gives each one a pane in Herdr or tmux (or wherever your `watch` hook puts them), which closes when they're back |
 | `administration hire NAME\|FILE [--replace]` | puts a candidate on the roster |
-| `administration hire --from CONTRACT NAME` | keeps one of the Director's specialists from a contract by hand (one that found something joins the roster at close by itself), with the record it earned there |
+| `administration hire --from CONTRACT NAME [--project DIR]` | keeps one of the Director's specialists from a contract by hand (one that found something joins the roster at close by itself), with the record it earned there; from a read-only contract, only into a checkout other than the one it reviewed |
 | `administration verify ID [--batch 12] [--coins 10m] [--model M]` | checks a closed contract's unchecked findings in the house: walled verifiers read the project's code (nothing else, no shell) and record confirmed, likely or false for each, with the line that decided it, a corrected mark when a finding's is wrong (an OLD marked NEW), and also or not_also for each link the matcher proposed; yours replace theirs. Most are checked already: each professional's findings are checked in the background as soon as it's back, while the others work, so this waits for that and checks what's left. Every verifier is given what's checked so far, and folds the same bug worded otherwise into it instead of checking it again; first, one pass over the whole list folds the rest of those, and parts any fold it finds wrong. Nothing is folded into a finding found false. The early checks' output, a verifier that failed among it, is in the contract's `verify-early.log` (the close's verify checks again whatever it left); while one runs, `prune` says the books are busy. `ADMINISTRATION_VERIFY_EARLY=off` leaves every check to the close, and `ADMINISTRATION_MAX_VERIFIERS` (4) caps the verifiers running at once on the machine |
 | `administration verdicts ID FILE\|-` | records the check of each finding, `{"name": [{"finding": 3, "verdict": "confirmed", "why": "...", "tag": "OLD", "also": ["ID NAME #N"], "not_also": [...]}]}`; `tag` refiles a finding whose mark is wrong; the summary shows each beside its finding, and `also` links it to the same bug in another contract, on both sides |
 | `administration check FILE...` | checks a professional's file |
@@ -631,6 +631,25 @@ and a contract placed before 0.7.7 has none. An office that's set but
 blank, unreadable or not a short name (lowercase letters, digits and `-`,
 up to 64) stops `place`, `resume`, `room-check` and `equipment-check`
 before they change anything, and says where it came from.
+
+**Read-only contracts.** A contract runs some of the project's own code as
+you, outside the wall: its setup and build for a user's room, the programs
+a critic `uses`, and the project's hooks (`placed`, `closed`, `verified`,
+`hired`, `watch`, `director`). On a branch you haven't read, that's the
+branch's code. `place --read-only` places only critics that read: it
+refuses users and any critic that uses equipment, skips the project's own
+hooks (the machine's, in the config folder, still run), and writes nothing
+into the project, so close keeps no one-off on its roster. The steps
+around it hold the same: `director cast --read-only` skips the project's
+`director` hook, an amended cast of it is read-only too, `director apply`
+refuses it, and a contract placed with that cast (by its id or a
+candidate's own file) is read-only even without the flag; a resume of a
+read-only contract is read-only, and picks a one-off up from the
+contract's own file of it, never the roster; and `hire --from` a read-only
+contract refuses to write into the checkout it reviewed or its house, by
+any way round (keep them in one you trust, `--project DIR`) and runs no
+project's `hired` hook. The professionals' own files still come from the
+project's house; read them, or take the house from a branch you trust.
 
 A room whose teardown never ran (its setup run by hand, then its folder
 deleted with its cleanup in it) leaves its servers running, and nobody is

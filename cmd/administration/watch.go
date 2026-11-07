@@ -42,7 +42,7 @@ func cmdWatch(args []string) error {
 		return usageError{fmt.Sprintf("%s isn't on contract %s", f.pos[1], c.ID)}
 	}
 	if f.has("panes") {
-		return openPanes(c.ID, c.Project, dir, names)
+		return openPanes(c.ID, c.Project, dir, names, c.ReadOnly)
 	}
 	return follow(os.Stdout, dir, names, pollEvery(), isTTY(os.Stdout))
 }
@@ -367,7 +367,7 @@ func isTTY(f *os.File) bool {
 // them wherever it likes; otherwise it's a new Herdr tab in the placer's
 // space, or a tmux window. The panes are only viewers: closing one stops
 // nothing, and each closes itself once its professional is back.
-func openPanes(id, project, dir string, names []string) error {
+func openPanes(id, project, dir string, names []string, readOnly bool) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -387,7 +387,7 @@ func openPanes(id, project, dir string, names []string) error {
 			` || { echo; echo "(watch stopped; press return to close)"; read x; }`
 		return "sh -c " + shellQuote(inner)
 	}
-	if hook := watchHook(project); hook != "" {
+	if hook := watchHookFrom(project, !readOnly); hook != "" {
 		// The hook's panes may not inherit our environment, so the
 		// command carries the books' location itself.
 		prefix := ""

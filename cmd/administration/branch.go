@@ -60,9 +60,30 @@ func (c *contract) branchLine() string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
+// base is the commit a contract's changes were measured from (the merge
+// base of HEAD and --base), "" for one not on changes.
+func (c *contract) base() string {
+	if c.Changes == nil {
+		return ""
+	}
+	return c.Changes.MergeBase
+}
+
 // whereLine says where a contract was placed (office.go): its office and
 // the system its rooms ran on, "" for one placed before either was kept.
 func (c *contract) whereLine() string {
+	w := c.placedWhere()
+	if c.ReadOnly {
+		ro := "read-only: critics that only read; the project's hooks didn't run, and nothing was written into it"
+		if w == "" {
+			return strings.ToUpper(ro[:1]) + ro[1:]
+		}
+		return w + "; " + ro
+	}
+	return w
+}
+
+func (c *contract) placedWhere() string {
 	switch {
 	case c.Office != "" && c.OS != "":
 		return "Placed at office " + c.Office + " (" + c.OS + ")"

@@ -2,6 +2,7 @@
 claude, a throwaway project, books and rooms, so they never touch the
 machine's own contracts. Run: python3 -m unittest discover tests
 """
+import glob
 import json
 import os
 import re
@@ -3149,6 +3150,133 @@ class Hooks(Base):
         self.assertEqual(closed["status"]["r"]["state"], "back")
         self.assertEqual(json.load(open(f"{got}.hired.project"))["name"], "n")
         self.assertIn(cid, open(f"{got}.env").read())
+
+    def test_a_read_only_contract_runs_and_writes_nothing_of_the_projects(self):
+        import re
+        got = os.path.join(self.tmp, "events")
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        house = os.path.join(self.project, ".administration")
+        # Code under review brings hooks of its own; the machine has its own too.
+        for ev in ("placed", "closed", "verified", "hired"):
+            self.hook(house, ev, f'touch "{got}.{ev}.project"')
+            self.hook(cfg, ev, f'touch "{got}.{ev}.machine"')
+        self.hook(house, "watch", f'touch "{got}.watch.project"')
+        self.hire_file("r", kind="critic")
+        self.hire_file("u", kind="user")
+        self.hire_file("t", kind="critic", extra="  uses: [slugify]")
+        # Only critics that read: a user needs a room, and uses runs the project's programs.
+        self.assertIn("u is a user", self.cli("place", "x", "--cast", "r,u", "--read-only", check=1).stderr)
+        self.assertIn("t uses slugify, which runs the project's programs",
+                      self.cli("place", "x", "--cast", "t", "--read-only", check=1).stderr)
+        p = self.cli("place", "x", "--cast", "r", "--read-only", env={"HERDR_ENV": "1"})
+        cid = p.stdout.split()[1]
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.cli("verify", cid)
+        for ev in ("placed", "closed", "verified"):
+            self.assertTrue(os.path.exists(f"{got}.{ev}.machine"), ev)
+        self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
+        r = [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == cid][0]
+        self.assertEqual((r["read_only"], r["seats"][0]["read_only"]), (True, True))
+        self.assertIn("read-only: critics that only read", self.cli("report", cid).stdout)
+        # A resume of it stays read-only.
+        out = self.cli("resume", cid, "r").stdout
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        self.assertTrue(json.load(open(os.path.join(self.books, "contracts", new, "contract.json")))["read_only"])
+        self.cli("close", new)
+        self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
+        # A one-off the Director cast isn't written into the project at close,
+        # and the cast itself runs none of the project's hooks.
+        self.hook(house, "director", f'touch "{got}.director.project"')
+        self.hook(cfg, "director", f'touch "{got}.director.machine"')
+        out = self.cli("director", "cast", "the forms", "--read-only", check=None).stdout
+        self.assertTrue(os.path.exists(f"{got}.director.machine"))
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        rd = os.path.join(self.books, "director", run, "out")
+        write(os.path.join(rd, "candidates", "spot.md"), professional("spot", kind="critic"))
+        write(os.path.join(rd, "cast.md"), "# Cast\n- spot: forms\n")
+        shown = self.cli("director", "show", run).stdout
+        self.assertIn(f"read-only: place it with: administration place TARGET --with {run} --read-only", shown)
+        self.assertNotIn("apply with", shown)
+        # Nothing of it is applied into the project it reviewed.
+        self.assertIn("nothing is applied into it", self.cli("director", "apply", run, check=1).stderr)
+        self.assertFalse(os.path.exists(os.path.join(house, "candidates", "spot.md")))
+        # A candidate's own file, by its path, carries it as the run does.
+        p = self.cli("place", "the forms", "--with", os.path.join(rd, "candidates", "spot.md"))
+        self.assertIn("this contract is too", p.stdout)
+        self.cli("close", p.stdout.split("Contract ")[1].split()[0])
+        # Placed without the flag, a read-only cast carries it, and says so.
+        p = self.cli("place", "the forms", "--with", run)
+        self.assertIn("this contract is too", p.stdout)
+        cid = p.stdout.split("Contract ")[1].split()[0]
+        self.assertTrue(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["read_only"])
+        self.cli("wait", cid)
+        out = self.cli("close", cid).stdout
+        self.assertFalse(os.path.exists(os.path.join(house, "professionals", "spot.md")))
+        self.assertIn(f"keep them in a checkout you trust with administration hire --from {cid} spot --project DIR", self.cli("report", cid).stdout + out)
+        self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
+        # It's resumed from the contract's own file of it, never from the
+        # roster, even when the reviewed house names someone else that.
+        self.hire_file("spot", kind="critic", fake="ok")
+        out = self.cli("resume", cid, "spot").stdout
+        again = out.split("Contract ")[1].split()[0]
+        self.cli("wait", again)
+        c2 = json.load(open(os.path.join(self.books, "contracts", again, "contract.json")))
+        self.assertTrue(c2["read_only"])
+        self.assertEqual([(p["name"], p["source"]) for p in c2["professionals"]], [("spot", "contract")])
+        self.cli("close", again)
+        os.remove(os.path.join(house, "professionals", "spot.md"))
+        # Kept later, never into the checkout it reviewed, and with no
+        # project's own hired hook, wherever it's kept; the machine's runs.
+        spot_cid = cid
+        self.assertIn(f"hire --from {cid} spot --project DIR", self.cli("report", cid).stdout)
+        self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", cid, "spot", check=1).stderr)
+        # Nor by a way round: a subfolder of it.
+        sub = os.path.join(self.project, "sub")
+        os.makedirs(sub)
+        self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", cid, "spot", "--project", sub, check=1).stderr)
+        self.assertFalse(os.path.exists(os.path.join(sub, ".administration")))
+        # Nor through a link to it, to a house not made yet.
+        lnk = os.path.join(self.tmp, "lnk")
+        os.symlink(sub, lnk)
+        self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", cid, "spot", "--project", lnk, check=1).stderr)
+        self.assertFalse(os.path.exists(os.path.join(sub, ".administration")))
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        subprocess.run(["git", "init", "-q"], cwd=other, check=True, env=self.env)
+        self.hook(os.path.join(other, ".administration"), "hired", f'touch "{got}.hired.other"')
+        self.cli("hire", "--from", cid, "spot", "--project", other)
+        self.assertTrue(os.path.exists(os.path.join(other, ".administration", "professionals", "spot.md")))
+        self.assertTrue(os.path.exists(f"{got}.hired.machine"))
+        self.assertFalse(os.path.exists(f"{got}.hired.other"))
+        self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
+        # A plain hire still runs the project's own hired hook (the check above isn't vacuous).
+        write(os.path.join(other, ".administration", "candidates", "n.md"), professional("n", kind="critic"))
+        self.cli("hire", "n", "--project", other)
+        self.assertTrue(os.path.exists(f"{got}.hired.other"))
+        # On changes, the record carries the commit they were measured from.
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        write(os.path.join(self.project, "a.txt"), "1\n"); g("add", "a.txt"); g("commit", "-qm", "base")
+        mb = g("rev-parse", "HEAD")
+        g("checkout", "-qb", "change"); write(os.path.join(self.project, "a.txt"), "2\n"); g("commit", "-qam", "the change")
+        cid = self.place("these changes", "--cast", "r", "--changes", "--base", "main", "--read-only")
+        self.cli("wait", cid)
+        r = [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == cid][0]
+        self.assertEqual((r["base"], r["seats"][0]["base"]), (mb, mb))
+        self.cli("close", cid)
+        # Nor a linked worktree of it, whose house is the checkout's.
+        wt = os.path.join(self.tmp, "wt")
+        g("worktree", "add", "-q", wt, "main")
+        self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", spot_cid, "spot", "--project", wt, check=1).stderr)
+        self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", spot_cid, "spot", check=1, cwd=wt).stderr)
+        # An amended read-only cast is read-only without the flag again.
+        self.assertTrue(os.path.exists(f"{got}.director.machine"))
+        out = self.cli("director", "cast", "the forms", "--amend", run, check=None).stdout
+        amended = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        self.assertTrue(json.load(open(os.path.join(self.books, "director", amended, "run.json")))["read_only"])
+        self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
 
     def test_a_slow_or_failing_hook_changes_nothing(self):
         self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")

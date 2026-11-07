@@ -49,6 +49,9 @@ type directorRun struct {
 	Repaired bool      `json:"repaired,omitempty"` // a second round fixed what the first left wrong
 	Applied  bool      `json:"applied,omitempty"`
 	Lost     []string  `json:"lost,omitempty"` // onboard: what each agent can't do in the kind it joins as
+	// --read-only: the project's own director hook didn't run, and a
+	// contract placed with this run's cast is read-only too.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 func directorDir() (string, error) {
@@ -83,7 +86,7 @@ var runRE = regexp.MustCompile(`^d[0-9]{8}-[0-9]{6}-[a-z0-9]{4}$`)
 
 func directorJob(job string, args []string) (int, error) {
 	f, err := parseFlags(args, map[string]bool{"project": true, "model": true, "coins": true,
-		"contract": true, "agents": true, "changes": false, "base": true, "amend": true})
+		"contract": true, "agents": true, "changes": false, "base": true, "amend": true, "read-only": false})
 	if err != nil {
 		return exitError, err
 	}
@@ -97,6 +100,7 @@ func directorJob(job string, args []string) (int, error) {
 	// An amended cast starts from an earlier one: what it got right stays,
 	// and the run pays only for what changed (new equipment, a gap).
 	var amend string
+	readOnly := f.has("read-only")
 	if f.has("amend") {
 		if job != "cast" {
 			return exitError, usageError{"--amend goes with director cast"}
@@ -112,6 +116,8 @@ func directorJob(job string, args []string) (int, error) {
 			return exitError, usageError{fmt.Sprintf("%s left no plan to amend (it %s); cast again without --amend", prev.ID, map[bool]string{true: prev.State, false: "wrote no cast.md"}[prev.State != "" && prev.State != "done"])}
 		}
 		amend = prd
+		// An amended read-only cast is read-only: it's the same code.
+		readOnly = readOnly || prev.ReadOnly
 	}
 	coins := 10 * time.Minute
 	if f.has("coins") {
@@ -135,7 +141,7 @@ func directorJob(job string, args []string) (int, error) {
 			return exitError, err
 		}
 	}
-	run := &directorRun{ID: runID, Job: job, Project: project, Started: time.Now().UTC().Truncate(time.Second)}
+	run := &directorRun{ID: runID, Job: job, Project: project, Started: time.Now().UTC().Truncate(time.Second), ReadOnly: readOnly}
 	save := func() { _ = writeJSON(filepath.Join(rd, "run.json"), run) }
 	save()
 
@@ -328,8 +334,10 @@ func directorJob(job string, args []string) (int, error) {
 	}
 	run.Finished = time.Now().UTC().Truncate(time.Second)
 	save()
-	fireHooks("director", project, map[string]any{"run": runID, "job": job, "state": state,
-		"problems": run.Problems, "out": out})
+	// --read-only: the project is code under review, so its own hook
+	// doesn't run; the machine's, the person's own, does.
+	fireHooksFrom("director", project, map[string]any{"run": runID, "job": job, "state": state,
+		"problems": run.Problems, "out": out}, !readOnly)
 	fmt.Printf("Director %s (%s): %s", runID, job, state)
 	if reason != "" {
 		fmt.Printf(", %s", reason)
@@ -839,9 +847,16 @@ func directorShow(runID string) error {
 	if b, err := os.ReadFile(filepath.Join(out, "missed.txt")); err == nil {
 		fmt.Printf("\nMisses (out/professionals/ has each tuned professional's file, whole):\n%s\n", strings.TrimSpace(string(b)))
 	}
-	if run.Applied {
+	switch {
+	case run.Applied:
 		fmt.Println("  applied")
-	} else if len(run.Problems) == 0 && run.State == "done" {
+	case run.ReadOnly && run.Job == "cast":
+		// Its project is code under review: nothing goes into it. The
+		// cast is placed from the run, and the contract is read-only too.
+		fmt.Printf("  read-only: place it with: administration place TARGET --with %s --read-only\n", run.ID)
+	case run.ReadOnly:
+		fmt.Println("  read-only: its project is code under review, so nothing of it is applied there")
+	case len(run.Problems) == 0 && run.State == "done":
 		fmt.Printf("  apply with: administration director apply %s\n", run.ID)
 	}
 	fmt.Printf("  files: %s\n", out)
@@ -866,6 +881,9 @@ func directorApply(args []string) error {
 	}
 	if run.Applied {
 		return fmt.Errorf("run %s is already applied", run.ID)
+	}
+	if run.ReadOnly {
+		return usageError{fmt.Sprintf("run %s was read-only, on %s: that's code under review, so nothing is applied into it; place its cast with administration place TARGET --with %s --read-only", run.ID, run.Project, run.ID)}
 	}
 	if run.State != "done" && !f.has("force") {
 		return fmt.Errorf("run %s didn't finish (%s); --force to apply what it wrote anyway", run.ID, run.State)

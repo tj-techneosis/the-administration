@@ -46,6 +46,17 @@ func configDir() string {
 
 // fireHooks runs the event's hooks: the project's first, then the machine's.
 func fireHooks(event, project string, payload map[string]any) {
+	fireHooksFrom(event, project, payload, true)
+}
+
+// contractHooks runs a contract's event hooks. A read-only contract's
+// project is code under review, so its own hooks don't run: only the
+// machine's, which are the person's (place --read-only).
+func contractHooks(c *contract, event string, payload map[string]any) {
+	fireHooksFrom(event, c.Project, payload, !c.ReadOnly)
+}
+
+func fireHooksFrom(event, project string, payload map[string]any, projectHooks bool) {
 	if !hookEvents[event] {
 		return
 	}
@@ -53,7 +64,7 @@ func fireHooks(event, project string, payload map[string]any) {
 	payload["project"] = project
 	body, _ := json.Marshal(payload)
 	var paths []string
-	if project != "" {
+	if project != "" && projectHooks {
 		paths = append(paths, filepath.Join(adminDir(project), "hooks", event))
 	}
 	paths = append(paths, filepath.Join(configDir(), "hooks", event))
@@ -141,13 +152,15 @@ func hookFolder(path, project string) string {
 	return project
 }
 
-// watchHook is the executable that opens the watch panes in place of the
-// built-in Herdr and tmux ones, or "" for none. Unlike the other events only
-// one runs, since two would open everything twice, and the machine's comes
-// first: where panes appear is the person's choice, not the project's.
-func watchHook(project string) string {
+// watchHookFrom is the executable that opens the watch panes in place of
+// the built-in Herdr and tmux ones, or "" for none. Unlike the other events
+// only one runs, since two would open everything twice, and the machine's
+// comes first: where panes appear is the person's choice, not the
+// project's. The project's isn't looked for when it's code under review
+// (place --read-only).
+func watchHookFrom(project string, projectHooks bool) string {
 	paths := []string{filepath.Join(configDir(), "hooks", "watch")}
-	if project != "" {
+	if project != "" && projectHooks {
 		paths = append(paths, filepath.Join(adminDir(project), "hooks", "watch"))
 	}
 	for _, path := range paths {

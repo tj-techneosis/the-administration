@@ -37,8 +37,11 @@ const usage = `administration: contracts for persona agents.
                        [--changes [--base REF]] [--brief NAME=TASK]... [--only NAME=TASK]...
                        [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME]
                        [--build SHA] [--no-queue] [--rooms PLAN]
-                       [--ticket ID] [--requested-by NAME] [--release VERSION]
-      place a contract; prints its id. --ticket, --requested-by and
+                       [--ticket ID] [--requested-by NAME] [--release VERSION] [--read-only]
+      place a contract; prints its id. --read-only is for code the machine
+      shouldn't run: critics that only read (no users, none that use
+      equipment), and none of the project's own hooks, nor anything written
+      into it. --ticket, --requested-by and
       --release record what it's for (a tracker's id, who asked for it,
       the version it reviews), so other records can be joined to it. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare
@@ -63,7 +66,8 @@ const usage = `administration: contracts for persona agents.
       --no-queue refuses it instead (exit 4, naming who holds them).
       Exits 2 when someone fails in its first seconds (3 if any was
       refused); the contract is placed all the same
-  administration hire NAME|FILE [--replace] | hire --from CONTRACT NAME
+  administration hire NAME|FILE [--replace] | hire --from CONTRACT NAME [--project DIR]
+      (from a read-only contract, refused into the checkout it reviewed)
       put a professional the Director trained on the project's roster, or
       keep a one-off specialist from a contract
   administration wait ID [--timeout 3h]
@@ -104,11 +108,13 @@ const usage = `administration: contracts for persona agents.
   administration watch ID [NAME] [--panes]
       follow what each professional does as they do it; --panes gives each
       one a pane in Herdr or tmux, or wherever the watch hook puts them
-  administration director cast TARGET... [--changes [--base REF]] [--amend RUN] | train WHO... [--contract ID]
+  administration director cast TARGET... [--changes [--base REF]] [--amend RUN] [--read-only] | train WHO... [--contract ID]
                          | onboard [--agents DIR] | review
                          [--project DIR] [--model M] [--coins 10m]
       cast: specialists for one contract, from reading the code in scope;
-      place them with --with RUN. --amend RUN starts from an earlier cast,
+      place them with --with RUN. --read-only (any job) skips the project's
+      own director hook, for code under review, and a cast made with it
+      places read-only. --amend RUN starts from an earlier cast,
       keeps what it got right and changes only what's new (equipment it
       asked for, now declared), for a fraction of a new one
       the Director, walled like a professional: writes only into its run folder

@@ -68,13 +68,25 @@ func cmdResume(args []string) error {
 		}
 		return usageError{fmt.Sprintf("contract %s already picked up %s's part of %s; resume from it for whatever it left: administration resume %s %s", r, name, c.ID, r, name)}
 	}
-	v, err := loadRoster(c.Project)
-	if err != nil {
-		return err
-	}
-	onRoster := false
-	for _, p := range v.Professionals {
-		onRoster = onRoster || p.Name == name
+	// A one-off of a read-only contract was never kept on a roster (close
+	// writes nothing into code under review): it's picked up from the
+	// contract's own file of it, and never from the roster, which is the
+	// reviewed branch's house and could name someone else that.
+	oneOff, onRoster := "", false
+	if c.ReadOnly && ci.Source == "contract" {
+		f := filepath.Join(dir, name, "hire.md")
+		if !isFile(f) {
+			return usageError{fmt.Sprintf("%s was a one-off on read-only contract %s, and its file (%s) is gone; place it again from a Director cast: administration place %q --with RUN --read-only --project %s", name, c.ID, f, c.Target, c.Project)}
+		}
+		oneOff, onRoster = f, true
+	} else {
+		v, err := loadRoster(c.Project)
+		if err != nil {
+			return err
+		}
+		for _, p := range v.Professionals {
+			onRoster = onRoster || p.Name == name
+		}
 	}
 	if !onRoster {
 		return usageError{fmt.Sprintf("%s isn't on the roster (a one-off of contract %s); keep them first: administration hire --from %s %s", name, c.ID, c.ID, name)}
@@ -96,6 +108,13 @@ func cmdResume(args []string) error {
 		coins = (time.Duration(ci.CoinsMin * float64(time.Minute))).Round(time.Second).String()
 	}
 	pargs := []string{c.Target, "--cast", name, "--project", c.Project, "--coins", coins, "--persona-from", dir}
+	if oneOff != "" {
+		pargs[1], pargs[2] = "--with", oneOff
+	}
+	if c.ReadOnly {
+		// Code under review stays code that isn't run.
+		pargs = append(pargs, "--read-only")
+	}
 	if c.Build != "" {
 		// Held to the build it was held to then, not to HEAD now.
 		pargs = append(pargs, "--build", c.Build)

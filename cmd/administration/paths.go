@@ -303,3 +303,20 @@ func claudeBin() string {
 	}
 	return "claude"
 }
+
+// resolvedPath is p with every link resolved, even when p doesn't exist yet
+// (a house about to be made): its nearest existing folder resolved, and
+// the rest put back on.
+func resolvedPath(p string) string {
+	p, _ = filepath.Abs(p)
+	rest := ""
+	for q := p; ; q = filepath.Dir(q) {
+		if _, err := os.Lstat(q); err == nil {
+			return filepath.Join(realPath(q), rest)
+		}
+		if filepath.Dir(q) == q {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(q), rest)
+	}
+}

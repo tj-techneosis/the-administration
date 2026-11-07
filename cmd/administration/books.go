@@ -290,6 +290,10 @@ type ledgerLine struct {
 	// Where: the contract's office and operating system (office.go).
 	Office string `json:"office,omitempty"`
 	OS     string `json:"os,omitempty"`
+	// Read-only (place --read-only), and the commit its changes were
+	// measured from (the merge base), when it was on changes.
+	ReadOnly bool   `json:"read_only,omitempty"`
+	Base     string `json:"base,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -329,7 +333,7 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 	l.Data, l.Rooms, l.Version = c.Data, c.Rooms, c.Version
 	l.Commit, l.Branch, l.PR = c.want(), c.Branch, c.PR
 	l.Ticket, l.RequestedBy, l.Release = c.Ticket, c.RequestedBy, c.Release
-	l.Office, l.OS = c.Office, c.OS
+	l.Office, l.OS, l.ReadOnly, l.Base = c.Office, c.OS, c.ReadOnly, c.base()
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true

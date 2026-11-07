@@ -378,18 +378,36 @@ func cmdHire(args []string) error {
 		return err
 	}
 	src := f.pos[0]
+	projectHooks := true
 	if f.has("from") {
 		// A one-off specialist from a contract: the file it worked from.
 		c, dir, err := loadContract(f.get("from"))
 		if err != nil {
 			return err
 		}
+		// From a read-only contract: its checkout is code under review,
+		// so nothing is written into it, and no project's own hook runs
+		// for it (the machine's do). Keep them in a checkout you trust.
 		found := false
 		for _, p := range c.Professionals {
 			found = found || p.Name == src && p.Source == "contract"
 		}
 		if !nameRE.MatchString(src) || !found {
 			return usageError{fmt.Sprintf("%s wasn't a one-off on contract %s (hire --from takes a professional placed with --with)", src, c.ID)}
+		}
+		if c.ReadOnly {
+			// Where it would be written, not where it was asked for: a
+			// linked worktree's house is its main checkout's, and a
+			// subfolder's is inside the checkout. Through links, even for
+			// a house not made yet.
+			to := resolvedPath(adminDir(project))
+			reviewed := resolvedPath(c.Project)
+			for _, h := range []string{reviewed, resolvedPath(adminDir(c.Project)), resolvedPath(contractHouse(c))} {
+				if to == h || within(to, h) {
+					return usageError{fmt.Sprintf("contract %s was read-only, on %s: hiring here would write into %s, the code it reviewed or its house; hire them in a checkout you trust (--project DIR)", c.ID, c.Project, to)}
+				}
+			}
+			projectHooks = false
 		}
 		src = filepath.Join(dir, src, "hire.md")
 	} else if !strings.ContainsAny(src, "/.") {
@@ -413,7 +431,7 @@ func cmdHire(args []string) error {
 	}
 	fmt.Printf("%s is on the roster (%s). Knows: %s. %s\n",
 		p.Name, houseFile(project, "professionals", filepath.Base(dst)), strings.Join(p.Knows, ", "), share)
-	fireHooks("hired", project, map[string]any{"name": p.Name, "file": dst, "kind": p.Kind, "knows": p.Knows})
+	fireHooksFrom("hired", project, map[string]any{"name": p.Name, "file": dst, "kind": p.Kind, "knows": p.Knows}, projectHooks)
 	return nil
 }
 

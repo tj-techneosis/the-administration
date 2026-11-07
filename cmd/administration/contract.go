@@ -95,6 +95,11 @@ type contract struct {
 	// the operating system its rooms ran on.
 	Office string `json:"office,omitempty"`
 	OS     string `json:"os,omitempty"`
+	// Read-only (place --read-only): critics that only read, no rooms or
+	// setup, and nothing of the project's run or written: its hooks are
+	// skipped, and close keeps no one-off into its house. For code under
+	// review that the machine shouldn't run.
+	ReadOnly bool `json:"read_only,omitempty"`
 	// The rooms left behind that place stopped before it began (sweep.go):
 	// each one's folder, how many processes, the memory they held.
 	Swept []string `json:"swept,omitempty"`
@@ -428,7 +433,7 @@ func cmdPlace(args []string) error {
 func placeContract(args []string, resumes string, placed func(id string)) error {
 	f, err := parseFlags(args, map[string]bool{"cast": true, "with": true, "coins": true, "model": true, "project": true, "dry-run": false,
 		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false, "rooms": true,
-		"ticket": true, "requested-by": true, "release": true})
+		"ticket": true, "requested-by": true, "release": true, "read-only": false})
 	if err != nil {
 		return err
 	}
@@ -515,6 +520,27 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 			users++
 		}
 		cast = append(cast, p)
+	}
+	// Read-only: only critics that read. A user needs a room, which runs
+	// the project's setup and app; a critic that uses equipment runs the
+	// project's programs.
+	// A Director cast made read-only carries it: its specialists were
+	// cast from code under review, and the contract that places them is
+	// read-only too, said rather than silent.
+	readOnly := f.has("read-only")
+	if !readOnly && withReadOnly(f.get("with")) {
+		readOnly = true
+		fmt.Println("Read-only: the Director cast this was made from was read-only (director cast --read-only), so this contract is too.")
+	}
+	if readOnly {
+		for _, p := range cast {
+			switch {
+			case p.Kind == "user":
+				return usageError{fmt.Sprintf("--read-only places critics that only read; %s is a user, who needs a room that runs the project", p.Name)}
+			case len(p.Uses) > 0:
+				return usageError{fmt.Sprintf("--read-only places critics that only read; %s uses %s, which runs the project's programs", p.Name, strings.Join(p.Uses, ", "))}
+			}
+		}
 	}
 	if _, err := exec.LookPath(claudeBin()); err != nil {
 		return usageError{fmt.Sprintf("professionals run the standalone Claude Code CLI, and %q isn't on PATH. The VS Code extension doesn't provide it: install it (code.claude.com/docs/en/setup) or set ADMINISTRATION_CLAUDE", claudeBin())}
@@ -618,7 +644,8 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// can take a while on a big project: a placement refused after it would
 	// pay for it each time it's tried again. The flags first, then the rooms.
 	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
-		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version}
+		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version,
+		ReadOnly: readOnly}
 	office, err := officeName()
 	if err != nil {
 		return err
@@ -985,9 +1012,9 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	}
 	if working {
 		fmt.Printf("Check in with: administration wait %s\n", id)
-		watchOnPlace(id, project, dir, names, f.has("no-watch"))
+		watchOnPlace(id, project, dir, names, f.has("no-watch"), c.ReadOnly)
 	}
-	fireHooks("placed", project, contractPayload(c, dir))
+	contractHooks(c, "placed", contractPayload(c, dir))
 	return startErr
 }
 
@@ -1053,13 +1080,13 @@ func quickFailures(c *contract, dir string) (err error, working bool) {
 // watch. Nothing pops up either way, and the browsers stay hidden unless
 // --show-browsers. ADMINISTRATION_WATCH=off (or --no-watch) keeps it to the
 // one line.
-func watchOnPlace(id, project, dir string, names []string, off bool) {
+func watchOnPlace(id, project, dir string, names []string, off, readOnly bool) {
 	off = off || os.Getenv("ADMINISTRATION_WATCH") == "off"
-	if off || !(os.Getenv("HERDR_ENV") == "1" || os.Getenv("TMUX") != "" || watchHook(project) != "") {
+	if off || !(os.Getenv("HERDR_ENV") == "1" || os.Getenv("TMUX") != "" || watchHookFrom(project, !readOnly) != "") {
 		fmt.Printf("Watch them work with: administration watch %s\n", id)
 		return
 	}
-	if err := openPanes(id, project, dir, names); err != nil {
+	if err := openPanes(id, project, dir, names, readOnly); err != nil {
 		fmt.Printf("Couldn't open the watch panes (%v); watch with: administration watch %s\n", err, id)
 	}
 }
@@ -1501,7 +1528,7 @@ func cmdClose(args []string) error {
 	if err := writeJSON(filepath.Join(dir, "contract.json"), c); err != nil {
 		return err
 	}
-	fireHooks("closed", c.Project, contractPayload(c, dir))
+	contractHooks(c, "closed", contractPayload(c, dir))
 	// Closed first, so nothing waits on the matcher; its links, if any, go
 	// into the summary after.
 	if matchFindings(c, dir) {
@@ -1524,6 +1551,12 @@ func keepOneOffs(c *contract, dir string) (kept, notKept []string) {
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
+		// Read-only: the project is code under review, and nothing is
+		// written into it. hire --from keeps one later, where it belongs.
+		if c.ReadOnly {
+			notKept = append(notKept, fmt.Sprintf("%s: a read-only contract writes nothing into the project it reviewed; keep them in a checkout you trust with administration hire --from %s %s --project DIR", p.Name, c.ID, p.Name))
+			continue
+		}
 		// A worktree removed before close: writing its roster would make a
 		// stray folder where it was. hire --from keeps them later.
 		if !isDir(c.Project) {
@@ -1541,7 +1574,7 @@ func keepOneOffs(c *contract, dir string) (kept, notKept []string) {
 			continue
 		}
 		kept = append(kept, p.Name)
-		fireHooks("hired", c.Project, map[string]any{"name": hp.Name, "file": dst, "kind": hp.Kind, "knows": hp.Knows})
+		contractHooks(c, "hired", map[string]any{"name": hp.Name, "file": dst, "kind": hp.Kind, "knows": hp.Knows})
 	}
 	return kept, notKept
 }
@@ -1551,6 +1584,30 @@ func closeGrace() time.Duration {
 		return d
 	}
 	return 30 * time.Second
+}
+
+// withReadOnly says whether any Director run among place --with's items
+// was made read-only (director cast --read-only).
+func withReadOnly(spec string) bool {
+	dd, _ := directorDir()
+	for _, item := range strings.Split(spec, ",") {
+		item = strings.TrimSpace(item)
+		id := item
+		// A file of a run's, given by its path (director show prints them),
+		// is that run's.
+		if !runRE.MatchString(id) && dd != "" {
+			if p := realPath(item); within(p, realPath(dd)) {
+				r, _ := filepath.Rel(realPath(dd), p)
+				id = strings.SplitN(filepath.ToSlash(r), "/", 2)[0]
+			}
+		}
+		if runRE.MatchString(id) {
+			if run, _, err := loadRun(id); err == nil && run.ReadOnly {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // withProfessionals reads --with: a comma list of professional files, or of
@@ -1765,6 +1822,8 @@ func statusAll(f *flags) error {
 		Release     string           `json:"release,omitempty"`
 		Office   string              `json:"office,omitempty"`
 		OS       string              `json:"os,omitempty"`
+		ReadOnly bool                `json:"read_only,omitempty"`
+		Base     string              `json:"base,omitempty"`
 		Data     string              `json:"data,omitempty"`
 		Rooms    string              `json:"rooms,omitempty"`
 		Seats    []ledgerLine        `json:"seats"`
@@ -1779,7 +1838,7 @@ func statusAll(f *flags) error {
 		}
 		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),
 			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
-			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release, Office: c.Office, OS: c.OS,
+			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release, Office: c.Office, OS: c.OS, ReadOnly: c.ReadOnly, Base: c.base(),
 			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: contractSpend(dir)}
 		for _, p := range c.Professionals {
 			r.Seats = append(r.Seats, lineFor(c, dir, p))
