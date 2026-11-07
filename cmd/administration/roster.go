@@ -418,6 +418,19 @@ func loadRoster(project string) (*rosterView, error) {
 		if file := cfg.Critics[name].File; file != "" {
 			f = housePath(project, file)
 		}
+		// A house from a ref (place --house-from) is read alone: the
+		// checkout under review can't supply a critic, by its own
+		// .claude/agents or by a path that leaves the house.
+		if pinned(project) {
+			switch {
+			case cfg.Critics[name].File == "":
+				v.Problems = append(v.Problems, fmt.Sprintf("critic %s: a house from a ref uses only files inside it, and roster.toml gives this one no file (the checkout's .claude/agents isn't read); give it file = in the house", name))
+				continue
+			case !within(f, cont):
+				v.Problems = append(v.Problems, fmt.Sprintf("critic %s: a house from a ref uses only files inside it, and %s is outside", name, cfg.Critics[name].File))
+				continue
+			}
+		}
 		b, err := os.ReadFile(f)
 		if err == nil {
 			var p *professional

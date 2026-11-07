@@ -3,6 +3,7 @@ claude, a throwaway project, books and rooms, so they never touch the
 machine's own contracts. Run: python3 -m unittest discover tests
 """
 import glob
+from os.path import realpath
 import json
 import os
 import re
@@ -154,8 +155,17 @@ class Base(unittest.TestCase):
         p = subprocess.run([binary(), *args], cwd=cwd or self.project, env={**self.env, **(env or {})},
                            capture_output=True, text=True, timeout=timeout)
         if check is not None and p.returncode != check:
-            self.fail(f"{args} exited {p.returncode}, want {check}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}")
+            self.fail(f"{args} exited {p.returncode}, want {check}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}{self.worker_logs(p.stdout)}")
         return p
+
+    def worker_logs(self, out):
+        # A contract that failed at once says why only in its workers' logs,
+        # which go with the test's folder: shown with the failure instead.
+        m = re.search(r"Contract ([a-z0-9]{4,8})\b", out)
+        if not m:
+            return ""
+        logs = sorted(glob.glob(os.path.join(self.books, "contracts", m.group(1), "*", "worker.log")))
+        return "".join(f"\n{l}:\n{open(l, errors='replace').read()[-3000:]}" for l in logs)
 
     def hire_file(self, name, **kw):
         write(os.path.join(self.project, ".administration", "professionals", name + ".md"), professional(name, **kw))
@@ -3233,6 +3243,9 @@ class Hooks(Base):
         spot_cid = cid
         self.assertIn(f"hire --from {cid} spot --project DIR", self.cli("report", cid).stdout)
         self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", cid, "spot", check=1).stderr)
+        # Nor a miss noted against it, into the checkout it reviewed.
+        self.assertIn("the code it reviewed or its house", self.cli("missed", "a thing", "--contract", cid, check=1).stderr)
+        self.assertFalse(os.path.isdir(os.path.join(house, "missed")))
         # Nor by a way round: a subfolder of it.
         sub = os.path.join(self.project, "sub")
         os.makedirs(sub)
@@ -3277,6 +3290,130 @@ class Hooks(Base):
         amended = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
         self.assertTrue(json.load(open(os.path.join(self.books, "director", amended, "run.json")))["read_only"])
         self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
+
+    def test_the_house_can_come_from_a_trusted_ref(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")
+        house = os.path.join(self.project, ".administration")
+        rfile = os.path.join(house, "professionals", "r.md")
+        write(rfile, professional("r", kind="critic").replace("You are r.", "You are r, as main has you."))
+        g("add", "-A"); g("commit", "-qm", "the house on main")
+        main = g("rev-parse", "HEAD")
+        # The branch under review rewrites its critic and brings a hook.
+        g("checkout", "-qb", "theirs")
+        write(rfile, professional("r", kind="critic").replace("You are r.", "You are r, as the branch rewrote you."))
+        got = os.path.join(self.tmp, "ran")
+        for ev in ("placed", "closed"):
+            self.hook(house, ev, f'touch "{got}.{ev}"')
+        g("add", "-A"); g("commit", "-qm", "the branch's house")
+        cid = self.place("theirs", "--cast", "r", "--house-from", "main")
+        self.cli("wait", cid)
+        persona = lambda cid: open(os.path.join(self.pdir(cid, "r"), "persona.md")).read()
+        self.assertIn("as main has you", persona(cid))
+        self.assertNotIn("as the branch rewrote you", persona(cid))
+        self.assertFalse(os.path.exists(f"{got}.placed"))  # main has no placed hook
+        r = [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == cid][0]
+        self.assertEqual((r["house_from"], r["seats"][0]["house_from"]), (main, main))
+        self.assertIn(f"house from {main[:10]} (--house-from)", self.cli("status", cid).stdout)
+        # Close is a process of its own: it too has main's house, not the branch's.
+        self.cli("close", cid)
+        self.assertFalse(os.path.exists(f"{got}.closed"))
+        # A resume takes the same house.
+        out = self.cli("resume", cid, "r").stdout
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        self.assertIn("as main has you", persona(new))
+        self.cli("close", new)
+        # Without it, the checkout's house as ever, even while a contract
+        # with main's house is still open on the same project.
+        held = self.place("theirs", "--cast", "r", "--house-from", "main")
+        self.cli("wait", held)
+        cid = self.place("theirs", "--cast", "r")
+        self.cli("wait", cid)
+        self.assertIn("as the branch rewrote you", persona(cid))
+        self.assertTrue(os.path.exists(f"{got}.placed"))  # the checkout's own hook
+        self.cli("close", cid)
+        self.cli("close", held)
+        # A ref that isn't there, or has no house and none is kept, is refused.
+        self.assertIn("--house-from nowhere: no such commit", self.cli("place", "x", "--cast", "r", "--house-from", "nowhere", check=1).stderr)
+        self.assertIn("give a branch, tag or commit", self.cli("place", "x", "--cast", "r", "--house-from", "-x", check=1).stderr)
+        g("checkout", "-q", "--orphan", "bare"); g("rm", "-rqf", "--cached", "."); write(os.path.join(self.project, "x.txt"), "x\n")
+        g("add", "x.txt"); g("commit", "-qm", "no house")
+        self.assertIn("has no .administration, and no house is kept", self.cli("place", "x", "--cast", "r", "--house-from", "bare", check=1).stderr)
+        self.assertIn("--house-from :kept: no house is kept", self.cli("place", "x", "--cast", "r", "--house-from", ":kept", check=1).stderr)
+        # A house that's itself a link at the ref is refused, not read as none.
+        g("checkout", "-qf", "main"); g("checkout", "-qb", "linked-house")
+        g("rm", "-rq", "--cached", ".administration"); shutil.move(house, os.path.join(self.tmp, "elsewhere"))
+        os.symlink(os.path.join(self.tmp, "elsewhere"), house)
+        g("add", "-A"); g("commit", "-qm", "the house as a link")
+        self.assertIn("not a folder", self.cli("place", "x", "--cast", "r", "--house-from", "linked-house", check=1).stderr)
+        os.remove(house); shutil.move(os.path.join(self.tmp, "elsewhere"), house)
+        # A project in a subfolder of its repository takes its own house there.
+        web = os.path.join(self.project, "apps", "web")
+        write(os.path.join(web, ".administration", "professionals", "w.md"), professional("w", kind="critic").replace("You are w.", "You are w, of apps/web on main."))
+        g("checkout", "-qf", "main"); g("add", "-A"); g("commit", "-qm", "a subproject")
+        cid = self.place("web", "--cast", "w", "--house-from", "main", "--project", web)
+        self.cli("wait", cid)
+        self.assertIn("of apps/web on main", open(os.path.join(self.pdir(cid, "w"), "persona.md")).read())
+        self.cli("close", cid)
+        # A house with a link in it is refused, not followed.
+        g("checkout", "-qf", "main"); g("checkout", "-qb", "linky")
+        os.symlink("/etc/passwd", os.path.join(house, "handout.txt"))
+        g("add", "-A"); g("commit", "-qm", "a link")
+        self.assertIn("isn't a file or a folder", self.cli("place", "x", "--cast", "r", "--house-from", "linky", check=1).stderr)
+
+    def test_a_house_from_a_ref_reads_only_itself(self):
+        g = lambda *a, cwd=None: subprocess.run(["git", *a], cwd=cwd or self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")
+        house = os.path.join(self.project, ".administration")
+        write(os.path.join(house, "professionals", "r.md"), professional("r", kind="critic"))
+        write(os.path.join(house, "roster.toml"),
+              '[critics.agent]\nknows = ["code-review"]\n\n[critics.out]\nfile = "' + os.path.join(self.project, "outside.md") + '"\nknows = ["code-review"]\n')
+        agent = "---\nname: agent\ndescription: reads code\ntools: Read\n---\nRead the code.\n"
+        write(os.path.join(self.project, "outside.md"), agent.replace("name: agent", "name: out"))
+        g("add", "-A"); g("commit", "-qm", "main")
+        # The checkout brings its own agent; plainly, it's on the roster.
+        g("checkout", "-qb", "theirs")
+        write(os.path.join(self.project, ".claude", "agents", "agent.md"), agent)
+        g("add", "-A"); g("commit", "-qm", "theirs")
+        self.cli("place", "x", "--cast", "agent,out", "--dry-run")
+        # With the house from main, neither: not the checkout's agent, nor a file outside the house.
+        for name in ("agent", "out"):
+            self.assertIn(f'nobody called "{name}" on the roster', self.cli("place", "x", "--cast", name, "--house-from", "main", "--dry-run", check=1).stderr)
+        # A dry run places nothing, and leaves no unpacked house behind.
+        houses = os.path.join(self.books, "houses")
+        before = sorted(os.listdir(houses)) if os.path.isdir(houses) else []
+        dry = json.loads(self.cli("place", "x", "--cast", "r", "--house-from", "theirs", "--dry-run").stdout)
+        self.assertTrue(dry["house"].startswith("(dry run: from "), dry["house"])
+        self.assertEqual(sorted(os.listdir(houses)) if os.path.isdir(houses) else [], before)
+        # The house kept on this machine, when the ref has none, and a resume of it.
+        projects = os.path.join(self.tmp, "projects")
+        self.env["ADMINISTRATION_PROJECTS"] = projects
+        g("remote", "add", "origin", "https://github.com/acme/shop.git")
+        kept = os.path.join(projects, "github.com", "acme", "shop")
+        write(os.path.join(kept, "professionals", "k.md"), professional("k", kind="critic").replace("You are k.", "You are k, kept here."))
+        g("checkout", "-q", "--orphan", "bare"); g("rm", "-rqf", "--cached", "."); write(os.path.join(self.project, "x.txt"), "x\n")
+        g("add", "x.txt"); g("commit", "-qm", "no house")
+        cid = self.place("x", "--cast", "k", "--house-from", "bare")
+        self.cli("wait", cid)
+        self.assertEqual(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["house_from"], "kept")
+        self.cli("close", cid)
+        out = self.cli("resume", cid, "k").stdout
+        new = out.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        c = json.load(open(os.path.join(self.books, "contracts", new, "contract.json")))
+        self.assertEqual((c["house_from"], realpath(c["house"])), ("kept", realpath(kept)))
+        self.cli("close", new)
+        # Gone since, a resume says so in its own words.
+        shutil.rmtree(kept)
+        self.assertIn("used the house kept on this machine", self.cli("resume", new, "k", check=1).stderr)
+        # So for an unpacked house deleted by hand: said, not read as an empty roster.
+        g("checkout", "-qf", "main")
+        cid = self.place("x", "--cast", "r", "--house-from", "main")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        shutil.rmtree(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["house"])
+        self.assertIn("is gone; place a new contract with --house-from", self.cli("resume", cid, "r", check=1).stderr)
 
     def test_a_slow_or_failing_hook_changes_nothing(self):
         self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")

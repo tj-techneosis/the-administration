@@ -396,16 +396,8 @@ func cmdHire(args []string) error {
 			return usageError{fmt.Sprintf("%s wasn't a one-off on contract %s (hire --from takes a professional placed with --with)", src, c.ID)}
 		}
 		if c.ReadOnly {
-			// Where it would be written, not where it was asked for: a
-			// linked worktree's house is its main checkout's, and a
-			// subfolder's is inside the checkout. Through links, even for
-			// a house not made yet.
-			to := resolvedPath(adminDir(project))
-			reviewed := resolvedPath(c.Project)
-			for _, h := range []string{reviewed, resolvedPath(adminDir(c.Project)), resolvedPath(contractHouse(c))} {
-				if to == h || within(to, h) {
-					return usageError{fmt.Sprintf("contract %s was read-only, on %s: hiring here would write into %s, the code it reviewed or its house; hire them in a checkout you trust (--project DIR)", c.ID, c.Project, to)}
-				}
+			if err := notIntoReviewed(c, project); err != nil {
+				return err
 			}
 			projectHooks = false
 		}
@@ -544,4 +536,19 @@ func baseWarnings(project, base string) []string {
 		}
 	}
 	return out
+}
+
+// notIntoReviewed refuses to write into a read-only contract's reviewed
+// checkout or its house from project: where it would be written, not where
+// it was asked for (a linked worktree's house is its main checkout's, and
+// a subfolder's is inside the checkout), through links, even for a house
+// not made yet.
+func notIntoReviewed(c *contract, project string) error {
+	to := resolvedPath(adminDir(project))
+	for _, h := range []string{resolvedPath(c.Project), resolvedPath(adminDir(c.Project)), resolvedPath(contractHouse(c))} {
+		if to == h || within(to, h) {
+			return usageError{fmt.Sprintf("contract %s was read-only, on %s: writing here would go into %s, the code it reviewed or its house; run it in a checkout you trust (--project DIR)", c.ID, c.Project, to)}
+		}
+	}
+	return nil
 }

@@ -846,6 +846,22 @@ on `status --all --json`, the ledger and stats. `status ID --json` keeps
 the contract's own `changes`, where `base` is the ref as it was typed and
 `merge_base` the commit. Ledger lines pruned before 0.7.8 have neither
 `read_only` nor `base`.
+The other half is the house itself: a branch can rewrite its critics'
+briefs and its hooks, so `--house-from REF` takes the house from a ref the
+person trusts. It's unpacked from that commit with `git archive` (the
+repository's filter drivers emptied, so nothing of the repository runs),
+files and folders only, into the books' `houses/`, and the contract's
+`House` points there. When the ref has no house, the one kept on this
+machine for the project's origin is used, which no branch can change; the
+checkout's never is.
+That house is the contract's in every process that works on it, not only
+in place's: close, verify, report, the workers, watch and resume each pin
+it when they open the contract, and its paths resolve in it alone.
+Commands that read many contracts (status --all, pacing, sweeping, prune)
+don't pin, so one contract's house never becomes another's. A ref whose
+`.administration` is a link or a submodule is refused rather than read as
+no house, and a resume of a contract whose house was the kept one asks for
+the kept one again (`--house-from :kept`).
 
 Pooling books shares more than the office, though. Every contract also
 keeps who placed it (`placed_by`: `ADMINISTRATION_PLACED_BY`, else

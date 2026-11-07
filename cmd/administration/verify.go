@@ -40,7 +40,7 @@ func cmdVerify(args []string) error {
 		return err
 	}
 	defer unuse()
-	c, dir, err := loadContract(f.pos[0])
+	c, dir, err := openContract(f.pos[0])
 	if err != nil {
 		return err
 	}

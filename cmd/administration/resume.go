@@ -35,7 +35,7 @@ func cmdResume(args []string) error {
 		return err
 	}
 	defer unuse()
-	c, dir, err := loadContract(f.pos[0])
+	c, dir, err := openContract(f.pos[0])
 	if err != nil {
 		return err
 	}
@@ -51,6 +51,15 @@ func cmdResume(args []string) error {
 	}
 	if !isDir(c.Project) {
 		return usageError{fmt.Sprintf("contract %s's project, %s, is gone (a worktree removed since?); place a new contract where the work is now", c.ID, c.Project)}
+	}
+	// Its house as recorded, which is what the resume reads: gone since
+	// (a kept house moved, an unpacked one deleted), it's said, not read
+	// as an empty roster.
+	if c.HouseFrom != "" && !isDir(c.House) {
+		if c.HouseFrom == "kept" {
+			return usageError{fmt.Sprintf("contract %s used the house kept on this machine for its project, %s, and it's gone; keep it there again, or place a new contract", c.ID, c.House)}
+		}
+		return usageError{fmt.Sprintf("contract %s's house, %s (from %s), is gone; place a new contract with --house-from", c.ID, c.House, short(c.HouseFrom))}
 	}
 	// Twice would put two professionals on the same leftovers: a part is
 	// resumed once, and what that leaves is resumed from it. The books'
@@ -114,6 +123,16 @@ func cmdResume(args []string) error {
 	if c.ReadOnly {
 		// Code under review stays code that isn't run.
 		pargs = append(pargs, "--read-only")
+	}
+	switch c.HouseFrom {
+	case "":
+	case "kept":
+		// The house kept on the machine, as the original had (checked
+		// above, before anything was read from it).
+		pargs = append(pargs, "--house-from", keptRef)
+	default:
+		// The same house it was placed with, from the same commit.
+		pargs = append(pargs, "--house-from", c.HouseFrom)
 	}
 	if c.Build != "" {
 		// Held to the build it was held to then, not to HEAD now.

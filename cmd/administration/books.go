@@ -104,7 +104,7 @@ func cmdVerdicts(args []string) error {
 		return err
 	}
 	defer unuse()
-	c, dir, err := loadContract(args[0])
+	c, dir, err := openContract(args[0])
 	if err != nil {
 		return err
 	}
@@ -294,6 +294,8 @@ type ledgerLine struct {
 	// measured from (the merge base), when it was on changes.
 	ReadOnly bool   `json:"read_only,omitempty"`
 	Base     string `json:"base,omitempty"`
+	// Where its house came from (place --house-from): a commit, or "kept".
+	HouseFrom string `json:"house_from,omitempty"`
 }
 
 func lineFor(c *contract, dir string, p castItem) ledgerLine {
@@ -333,7 +335,7 @@ func lineFor(c *contract, dir string, p castItem) ledgerLine {
 	l.Data, l.Rooms, l.Version = c.Data, c.Rooms, c.Version
 	l.Commit, l.Branch, l.PR = c.want(), c.Branch, c.PR
 	l.Ticket, l.RequestedBy, l.Release = c.Ticket, c.RequestedBy, c.Release
-	l.Office, l.OS, l.ReadOnly, l.Base = c.Office, c.OS, c.ReadOnly, c.base()
+	l.Office, l.OS, l.ReadOnly, l.Base, l.HouseFrom = c.Office, c.OS, c.ReadOnly, c.base(), c.HouseFrom
 	var vs []verdict
 	if b, err := os.ReadFile(filepath.Join(dir, p.Name, "verdicts.json")); err == nil && json.Unmarshal(b, &vs) == nil {
 		l.Checked = true

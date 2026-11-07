@@ -37,11 +37,14 @@ const usage = `administration: contracts for persona agents.
                        [--changes [--base REF]] [--brief NAME=TASK]... [--only NAME=TASK]...
                        [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--data NAME]
                        [--build SHA] [--no-queue] [--rooms PLAN]
-                       [--ticket ID] [--requested-by NAME] [--release VERSION] [--read-only]
+                       [--ticket ID] [--requested-by NAME] [--release VERSION] [--read-only] [--house-from REF]
       place a contract; prints its id. --read-only is for code the machine
       shouldn't run: critics that only read (no users, none that use
       equipment), and none of the project's own hooks, nor anything written
-      into it. --ticket, --requested-by and
+      into it. --house-from takes the house (roster, professionals,
+      handouts, hooks) from REF, such as origin/main, not from the checkout
+      under review; the house kept on this machine when REF has none
+      (:kept asks for that one). A house from a ref uses only files inside it. --ticket, --requested-by and
       --release record what it's for (a tracker's id, who asked for it,
       the version it reviews), so other records can be joined to it. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare

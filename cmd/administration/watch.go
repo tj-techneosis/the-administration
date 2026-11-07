@@ -28,7 +28,7 @@ func cmdWatch(args []string) error {
 	if len(f.pos) < 1 || len(f.pos) > 2 {
 		return usageError{"watch ID [NAME] [--panes]"}
 	}
-	c, dir, err := loadContract(f.pos[0])
+	c, dir, err := openContract(f.pos[0])
 	if err != nil {
 		return err
 	}

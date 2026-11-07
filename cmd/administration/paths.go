@@ -44,6 +44,24 @@ func adminDir(project string) string {
 
 var adminDirs sync.Map
 
+// houseOnly is the projects whose house was pinned (pinHouse): their
+// paths resolve in the house alone, never the checkout first.
+var houseOnly sync.Map
+
+// pinHouse makes dir the project's house for the rest of this process: a
+// contract's house taken from a ref (place --house-from), which no file
+// in the checkout can stand in for.
+func pinHouse(project, dir string) {
+	adminDirs.Store(project, dir)
+	houseOnly.Store(project, true)
+}
+
+// pinned says whether the project's house was pinned (pinHouse).
+func pinned(project string) bool {
+	_, ok := houseOnly.Load(project)
+	return ok
+}
+
 // outsideHouse is a project's .administration when it lives outside the
 // project, "" when it's the project's own.
 func outsideHouse(project string) string {

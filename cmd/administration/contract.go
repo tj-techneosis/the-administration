@@ -100,6 +100,10 @@ type contract struct {
 	// skipped, and close keeps no one-off into its house. For code under
 	// review that the machine shouldn't run.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// The house from a trusted ref (place --house-from): the commit it was
+	// taken from, or "kept" for the house kept on this machine (that ref
+	// had none). Its House is then that house, not the checkout's.
+	HouseFrom string `json:"house_from,omitempty"`
 	// The rooms left behind that place stopped before it began (sweep.go):
 	// each one's folder, how many processes, the memory they held.
 	Swept []string `json:"swept,omitempty"`
@@ -249,6 +253,22 @@ func loadContract(id string) (*contract, string, error) {
 		return nil, "", fmt.Errorf("contract %s: %v", id, err)
 	}
 	return &c, dir, nil
+}
+
+// openContract is loadContract for a command that works on that one
+// contract (close, verify, report, its workers, watch, resume). A house
+// taken from a ref (place --house-from) becomes the project's house for
+// the rest of the process, not only in place's: the checkout's is never
+// read for it, and if that folder is missing it's still that folder (so
+// nothing), never the checkout's. Commands that read many contracts (status --all,
+// pacing, sweeping, prune) load them plainly, so one contract's house
+// never becomes another's.
+func openContract(id string) (*contract, string, error) {
+	c, dir, err := loadContract(id)
+	if err == nil && c.HouseFrom != "" && c.House != "" {
+		pinHouse(c.Project, c.House)
+	}
+	return c, dir, err
 }
 
 func writeJSON(path string, v any) error {
@@ -433,7 +453,7 @@ func cmdPlace(args []string) error {
 func placeContract(args []string, resumes string, placed func(id string)) error {
 	f, err := parseFlags(args, map[string]bool{"cast": true, "with": true, "coins": true, "model": true, "project": true, "dry-run": false,
 		"changes": false, "base": true, "show-browsers": false, "no-watch": false, "no-before": false, "data": true, "brief": true, "only": true, "persona-from": true, "build": true, "no-queue": false, "rooms": true,
-		"ticket": true, "requested-by": true, "release": true, "read-only": false})
+		"ticket": true, "requested-by": true, "release": true, "read-only": false, "house-from": true})
 	if err != nil {
 		return err
 	}
@@ -467,6 +487,19 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	project, err := projectDir(f.get("project"))
 	if err != nil {
 		return err
+	}
+	// The house from a trusted ref, not the checkout's (housefrom.go): put
+	// in place before anything reads the roster, so everything this place
+	// does, and the contract after it (its House), uses that house.
+	houseSHA, houseKept := "", false
+	if f.has("house-from") {
+		dir, sha, done, err := houseFrom(project, strings.TrimSpace(f.get("house-from")), f.has("dry-run"))
+		if err != nil {
+			return err
+		}
+		defer done()
+		pinHouse(project, dir)
+		houseSHA, houseKept = sha, sha == ""
 	}
 	// A house kept on this machine is found by the project's origin remote,
 	// which the repo's own config names: said, so a checkout that only
@@ -645,7 +678,10 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// pay for it each time it's tried again. The flags first, then the rooms.
 	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
 		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version,
-		ReadOnly: readOnly}
+		ReadOnly: readOnly, HouseFrom: houseSHA}
+	if houseKept {
+		c.HouseFrom = "kept"
+	}
 	office, err := officeName()
 	if err != nil {
 		return err
@@ -897,6 +933,13 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	}
 	if f.has("dry-run") {
 		os.RemoveAll(dir)
+		// A dry run's house from a ref was unpacked into a folder of its
+		// own, gone when this returns.
+		switch c.HouseFrom {
+		case "", "kept":
+		default:
+			c.House = "(dry run: from " + short(c.HouseFrom) + ")"
+		}
 		return printJSON(c)
 	}
 	// Rooms whose teardown never ran hold memory nothing will give back,
@@ -1451,7 +1494,7 @@ func cmdClose(args []string) error {
 		return err
 	}
 	defer unlock()
-	c, dir, err := loadContract(f.pos[0])
+	c, dir, err := openContract(f.pos[0])
 	if err != nil {
 		return err
 	}
@@ -1557,6 +1600,12 @@ func keepOneOffs(c *contract, dir string) (kept, notKept []string) {
 			notKept = append(notKept, fmt.Sprintf("%s: a read-only contract writes nothing into the project it reviewed; keep them in a checkout you trust with administration hire --from %s %s --project DIR", p.Name, c.ID, p.Name))
 			continue
 		}
+		// Its house was taken from a ref, not the checkout's: neither is
+		// the place to keep one without being asked.
+		if c.HouseFrom != "" {
+			notKept = append(notKept, fmt.Sprintf("%s: the contract's house was taken from a ref (--house-from); keep them where you want them with administration hire --from %s %s --project DIR", p.Name, c.ID, p.Name))
+			continue
+		}
 		// A worktree removed before close: writing its roster would make a
 		// stray folder where it was. hire --from keeps them later.
 		if !isDir(c.Project) {
@@ -1654,7 +1703,7 @@ func cmdReport(args []string) error {
 	if len(args) < 1 || len(args) > 2 {
 		return usageError{"report ID [NAME]"}
 	}
-	c, dir, err := loadContract(args[0])
+	c, dir, err := openContract(args[0])
 	if err != nil {
 		return err
 	}
@@ -1824,6 +1873,7 @@ func statusAll(f *flags) error {
 		OS       string              `json:"os,omitempty"`
 		ReadOnly bool                `json:"read_only,omitempty"`
 		Base     string              `json:"base,omitempty"`
+		HouseFrom string             `json:"house_from,omitempty"`
 		Data     string              `json:"data,omitempty"`
 		Rooms    string              `json:"rooms,omitempty"`
 		Seats    []ledgerLine        `json:"seats"`
@@ -1838,7 +1888,7 @@ func statusAll(f *flags) error {
 		}
 		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),
 			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
-			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release, Office: c.Office, OS: c.OS, ReadOnly: c.ReadOnly, Base: c.base(),
+			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release, Office: c.Office, OS: c.OS, ReadOnly: c.ReadOnly, Base: c.base(), HouseFrom: c.HouseFrom,
 			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: contractSpend(dir)}
 		for _, p := range c.Professionals {
 			r.Seats = append(r.Seats, lineFor(c, dir, p))

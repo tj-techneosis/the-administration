@@ -66,7 +66,7 @@ func (r role) id() string {
 // One worker per professional: build the room (users only), run the
 // professional to the end of their coins, keep their report, clear the room.
 func work(id, name string) error {
-	c, dir, err := loadContract(id)
+	c, dir, err := openContract(id)
 	if err != nil {
 		return err
 	}

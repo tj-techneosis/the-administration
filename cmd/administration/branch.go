@@ -73,14 +73,25 @@ func (c *contract) base() string {
 // the system its rooms ran on, "" for one placed before either was kept.
 func (c *contract) whereLine() string {
 	w := c.placedWhere()
+	switch c.HouseFrom {
+	case "":
+	case "kept":
+		w = joinWhere(w, "house kept on this machine (--house-from)")
+	default:
+		w = joinWhere(w, "house from "+short(c.HouseFrom)+" (--house-from)")
+	}
 	if c.ReadOnly {
-		ro := "read-only: critics that only read; the project's hooks didn't run, and nothing was written into it"
-		if w == "" {
-			return strings.ToUpper(ro[:1]) + ro[1:]
-		}
-		return w + "; " + ro
+		w = joinWhere(w, "read-only: critics that only read; the project's hooks didn't run, and nothing was written into it")
 	}
 	return w
+}
+
+// joinWhere adds a part to the where line, capitalised when it's first.
+func joinWhere(w, part string) string {
+	if w == "" {
+		return strings.ToUpper(part[:1]) + part[1:]
+	}
+	return w + "; " + part
 }
 
 func (c *contract) placedWhere() string {

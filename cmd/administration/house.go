@@ -23,8 +23,9 @@ import (
 type projectHouse struct {
 	Dir string `json:"dir"`
 	// "project" (its .administration/), "checkout" (a linked worktree's
-	// main checkout's), "machine" (kept for it under projectsDir()), or
-	// "none" (Dir is then where one would be made).
+	// main checkout's), "machine" (kept for it under projectsDir()), "ref"
+	// (unpacked from a ref, place --house-from), or "none" (Dir is then
+	// where one would be made).
 	Where string `json:"where"`
 	// The origin it was found by, as host/owner/repo.
 	Origin string   `json:"origin,omitempty"`
@@ -187,6 +188,9 @@ func houseOf(project string) projectHouse {
 		return h
 	}
 	switch kept := keptHouse(project); {
+	case pinned(project) && !(kept != "" && realPath(kept) == d):
+		// Unpacked from a ref into the books (place --house-from).
+		return projectHouse{Dir: d, Where: "ref"}
 	case within(d, project) || d == realPath(own):
 		// The project's own, or its own linked elsewhere.
 		return projectHouse{Dir: d, Where: "project"}
@@ -247,6 +251,11 @@ func housePath(project, p string) string {
 	dir := adminDir(project)
 	if rest, ok := strings.CutPrefix(filepath.ToSlash(clean), ".administration/"); ok {
 		return filepath.Join(dir, filepath.FromSlash(rest))
+	}
+	// A pinned house (place --house-from) is the only place to look: the
+	// checkout under review can't put a file where the house's would be.
+	if pinned(project) {
+		return filepath.Join(dir, clean)
 	}
 	abs := filepath.Join(project, clean)
 	if _, err := os.Lstat(abs); err != nil {

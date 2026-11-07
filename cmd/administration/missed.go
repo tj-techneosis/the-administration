@@ -51,6 +51,13 @@ func cmdMissed(args []string) error {
 		if err != nil {
 			return err
 		}
+		// A read-only contract's checkout is code under review: no miss is
+		// written into it or its house (the same check as hire --from).
+		if c.ReadOnly {
+			if err := notIntoReviewed(c, project); err != nil {
+				return err
+			}
+		}
 		if len(by) == 0 {
 			// Whoever worked it: the Director picks which should have seen it.
 			for _, p := range c.Professionals {

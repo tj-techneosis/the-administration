@@ -493,7 +493,7 @@ instead: never dropped, never counted.
 | command | does |
 |---|---|
 | `administration roster [--match tags] [--json] [--project DIR]` | who's hired, what they know, the open rooms; `--match` drafts a cast |
-| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--build SHA] [--no-queue] [--read-only]` | places a contract on the project's HEAD (and any uncommitted work) and prints its id; a room whose build is another commit's is refused, unless `--build` names that commit on purpose; `--changes` warns when the branch is missing commits the local default branch has; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work. When the rooms are taken it's queued ("Queued, N ahead", exit 0) and its users start by themselves, in turn; `--no-queue` exits 4 instead; `--read-only` is for code the machine shouldn't run (see below) |
+| `administration place TARGET --cast a,b \| --with RUN [--coins 10m] [--model M] [--changes [--base REF]] [--brief NAME=TASK] [--only NAME=TASK] [--data NAME] [--project DIR] [--dry-run] [--show-browsers] [--no-watch] [--no-before] [--build SHA] [--no-queue] [--read-only] [--house-from REF]` | places a contract on the project's HEAD (and any uncommitted work) and prints its id; a room whose build is another commit's is refused, unless `--build` names that commit on purpose; `--changes` warns when the branch is missing commits the local default branch has; `--brief` gives one professional their own task on top of their persona's checks, `--only` instead of them; `--show-browsers` opens the users' browsers as windows on your screen, to watch them work. When the rooms are taken it's queued ("Queued, N ahead", exit 0) and its users start by themselves, in turn; `--no-queue` exits 4 instead; `--read-only` is for code the machine shouldn't run (see below) |
 | `administration build [REF]` | the house's build hook's build of REF (HEAD by default), from the books or made now; prints its path |
 | `administration wait ID [--timeout 3h]` | waits until everyone is back or out of coins, with a line as each one's state changes; returns early (2, or 3 if refused) when one fails while others still work |
 | `administration status [ID] [--json]` | who's working and who's back, who's waiting for the machine (a room, the setup turn, memory) and how long each waited, and who placed it; with no ID, every open contract and a `Rooms:` line saying how many are free and how many users wait for one |
@@ -649,7 +649,18 @@ contract's own file of it, never the roster; and `hire --from` a read-only
 contract refuses to write into the checkout it reviewed or its house, by
 any way round (keep them in one you trust, `--project DIR`) and runs no
 project's `hired` hook. The professionals' own files still come from the
-project's house; read them, or take the house from a branch you trust.
+project's house, and a branch can rewrite its own critics and hooks.
+`place --house-from origin/main` takes the house (roster, professionals,
+handouts, hooks) from that ref instead: its own `.administration`,
+unpacked once per commit into the books with the repository's filters off
+and links refused, or the house kept on this machine when the ref has none
+(`--house-from :kept` asks for that one); never the checkout's. A house
+from a ref uses only files inside it: a critic that roster.toml gives no
+file, or a file outside the house, isn't read from the checkout. Every
+command that works on the contract uses that house; `hire --from` and
+`missed --contract` write to the house of the project you run them in, as
+ever (never a read-only contract's reviewed checkout). A resume takes the
+same house, and close keeps no one-off into either.
 
 A room whose teardown never ran (its setup run by hand, then its folder
 deleted with its cleanup in it) leaves its servers running, and nobody is
