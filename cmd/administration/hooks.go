@@ -44,11 +44,6 @@ func configDir() string {
 	return filepath.Join(home, ".config", "administration")
 }
 
-// fireHooks runs the event's hooks: the project's first, then the machine's.
-func fireHooks(event, project string, payload map[string]any) {
-	fireHooksFrom(event, project, payload, true)
-}
-
 // contractHooks runs a contract's event hooks. A read-only contract's
 // project is code under review, so its own hooks don't run: only the
 // machine's, which are the person's (place --read-only).
@@ -64,11 +59,13 @@ func fireHooksFrom(event, project string, payload map[string]any, projectHooks b
 	payload["project"] = project
 	body, _ := json.Marshal(payload)
 	var paths []string
+	books, _ := booksDir()
 	if project != "" && projectHooks {
 		paths = append(paths, filepath.Join(adminDir(project), "hooks", event))
+	} else if project != "" {
+		logSkippedProjectHook(event, project)
 	}
 	paths = append(paths, filepath.Join(configDir(), "hooks", event))
-	books, _ := booksDir()
 	for _, path := range paths {
 		st, err := os.Stat(path)
 		if err != nil || st.IsDir() {
@@ -162,6 +159,9 @@ func watchHookFrom(project string, projectHooks bool) string {
 	paths := []string{filepath.Join(configDir(), "hooks", "watch")}
 	if project != "" && projectHooks {
 		paths = append(paths, filepath.Join(adminDir(project), "hooks", "watch"))
+	} else if project != "" && !skipLogged["read-only watch "+project] {
+		skipLogged["read-only watch "+project] = true
+		logSkippedProjectHook("watch", project)
 	}
 	for _, path := range paths {
 		st, err := os.Stat(path)
@@ -182,6 +182,17 @@ func watchHookFrom(project string, projectHooks bool) string {
 }
 
 var skipLogged = map[string]bool{}
+
+// logSkippedProjectHook notes in hooks.log that a read-only contract's
+// project hook for the event wasn't run, so one someone wired to the
+// project leaves a trace of why it didn't fire. Whether the project has
+// one isn't looked for: its hooks folder is the code under review.
+func logSkippedProjectHook(event, project string) {
+	if logf := hooksLog(); logf != nil {
+		fmt.Fprintf(logf, "%s %s the project's hooks not looked for: the contract is read-only (%s)\n", time.Now().Format(time.DateTime), event, project)
+		logf.Close()
+	}
+}
 
 // hooksLog opens the books' hooks.log to append to, or nil.
 func hooksLog() *os.File {

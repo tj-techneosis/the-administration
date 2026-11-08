@@ -3291,6 +3291,243 @@ class Hooks(Base):
         self.assertTrue(json.load(open(os.path.join(self.books, "director", amended, "run.json")))["read_only"])
         self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
 
+    def test_a_read_only_contract_says_what_it_skips_and_lends_nothing_to_the_trusted_house(self):
+        import re
+        got = os.path.join(self.tmp, "events")
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        house = os.path.join(self.project, ".administration")
+        self.hook(house, "placed", f'touch "{got}.placed.project"')
+        self.hook(house, "director", f'touch "{got}.director.project"')
+        self.hire_file("r", kind="critic")
+        self.hire_file("u", kind="user")
+        # The refusal says who can be placed instead.
+        self.assertIn("the critics that only read here are r", self.cli("place", "x", "--cast", "r,u", "--read-only", check=1).stderr)
+        # The branch names itself another project; a read-only contract isn't filed under it.
+        roster = os.path.join(house, "roster.toml")
+        write(roster, '[project]\nname = "victim"\n')
+        p = self.cli("place", "x", "--cast", "r", "--read-only")
+        self.assertIn("none of the project's hooks run", p.stdout)
+        cid = p.stdout.split("Contract ")[1].split()[0]
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        log = open(os.path.join(self.books, "hooks.log")).read()
+        self.assertIn("placed the project's hooks not looked for: the contract is read-only", log)
+        self.assertNotIn(os.path.join(house, "hooks", "placed"), log)
+        r = [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == cid][0]
+        self.assertNotEqual(r["key"], "victim")
+        # The same place without --read-only takes the house's name, as ever.
+        trusted = self.place("x", "--cast", "r")
+        self.cli("wait", trusted)
+        self.cli("close", trusted)
+        r = [r for r in json.loads(self.cli("status", "--all", "--json").stdout) if r["id"] == trusted][0]
+        self.assertEqual(r["key"], "victim")
+        os.remove(f"{got}.placed.project")
+        # Training on a read-only contract is read-only: no project hook, nothing to apply.
+        out = self.cli("director", "train", "someone", "--contract", cid, check=None).stdout
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        self.assertTrue(json.load(open(os.path.join(self.books, "director", run, "run.json")))["read_only"])
+        self.assertFalse(os.path.exists(f"{got}.director.project"))
+        # A read-only cast is told to cast only critics that read.
+        out = self.cli("director", "cast", "the forms", "--read-only", check=None).stdout
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        self.assertIn("This cast is read-only", open(os.path.join(self.books, "director", run, "in", "job.md")).read())
+        self.assertEqual(sorted(glob.glob(f"{got}.*.project")), [])
+        # Its candidate can't be hired into the checkout by its file either.
+        cand = os.path.join(self.books, "director", run, "out", "candidates", "spot.md")
+        write(cand, professional("spot", kind="critic"))
+        self.assertIn(f"run {run} was read-only", self.cli("hire", cand, check=1).stderr)
+        self.assertFalse(os.path.exists(os.path.join(house, "professionals", "spot.md")))
+        # --contract is train's alone.
+        self.assertIn("--contract goes with director train", self.cli("director", "cast", "x", "--contract", cid, check=1).stderr)
+        # Review leaves the branch-housed contract out, and says so; stats doesn't count it.
+        os.remove(roster)
+        err = self.cli("director", "review", check=1).stderr
+        self.assertIn(f"read-only ones that read the branch's own house, which a review leaves out", err)
+        self.assertIn(cid, err)
+        self.assertEqual(json.loads(self.cli("stats", "--json").stdout)["contracts"], 0)
+
+    def test_a_read_only_contract_and_its_copy_go_by_the_origin_and_prune_keeps_the_copy(self):
+        import re
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        house = os.path.join(self.project, ".administration")
+        g("remote", "add", "origin", "https://example.com/acme/shop.git")
+        write(os.path.join(house, "roster.toml"), '[project]\nname = "victim"\n')
+        self.hire_file("r", kind="critic", fake="slow", coins="30m")
+        g("add", "-A"); g("commit", "-qm", "the project")
+        write(os.path.join(self.project, "dirty.txt"), "uncommitted\n")  # a copy that can't be remade later
+        cid = self.place("x", "--cast", "r", "--read-only")
+        c = json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))
+        self.assertEqual(c["key"], "shop")
+        copies = glob.glob(os.path.join(self.books, "copies", "*", "*"))
+        self.assertTrue(copies)
+        self.assertFalse(glob.glob(os.path.join(self.books, "copies", "victim", "*")))
+        # The copy is still there after a prune while the contract is open.
+        self.cli("prune", "--older", "0s")
+        for d in copies:
+            self.assertTrue(os.path.isdir(d), d)
+        self.cli("close", cid, check=None)
+
+    def test_reviewing_a_read_only_contract_in_the_checkout_it_reviewed_is_read_only(self):
+        import re
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        got = os.path.join(self.tmp, "events")
+        house = os.path.join(self.project, ".administration")
+        self.hire_file("r", kind="critic")
+        g("add", "-A"); g("commit", "-qm", "the house")
+        self.hook(house, "director", f'touch "{got}.director.project"')
+        self.hook(house, "watch", f'touch "{got}.watch.project"')
+        cid = self.place("x", "--cast", "r", "--read-only", "--house-from", "refs/heads/main", env={"TMUX": "", "HERDR_ENV": ""})
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.assertIn("watch the project's hooks not looked for", open(os.path.join(self.books, "hooks.log")).read())
+        out = self.cli("director", "review", check=None).stdout
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out).group(1)
+        self.assertTrue(json.load(open(os.path.join(self.books, "director", run, "run.json")))["read_only"])
+        self.assertFalse(os.path.exists(f"{got}.director.project"))
+        self.assertFalse(os.path.exists(f"{got}.watch.project"))
+
+    def test_a_checkout_that_held_code_under_review_stays_read_only_for_the_director_and_hire(self):
+        import re
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        got = os.path.join(self.tmp, "events")
+        root_house = os.path.join(self.project, ".administration")
+        web = os.path.join(self.project, "apps", "web")
+        web_house = os.path.join(web, ".administration")
+        self.hook(root_house, "director", f'touch "{got}.director.root"')
+        self.hook(root_house, "hired", f'touch "{got}.hired.root"')
+        write(os.path.join(web_house, "professionals", "r.md"), professional("r", kind="critic"))
+        g("add", "-A"); g("commit", "-qm", "a subproject")
+        # A read-only contract on the subfolder, branch-housed (no --house-from), with a one-off.
+        write(os.path.join(self.tmp, "spot.md"), professional("spot", kind="critic"))
+        cid = self.place("x", "--cast", "r", "--read-only", "--project", web)
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        oneoff = self.place("x", "--with", os.path.join(self.tmp, "spot.md"), "--read-only", "--project", web)
+        self.cli("wait", oneoff)
+        self.cli("close", oneoff)
+        # At the checkout's top, not the subfolder: still the reviewed checkout.
+        self.assertIn("the code it reviewed or its house", self.cli("hire", "--from", oneoff, "spot", check=1).stderr)
+        hire_md = os.path.join(self.books, "contracts", oneoff, "spot", "hire.md")
+        self.assertIn("the code it reviewed or its house", self.cli("hire", hire_md, check=1).stderr)
+        self.assertFalse(os.path.exists(os.path.join(root_house, "professionals", "spot.md")))
+        for job in (["review"], ["train", "someone", "--contract", cid], ["cast", "the forms"]):
+            out = self.cli("director", *job, check=None)
+            m = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out.stdout)
+            if m:
+                self.assertTrue(json.load(open(os.path.join(self.books, "director", m.group(1), "run.json")))["read_only"], job)
+        self.assertEqual(sorted(glob.glob(f"{got}.*.root")), [])
+        # Control: a checkout you trust is that checkout's as ever.
+        trusted = os.path.join(self.tmp, "trusted")
+        subprocess.run(["git", "clone", "-q", self.project, trusted], check=True, env=self.env)
+        out = self.cli("director", "train", "someone", "--contract", cid, "--project", trusted, check=None)
+        run = re.search(r"Director (d[0-9-]+-[a-z0-9]{4})", out.stdout).group(1)
+        self.assertFalse(json.load(open(os.path.join(self.books, "director", run, "run.json"))).get("read_only"))
+        self.assertTrue(os.path.exists(f"{got}.director.root"))  # the trusted clone's own hook
+        self.cli("hire", hire_md, "--project", trusted)
+        self.assertTrue(os.path.exists(os.path.join(trusted, ".administration", "professionals", "spot.md")))
+
+    def test_a_resume_wont_review_more_than_its_contract_did(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.hire_file("r", kind="critic")
+        write(os.path.join(self.project, "a.txt"), "1\n"); g("add", "a.txt"); g("commit", "-qm", "base")
+        g("checkout", "-qb", "change")
+        write(os.path.join(self.project, "a.txt"), "2\n"); g("commit", "-qam", "one")
+        write(os.path.join(self.project, "a.txt"), "3\n"); g("commit", "-qam", "two")
+        cid = self.place("these changes", "--cast", "r", "--changes", "--base", "HEAD~1")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        # The branch is rewritten so the contract's base is gone from under it.
+        g("reset", "-q", "--hard", "HEAD~2")
+        write(os.path.join(self.project, "a.txt"), "4\n"); g("commit", "-qam", "rewritten")
+        err = self.cli("resume", cid, "r", check=1).stderr
+        self.assertIn("isn't under HEAD here", err)
+        self.assertNotIn("goes on", err)  # refused before anything says it'll go ahead
+        # Another branch checked out: refused the same, rather than reviewing its changes.
+        g("checkout", "-q", "main")
+        self.assertIn("isn't under HEAD here", self.cli("resume", cid, "r", check=1).stderr)
+
+    def test_a_resume_on_the_same_branch_moved_on_still_goes(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.hire_file("r", kind="critic")
+        write(os.path.join(self.project, "a.txt"), "1\n"); g("add", "a.txt"); g("commit", "-qm", "base")
+        g("checkout", "-qb", "change")
+        write(os.path.join(self.project, "a.txt"), "2\n"); g("commit", "-qam", "one")
+        cid = self.place("these changes", "--cast", "r", "--changes", "--base", "main")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        write(os.path.join(self.project, "a.txt"), "3\n"); g("commit", "-qam", "a fix since")
+        new = self.cli("resume", cid, "r").stdout.split("Contract ")[1].split()[0]
+        self.cli("wait", new)
+        self.cli("close", new)
+
+    def test_prune_clears_unpacked_houses_no_contract_names(self):
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.hire_file("r", kind="critic")
+        g("add", "-A"); g("commit", "-qm", "the house")
+        cid = self.place("x", "--cast", "r", "--house-from", "refs/heads/main")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        [named] = glob.glob(os.path.join(self.books, "houses", "*"))
+        os.utime(named, (time.time() - 7200, time.time() - 7200))  # kept by the name, not the hour
+        stale = os.path.join(self.books, "houses", "0123456789abcdef")
+        write(os.path.join(stale, "professionals", "x.md"), "x\n")
+        os.utime(stale, (time.time() - 7200, time.time() - 7200))
+        fresh = os.path.join(self.books, "houses", "fedcba9876543210")
+        write(os.path.join(fresh, "professionals", "x.md"), "x\n")
+        self.assertIn(f"would remove the house {stale}", self.cli("prune", "--dry-run").stdout)
+        out = self.cli("prune").stdout
+        self.assertIn("Removed 1 house unpacked from a ref", out)
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.isdir(named))  # a contract in the books still names it
+        self.assertTrue(os.path.isdir(fresh))  # made in the last hour: a place may be about to name it
+
+    def test_a_pushed_tag_cant_stand_in_for_the_trusted_ref(self):
+        # Git looks up refs/tags/NAME before refs/remotes/NAME, and takes
+        # whatever exists when the ref meant doesn't; whoever can push tags
+        # to the reviewed repo could name one origin/main. A name here means
+        # one kind of ref, never a search.
+        g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")
+        rfile = os.path.join(self.project, ".administration", "professionals", "r.md")
+        write(rfile, professional("r", kind="critic").replace("You are r.", "You are r, as main has you."))
+        g("add", "-A"); g("commit", "-qm", "the house on main")
+        main = g("rev-parse", "HEAD")
+        g("checkout", "-qb", "theirs")
+        write(rfile, professional("r", kind="critic").replace("You are r.", "You are r, as the branch rewrote you."))
+        g("add", "-A"); g("commit", "-qm", "the branch's house")
+        theirs = g("rev-parse", "HEAD")
+        g("remote", "add", "origin", "https://example.com/acme/shop.git")
+        # A clone that never fetched origin/main: the pushed tags are all there is.
+        for t in ("origin/main", "main", theirs[:7]):
+            g("tag", t, theirs)
+        err = self.cli("place", "x", "--cast", "r", "--house-from", "origin/main", check=1).stderr
+        self.assertIn("no such ref as refs/remotes/origin/main", err)
+        self.assertIn("doesn't know origin's default branch", self.cli("place", "x", "--cast", "r", "--house-from", "origin", check=1).stderr)
+        self.assertIn("say which ref you mean", self.cli("place", "x", "--cast", "r", "--house-from", "main", check=1).stderr)
+        self.assertIn("give the full commit id", self.cli("place", "x", "--cast", "r", "--house-from", theirs[:7], check=1).stderr)
+        self.assertIn("checkout under review", self.cli("place", "x", "--cast", "r", "--house-from", "HEAD", check=1).stderr)
+        self.assertIn("not a valid ref name", self.cli("place", "x", "--cast", "r", "--house-from", "refs/heads/a..b", check=1).stderr)
+        # With the real ones here, each form takes exactly what it names, and place says which.
+        g("update-ref", "refs/remotes/origin/main", main)
+        g("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        persona = lambda cid: open(os.path.join(self.pdir(cid, "r"), "persona.md")).read()
+        for ref, said in (("origin/main", f"House: from refs/remotes/origin/main, at {main[:10]}"),
+                          ("origin", f"House: from refs/remotes/origin/main, at {main[:10]}"),
+                          (main, f"House: from commit {main[:10]}"),
+                          (main.upper(), f"House: from commit {main[:10]}")):
+            out = self.cli("place", "theirs", "--cast", "r", "--house-from", ref)
+            self.assertIn(said, out.stderr)
+            cid = out.stdout.split("Contract ")[1].split()[0]
+            self.cli("wait", cid)
+            self.assertIn("as main has you", persona(cid))
+            self.cli("close", cid)
+        # A real ref with characters git allows is named in full.
+        g("update-ref", "refs/tags/pkg@1.2", main)
+        self.assertIn("House: from refs/tags/pkg@1.2", self.cli("place", "x", "--cast", "r", "--house-from", "refs/tags/pkg@1.2", "--dry-run").stderr)
+
     def test_the_house_can_come_from_a_trusted_ref(self):
         g = lambda *a: subprocess.run(["git", *a], cwd=self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
         self.env["ADMINISTRATION_CONFIG"] = os.path.join(self.tmp, "config")
@@ -3306,8 +3543,15 @@ class Hooks(Base):
         for ev in ("placed", "closed"):
             self.hook(house, ev, f'touch "{got}.{ev}"')
         g("add", "-A"); g("commit", "-qm", "the branch's house")
-        cid = self.place("theirs", "--cast", "r", "--house-from", "main")
+        dry = json.loads(self.cli("place", "theirs", "--cast", "r", "--house-from", "refs/heads/main", "--dry-run").stdout)
+        self.assertEqual(dry["house"], f"(dry run: from {main[:10]})")  # unpacked for the dry run, and gone
+        self.assertEqual(glob.glob(os.path.join(self.books, "houses", "*")), [])
+        cid = self.place("theirs", "--cast", "r", "--house-from", "refs/heads/main")
         self.cli("wait", cid)
+        # Once the books have that commit's house, a dry run shows that folder: it's the one a place reads.
+        [unpacked] = glob.glob(os.path.join(self.books, "houses", "*"))
+        dry = json.loads(self.cli("place", "theirs", "--cast", "r", "--house-from", "refs/heads/main", "--dry-run").stdout)
+        self.assertEqual(realpath(dry["house"]), realpath(unpacked))
         persona = lambda cid: open(os.path.join(self.pdir(cid, "r"), "persona.md")).read()
         self.assertIn("as main has you", persona(cid))
         self.assertNotIn("as the branch rewrote you", persona(cid))
@@ -3326,7 +3570,7 @@ class Hooks(Base):
         self.cli("close", new)
         # Without it, the checkout's house as ever, even while a contract
         # with main's house is still open on the same project.
-        held = self.place("theirs", "--cast", "r", "--house-from", "main")
+        held = self.place("theirs", "--cast", "r", "--house-from", "refs/heads/main")
         self.cli("wait", held)
         cid = self.place("theirs", "--cast", "r")
         self.cli("wait", cid)
@@ -3335,24 +3579,25 @@ class Hooks(Base):
         self.cli("close", cid)
         self.cli("close", held)
         # A ref that isn't there, or has no house and none is kept, is refused.
-        self.assertIn("--house-from nowhere: no such commit", self.cli("place", "x", "--cast", "r", "--house-from", "nowhere", check=1).stderr)
+        self.assertIn("no such ref as refs/heads/nowhere", self.cli("place", "x", "--cast", "r", "--house-from", "refs/heads/nowhere", check=1).stderr)
+        self.assertIn("say which ref you mean", self.cli("place", "x", "--cast", "r", "--house-from", "nowhere", check=1).stderr)
         self.assertIn("give a branch, tag or commit", self.cli("place", "x", "--cast", "r", "--house-from", "-x", check=1).stderr)
         g("checkout", "-q", "--orphan", "bare"); g("rm", "-rqf", "--cached", "."); write(os.path.join(self.project, "x.txt"), "x\n")
         g("add", "x.txt"); g("commit", "-qm", "no house")
-        self.assertIn("has no .administration, and no house is kept", self.cli("place", "x", "--cast", "r", "--house-from", "bare", check=1).stderr)
+        self.assertIn("has no .administration, and no house is kept", self.cli("place", "x", "--cast", "r", "--house-from", "refs/heads/bare", check=1).stderr)
         self.assertIn("--house-from :kept: no house is kept", self.cli("place", "x", "--cast", "r", "--house-from", ":kept", check=1).stderr)
         # A house that's itself a link at the ref is refused, not read as none.
         g("checkout", "-qf", "main"); g("checkout", "-qb", "linked-house")
         g("rm", "-rq", "--cached", ".administration"); shutil.move(house, os.path.join(self.tmp, "elsewhere"))
         os.symlink(os.path.join(self.tmp, "elsewhere"), house)
         g("add", "-A"); g("commit", "-qm", "the house as a link")
-        self.assertIn("not a folder", self.cli("place", "x", "--cast", "r", "--house-from", "linked-house", check=1).stderr)
+        self.assertIn("not a folder", self.cli("place", "x", "--cast", "r", "--house-from", "refs/heads/linked-house", check=1).stderr)
         os.remove(house); shutil.move(os.path.join(self.tmp, "elsewhere"), house)
         # A project in a subfolder of its repository takes its own house there.
         web = os.path.join(self.project, "apps", "web")
         write(os.path.join(web, ".administration", "professionals", "w.md"), professional("w", kind="critic").replace("You are w.", "You are w, of apps/web on main."))
         g("checkout", "-qf", "main"); g("add", "-A"); g("commit", "-qm", "a subproject")
-        cid = self.place("web", "--cast", "w", "--house-from", "main", "--project", web)
+        cid = self.place("web", "--cast", "w", "--house-from", "refs/heads/main", "--project", web)
         self.cli("wait", cid)
         self.assertIn("of apps/web on main", open(os.path.join(self.pdir(cid, "w"), "persona.md")).read())
         self.cli("close", cid)
@@ -3360,7 +3605,7 @@ class Hooks(Base):
         g("checkout", "-qf", "main"); g("checkout", "-qb", "linky")
         os.symlink("/etc/passwd", os.path.join(house, "handout.txt"))
         g("add", "-A"); g("commit", "-qm", "a link")
-        self.assertIn("isn't a file or a folder", self.cli("place", "x", "--cast", "r", "--house-from", "linky", check=1).stderr)
+        self.assertIn("isn't a file or a folder", self.cli("place", "x", "--cast", "r", "--house-from", "refs/heads/linky", check=1).stderr)
 
     def test_a_house_from_a_ref_reads_only_itself(self):
         g = lambda *a, cwd=None: subprocess.run(["git", *a], cwd=cwd or self.project, check=True, env=self.env, capture_output=True, text=True).stdout.strip()
@@ -3379,11 +3624,11 @@ class Hooks(Base):
         self.cli("place", "x", "--cast", "agent,out", "--dry-run")
         # With the house from main, neither: not the checkout's agent, nor a file outside the house.
         for name in ("agent", "out"):
-            self.assertIn(f'nobody called "{name}" on the roster', self.cli("place", "x", "--cast", name, "--house-from", "main", "--dry-run", check=1).stderr)
+            self.assertIn(f'nobody called "{name}" on the roster', self.cli("place", "x", "--cast", name, "--house-from", "refs/heads/main", "--dry-run", check=1).stderr)
         # A dry run places nothing, and leaves no unpacked house behind.
         houses = os.path.join(self.books, "houses")
         before = sorted(os.listdir(houses)) if os.path.isdir(houses) else []
-        dry = json.loads(self.cli("place", "x", "--cast", "r", "--house-from", "theirs", "--dry-run").stdout)
+        dry = json.loads(self.cli("place", "x", "--cast", "r", "--house-from", "refs/heads/theirs", "--dry-run").stdout)
         self.assertTrue(dry["house"].startswith("(dry run: from "), dry["house"])
         self.assertEqual(sorted(os.listdir(houses)) if os.path.isdir(houses) else [], before)
         # The house kept on this machine, when the ref has none, and a resume of it.
@@ -3394,7 +3639,7 @@ class Hooks(Base):
         write(os.path.join(kept, "professionals", "k.md"), professional("k", kind="critic").replace("You are k.", "You are k, kept here."))
         g("checkout", "-q", "--orphan", "bare"); g("rm", "-rqf", "--cached", "."); write(os.path.join(self.project, "x.txt"), "x\n")
         g("add", "x.txt"); g("commit", "-qm", "no house")
-        cid = self.place("x", "--cast", "k", "--house-from", "bare")
+        cid = self.place("x", "--cast", "k", "--house-from", "refs/heads/bare")
         self.cli("wait", cid)
         self.assertEqual(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["house_from"], "kept")
         self.cli("close", cid)
@@ -3409,7 +3654,7 @@ class Hooks(Base):
         self.assertIn("used the house kept on this machine", self.cli("resume", new, "k", check=1).stderr)
         # So for an unpacked house deleted by hand: said, not read as an empty roster.
         g("checkout", "-qf", "main")
-        cid = self.place("x", "--cast", "r", "--house-from", "main")
+        cid = self.place("x", "--cast", "r", "--house-from", "refs/heads/main")
         self.cli("wait", cid)
         self.cli("close", cid)
         shutil.rmtree(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["house"])
@@ -3448,6 +3693,35 @@ class Hooks(Base):
         done = subprocess.run(["sh", "-c", pro["command"]], env={"PATH": self.env["PATH"], "HOME": self.home},
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_read_only_contract_opens_panes_only_with_the_machines_watch_hook(self):
+        got = os.path.join(self.tmp, "watch")
+        cfg = os.path.join(self.tmp, "config")
+        self.env["ADMINISTRATION_CONFIG"] = cfg
+        self.hook(os.path.join(self.project, ".administration"), "watch", f'touch "{got}.project"')
+        self.hire_file("r", kind="critic")
+        # Only the project's: not run for code under review, at place or by watch --panes.
+        cid = self.place("x", "--cast", "r", "--read-only", env={"TMUX": "", "HERDR_ENV": ""})
+        self.cli("watch", cid, "--panes", check=None, env={"TMUX": "", "HERDR_ENV": ""})
+        self.cli("wait", cid)
+        self.assertFalse(os.path.exists(f"{got}.project"))
+        # The machine's is the person's, and runs for it like any other.
+        self.hook(cfg, "watch", f'cat > "{got}.machine"')
+        cid2 = self.place("x", "--cast", "r", "--read-only", env={"TMUX": "", "HERDR_ENV": ""})
+        self.assertEqual(json.load(open(f"{got}.machine"))["contract"], cid2)
+        os.remove(f"{got}.machine")
+        self.cli("watch", cid2, "--panes", env={"TMUX": "", "HERDR_ENV": ""}, check=None)
+        self.assertEqual(json.load(open(f"{got}.machine"))["contract"], cid2)
+        self.assertFalse(os.path.exists(f"{got}.project"))
+        self.cli("wait", cid2)
+        # Its base and read-only mark outlive the contract: they're in its ledger line after prune.
+        for c in (cid, cid2):
+            self.cli("close", c)
+        self.cli("prune", "--keep", "0", "--older", "0s")
+        lines = [json.loads(l) for f in glob.glob(os.path.join(self.books, "ledgers", "*.jsonl")) for l in open(f)]
+        mine = [l for l in lines if l.get("contract") in (cid, cid2)]
+        self.assertTrue(mine)
+        self.assertTrue(all(l.get("read_only") for l in mine))
 
     def test_a_failing_watch_hook_falls_back_to_the_watch_line(self):
         cfg = os.path.join(self.tmp, "config")

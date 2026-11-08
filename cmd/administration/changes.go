@@ -404,6 +404,21 @@ func cmdHire(args []string) error {
 		src = filepath.Join(dir, src, "hire.md")
 	} else if !strings.ContainsAny(src, "/.") {
 		src = filepath.Join(adminDir(project), "candidates", src+".md")
+	} else if run := runOfFile(src); run != nil && run.ReadOnly {
+		// A read-only Director run's own file, by its path: as place
+		// treats it (withReadOnly), never into the checkout that run was
+		// on, and with no project's hook.
+		if err := notIntoReviewedRun(run, project); err != nil {
+			return err
+		}
+		projectHooks = false
+	} else if c := contractOfFile(src); c != nil && c.ReadOnly {
+		// A read-only contract's own copy of a one-off, by its path: as
+		// hire --from treats it.
+		if err := notIntoReviewed(c, project); err != nil {
+			return err
+		}
+		projectHooks = false
 	}
 	p, dst, err := hireFile(project, src, f.has("replace"))
 	if err != nil {
@@ -538,17 +553,117 @@ func baseWarnings(project, base string) []string {
 	return out
 }
 
+// reviewedRoots is what a read-only contract or run on project treats as
+// code under review: the project, the whole working tree it's in (a
+// subfolder project's checkout is all the branch's), and their houses.
+func reviewedRoots(project string, extra ...string) []string {
+	roots := []string{resolvedPath(project), resolvedPath(adminDir(project))}
+	if isDir(project) {
+		if top, err := git(project, "rev-parse", "--show-toplevel"); err == nil && top != "" {
+			roots = append(roots, resolvedPath(top), resolvedPath(adminDir(top)))
+		}
+	}
+	for _, e := range extra {
+		if e != "" {
+			roots = append(roots, resolvedPath(e))
+		}
+	}
+	return roots
+}
+
+// underReview says whether where (a project, or the house it would write
+// to) is inside any of roots.
+func underReview(roots []string, where ...string) bool {
+	for _, w := range where {
+		to := resolvedPath(w)
+		for _, h := range roots {
+			if to == h || within(to, h) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // notIntoReviewed refuses to write into a read-only contract's reviewed
 // checkout or its house from project: where it would be written, not where
-// it was asked for (a linked worktree's house is its main checkout's, and
-// a subfolder's is inside the checkout), through links, even for a house
-// not made yet.
+// it was asked for (a linked worktree's house is its main checkout's, a
+// subfolder's is inside the checkout, and the checkout is the whole
+// working tree), through links, even for a house not made yet.
 func notIntoReviewed(c *contract, project string) error {
-	to := resolvedPath(adminDir(project))
-	for _, h := range []string{resolvedPath(c.Project), resolvedPath(adminDir(c.Project)), resolvedPath(contractHouse(c))} {
-		if to == h || within(to, h) {
-			return usageError{fmt.Sprintf("contract %s was read-only, on %s: writing here would go into %s, the code it reviewed or its house; run it in a checkout you trust (--project DIR)", c.ID, c.Project, to)}
+	if underReview(reviewedRoots(c.Project, contractHouse(c)), project, adminDir(project)) {
+		return usageError{fmt.Sprintf("contract %s was read-only, on %s: writing here would go into %s, the code it reviewed or its house; run it in a checkout you trust (--project DIR)", c.ID, c.Project, resolvedPath(adminDir(project)))}
+	}
+	return nil
+}
+
+// notIntoReviewedRun refuses writing a read-only run's work into the
+// checkout it was on, or that checkout's house.
+func notIntoReviewedRun(run *directorRun, project string) error {
+	if underReview(reviewedRoots(run.Project), project, adminDir(project)) {
+		return usageError{fmt.Sprintf("run %s was read-only, on %s: hiring from it here would go into %s, the code it was on or its house; run it in a checkout you trust (--project DIR)", run.ID, run.Project, resolvedPath(adminDir(project)))}
+	}
+	return nil
+}
+
+// readOnlyCheckout is a read-only contract in the books whose reviewed
+// checkout (or its house) project is in, or nil. A checkout that held code
+// under review is treated as that code wherever it stands now: whatever is
+// checked out there, the person checked the branch out there to review it.
+func readOnlyCheckout(project string) *contract {
+	books, err := booksDir()
+	if err != nil {
+		return nil
+	}
+	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
+	for _, file := range files {
+		c, _, err := loadContract(filepath.Base(filepath.Dir(file)))
+		if err == nil && c.ReadOnly && notIntoReviewed(c, project) != nil {
+			return c
 		}
 	}
 	return nil
+}
+
+// runOfFile is the Director run a file belongs to, by its path in the
+// runs' folder, or nil.
+func runOfFile(path string) *directorRun {
+	dd, err := directorDir()
+	if err != nil || dd == "" {
+		return nil
+	}
+	p := realPath(path)
+	if !within(p, realPath(dd)) {
+		return nil
+	}
+	r, _ := filepath.Rel(realPath(dd), p)
+	id := strings.SplitN(filepath.ToSlash(r), "/", 2)[0]
+	if !runRE.MatchString(id) {
+		return nil
+	}
+	run, _, err := loadRun(id)
+	if err != nil {
+		return nil
+	}
+	return run
+}
+
+// contractOfFile is the contract a file belongs to, by its path in the
+// books' contracts folder (a one-off's hire.md), or nil.
+func contractOfFile(path string) *contract {
+	books, err := booksDir()
+	if err != nil {
+		return nil
+	}
+	root := realPath(filepath.Join(books, "contracts"))
+	p := realPath(path)
+	if !within(p, root) {
+		return nil
+	}
+	r, _ := filepath.Rel(root, p)
+	c, _, err := loadContract(strings.SplitN(filepath.ToSlash(r), "/", 2)[0])
+	if err != nil {
+		return nil
+	}
+	return c
 }

@@ -44,7 +44,9 @@ const usage = `administration: contracts for persona agents.
       into it. --house-from takes the house (roster, professionals,
       handouts, hooks) from REF, such as origin/main, not from the checkout
       under review; the house kept on this machine when REF has none
-      (:kept asks for that one). A house from a ref uses only files inside it. --ticket, --requested-by and
+      (:kept asks for that one). REF is REMOTE/BRANCH, REMOTE (its HEAD's
+      branch), refs/... or a full commit id; a bare name, a short id or
+      HEAD is refused. A house from a ref uses only files inside it. --ticket, --requested-by and
       --release record what it's for (a tracker's id, who asked for it,
       the version it reviews), so other records can be joined to it. --changes puts it on the branch's
       changes, and gives users the app before them too, to compare

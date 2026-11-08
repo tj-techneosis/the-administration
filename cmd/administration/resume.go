@@ -134,22 +134,6 @@ func cmdResume(args []string) error {
 		// The same house it was placed with, from the same commit.
 		pargs = append(pargs, "--house-from", c.HouseFrom)
 	}
-	if c.Build != "" {
-		// Held to the build it was held to then, not to HEAD now.
-		pargs = append(pargs, "--build", c.Build)
-	} else if c.Commit != "" {
-		// Held to HEAD as it is now, as a contract placed now is: the
-		// person may have fixed what was found. Said, when that isn't the
-		// build the earlier part was on.
-		head, _ := git(c.Project, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
-		now, _ := workHash(c.Project)
-		switch {
-		case head != c.Commit:
-			fmt.Fprintf(os.Stderr, "administration: contract %s was on %s, and HEAD is %s now: %s's part goes on on %s, not the build the earlier part was on (administration place --build %s for that one)\n", c.ID, short(c.Commit), short(head), name, short(head), c.Commit)
-		case now != c.Work:
-			fmt.Fprintf(os.Stderr, "administration: the uncommitted work has changed since contract %s was placed (%s, now %s): %s's part goes on on the work as it is now\n", c.ID, orNone(c.Work), orNone(now), name)
-		}
-	}
 	switch {
 	case len(left) > 0:
 		for i, l := range left {
@@ -171,6 +155,42 @@ func cmdResume(args []string) error {
 		left = []string{"all of it"}
 	default:
 		return usageError{fmt.Sprintf("%s left nothing undone on contract %s", name, c.ID)}
+	}
+	// On changes, the new contract measures them from merge-base(its tip,
+	// the contract's merge base): the build when this checkout has it,
+	// else HEAD, as place does. When that merge base isn't under the tip
+	// (history rewritten past it, a branch from elsewhere checked out, or
+	// the commit gone), it would be some older commit: refused, once
+	// there's a part to resume and before anything says it goes on. A
+	// branch rebased onto a newer base still has the old one under it, and
+	// the resume then takes in what the base gained: said in the docs, not
+	// caught here.
+	if c.Changes != nil && c.Changes.MergeBase != "" {
+		base, tip := c.Changes.MergeBase, "HEAD"
+		if c.Build != "" {
+			if _, err := git(c.Project, "cat-file", "-e", c.Build+"^{commit}"); err == nil {
+				tip = c.Build
+			}
+		}
+		if _, err := git(c.Project, "merge-base", "--is-ancestor", base, tip); err != nil {
+			return usageError{fmt.Sprintf("contract %s's changes start at %s, which isn't under %s here (history rewritten past it, another branch checked out, or the commit gone?); a resume would measure its changes from somewhere else. Check out what it reviewed, or place a new contract on the changes as they are now", c.ID, short(base), tip)}
+		}
+	}
+	if c.Build != "" {
+		// Held to the build it was held to then, not to HEAD now.
+		pargs = append(pargs, "--build", c.Build)
+	} else if c.Commit != "" {
+		// Held to HEAD as it is now, as a contract placed now is: the
+		// person may have fixed what was found. Said, when that isn't the
+		// build the earlier part was on.
+		head, _ := git(c.Project, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+		now, _ := workHash(c.Project)
+		switch {
+		case head != c.Commit:
+			fmt.Fprintf(os.Stderr, "administration: contract %s was on %s, and HEAD is %s now: %s's part goes on on %s, not the build the earlier part was on (administration place --build %s for that one)\n", c.ID, short(c.Commit), short(head), name, short(head), c.Commit)
+		case now != c.Work:
+			fmt.Fprintf(os.Stderr, "administration: the uncommitted work has changed since contract %s was placed (%s, now %s): %s's part goes on on the work as it is now\n", c.ID, orNone(c.Work), orNone(now), name)
+		}
 	}
 	if c.Changes != nil {
 		// The same changes: from the merge base the contract was placed on,

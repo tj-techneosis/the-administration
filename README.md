@@ -287,7 +287,10 @@ instead, under `~/.config/administration/projects/` (or the
 `projects/` of `$ADMINISTRATION_CONFIG` or `$XDG_CONFIG_HOME/administration`,
 when you set them) at the path of the checkout's `origin` remote: `git@github.com:acme/shop.git` (or
 `https://github.com/acme/shop`) lives at
-`~/.config/administration/projects/github.com/acme/shop/`.
+`~/.config/administration/projects/github.com/acme/shop/`. The host is
+always lowercase, and so are the owner and repo on hosts that don't tell
+`Acme/Shop` from `acme/shop` (GitHub, GitLab, Bitbucket), so name the
+folders that way.
 `$ADMINISTRATION_PROJECTS` moves the whole shelf. Every clone and
 worktree of that remote finds the same house (a project in a subfolder of
 its repo, the same subfolder of it: `.../acme/shop/apps/web/`); one with its own
@@ -502,7 +505,7 @@ instead: never dropped, never counted.
 | `administration report ID [NAME]` | prints the summary once closed, or one professional's report |
 | `administration sweep [--dry-run]` | stops what rooms left behind still run (their room folder and working folder both gone, no open contract owning them); `place` does it too. Linux |
 | `administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]` | builds one room with the setup hook, checks it comes up on seed data, shows its address and logins (not the passwords), and clears it away: the test for a hook you just wrote. `--changes` also builds the app before them, as a release check does |
-| `administration resume ID NAME [--coins 10m]` | a new contract for one professional on only what contract ID left undone: what they couldn't reach, and their plan's steps never answered, or their whole part when they wrote nothing down (out of coins, failed, equipment lost). A part is resumed once; what that leaves is resumed from the new contract |
+| `administration resume ID NAME [--coins 10m]` | a new contract for one professional on only what contract ID left undone: what they couldn't reach, and their plan's steps never answered, or their whole part when they wrote nothing down (out of coins, failed, equipment lost). A part is resumed once; what that leaves is resumed from the new contract. On changes, it's refused when the contract's merge base is no longer under the tip it would measure from (history rewritten, another branch checked out); a branch rebased onto a newer base still resumes, and takes in what the base gained |
 | `administration equipment-check NAME [--shot FILE]` | starts one piece of equipment in a fresh room, says what its setup printed, takes one picture through a screen and clears it away: room-check for equipment |
 | `administration watch ID [NAME] [--panes]` | follows each professional live: every action, every finding as it's written; `--panes` gives each one a pane in Herdr or tmux (or wherever your `watch` hook puts them), which closes when they're back |
 | `administration hire NAME\|FILE [--replace]` | puts a candidate on the roster |
@@ -648,10 +651,26 @@ read-only contract is read-only, and picks a one-off up from the
 contract's own file of it, never the roster; and `hire --from` a read-only
 contract refuses to write into the checkout it reviewed or its house, by
 any way round (keep them in one you trust, `--project DIR`) and runs no
-project's `hired` hook. The professionals' own files still come from the
+project's `hired` hook. any Director job run in a checkout where a read-only
+contract reviewed code (the whole working tree, whatever is checked out
+there now) is read-only as well; `hire` of a read-only run's or
+contract's own file by its path refuses that checkout too; and a read-only cast is told to cast only
+critics that read. Place says that the project's hooks won't run, and each one
+skipped is noted in the books' `hooks.log`. Without `--house-from`, a
+read-only contract is filed under the project's origin, not under the
+`[project] name` its branch's roster gives (its copy of the project too),
+and neither `director review` nor `stats` takes it in: its critics came
+from the branch's own house. The professionals' own files still come from the
 project's house, and a branch can rewrite its own critics and hooks.
 `place --house-from origin/main` takes the house (roster, professionals,
-handouts, hooks) from that ref instead: its own `.administration`,
+handouts, hooks) from that ref instead. Each way of naming it means one
+kind of ref and nothing else, since whoever can push to the reviewed repo
+can put tags and branches into your clone: `REMOTE/BRANCH` is the remote
+branch (`refs/remotes/origin/main`), `REMOTE` alone is the branch its
+`HEAD` points to, `refs/...` is that ref, and a full commit id is that
+commit. A bare name, a short id or `HEAD` is refused with what to say
+instead, and place says which ref and commit it took. The house is that
+commit's own `.administration`,
 unpacked once per commit into the books with the repository's filters off
 and links refused, or the house kept on this machine when the ref has none
 (`--house-from :kept` asks for that one); never the checkout's. A house
@@ -660,7 +679,9 @@ file, or a file outside the house, isn't read from the checkout. Every
 command that works on the contract uses that house; `hire --from` and
 `missed --contract` write to the house of the project you run them in, as
 ever (never a read-only contract's reviewed checkout). A resume takes the
-same house, and close keeps no one-off into either.
+same house, and close keeps no one-off into either. `prune` removes an
+unpacked house once no contract in the books names it and it hasn't been
+made or used in the last hour.
 
 A room whose teardown never ran (its setup run by hand, then its folder
 deleted with its cleanup in it) leaves its servers running, and nobody is

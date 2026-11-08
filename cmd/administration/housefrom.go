@@ -10,7 +10,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
 // The house from a trusted ref (place --house-from REF): the professionals,
@@ -30,37 +32,116 @@ const keptRef = ":kept"
 // the commit it was taken from ("" for a house kept on the machine). A dry
 // run (scratch) unpacks into a folder of its own that done removes, so it
 // leaves nothing in the books.
-func houseFrom(project, ref string, scratch bool) (dir, sha string, done func(), err error) {
+func houseFrom(project, ref string, scratch bool) (dir, sha, name string, done func(), err error) {
 	done = func() {}
-	dir, sha, err = houseFromAt(project, ref, scratch, &done)
-	return dir, sha, done, err
+	dir, sha, name, err = houseFromAt(project, ref, scratch, &done)
+	return dir, sha, name, done, err
 }
 
-func houseFromAt(project, ref string, scratch bool, done *func()) (dir, sha string, err error) {
+// fullSHARE is a whole commit id (SHA-1 or SHA-256).
+var fullSHARE = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// resolveHouseRef turns --house-from's REF into a commit, and says which
+// ref it came from. Whoever controls the reviewed repository can push
+// tags and branches into this clone, so a name is never searched for
+// across kinds of ref (git's own lookup takes a tag before a remote
+// branch of the same name, and takes whatever exists when the one meant
+// doesn't). Each form means one thing:
+//   - a full commit id is that commit;
+//   - refs/... is that ref and nothing else;
+//   - REMOTE/BRANCH (REMOTE a configured remote) is refs/remotes/REMOTE/BRANCH;
+//   - REMOTE alone is the branch its refs/remotes/REMOTE/HEAD points to.
+//
+// Anything else (a bare name, a short id, HEAD) is refused with what to
+// say instead.
+func resolveHouseRef(project, ref string) (sha, name string, err error) {
+	bad := func(why string) (string, string, error) {
+		return "", "", usageError{fmt.Sprintf("--house-from %s: %s", ref, why)}
+	}
+	if _, err := git(project, "rev-parse", "--git-dir"); err != nil {
+		return bad(project + " isn't in a git repository")
+	}
+	// Every commit asked for here is a full id, never a name, so nothing
+	// the repository holds can stand in for it.
+	commit := func(oid string) (string, bool) {
+		out, err := git(project, "rev-parse", "--verify", "--quiet", oid+"^{commit}")
+		return out, err == nil && out != ""
+	}
+	exact := func(full string) (string, bool) {
+		out, err := git(project, "show-ref", "--verify", "--hash", "--", full)
+		return out, err == nil && out != ""
+	}
+	fromRef := func(full string) (string, string, error) {
+		if _, err := git(project, "check-ref-format", full); err != nil {
+			return bad("not a valid ref name")
+		}
+		oid, ok := exact(full)
+		if !ok {
+			return bad(fmt.Sprintf("no such ref as %s here (fetch it first?)", full))
+		}
+		if sha, ok := commit(oid); ok {
+			return sha, full, nil
+		}
+		return bad(full + " isn't a commit")
+	}
+	lower := strings.ToLower(ref)
+	switch {
+	case fullSHARE.MatchString(lower):
+		if sha, ok := commit(lower); ok && sha == lower {
+			return sha, sha, nil
+		}
+		return bad("no such commit here (fetch it first?)")
+	case strings.HasPrefix(ref, "refs/"):
+		return fromRef(ref)
+	}
+	remotes, _ := git(project, "remote")
+	for _, r := range strings.Fields(remotes) {
+		if ref == r {
+			// The remote's default branch, named, so the person sees which.
+			target, err := git(project, "symbolic-ref", "-q", "refs/remotes/"+r+"/HEAD")
+			if err != nil || !strings.HasPrefix(target, "refs/remotes/"+r+"/") {
+				return bad(fmt.Sprintf("this clone doesn't know %s's default branch (refs/remotes/%s/HEAD); name it: %s/<branch>", r, r, r))
+			}
+			return fromRef(target)
+		}
+		if strings.HasPrefix(ref, r+"/") && len(ref) > len(r)+1 {
+			return fromRef("refs/remotes/" + ref)
+		}
+	}
+	switch {
+	case ref == "HEAD" || strings.HasSuffix(ref, "_HEAD") || strings.Contains(ref, "@"):
+		return bad("that's the checkout under review, or a step from it; name a ref you trust: <remote>/<branch>, refs/tags/<tag>, or a full commit id")
+	case hexRE.MatchString(lower):
+		return bad("a short commit id could be shadowed by a ref of that name; give the full commit id")
+	}
+	return bad("say which ref you mean: <remote>/<branch> (origin/main), refs/heads/<branch>, refs/tags/<tag>, or a full commit id")
+}
+
+func houseFromAt(project, ref string, scratch bool, done *func()) (dir, sha, name string, err error) {
 	if ref == "" || strings.HasPrefix(ref, "-") {
-		return "", "", usageError{fmt.Sprintf("--house-from %q: give a branch, tag or commit", ref)}
+		return "", "", "", usageError{fmt.Sprintf("--house-from %q: give a branch, tag or commit", ref)}
 	}
 	// ":kept": the house kept on this machine, as a contract whose ref
 	// had none recorded it (a resume of one passes it on). No ref's name
 	// has a colon, so it can't be taken for one.
 	if ref == keptRef {
 		if kept := keptHouse(project); kept != "" && isDir(kept) {
-			return realPath(kept), "", nil
+			return realPath(kept), "", keptRef, nil
 		}
-		return "", "", usageError{fmt.Sprintf("--house-from %s: no house is kept on this machine for %s", keptRef, project)}
+		return "", "", "", usageError{fmt.Sprintf("--house-from %s: no house is kept on this machine for %s", keptRef, project)}
 	}
-	sha, err = git(project, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	if err != nil || sha == "" {
-		return "", "", usageError{fmt.Sprintf("--house-from %s: no such commit in %s (fetch it first?)", ref, project)}
+	sha, name, err = resolveHouseRef(project, ref)
+	if err != nil {
+		return "", "", "", err
 	}
 	prefix, err := git(project, "rev-parse", "--show-prefix")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	inRepo := path.Join(filepath.ToSlash(prefix), ".administration")
 	top, err := git(project, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	// Only a folder is a house. A link or a submodule there is refused, not
 	// read as no house: falling back to another without a word would hide
@@ -68,50 +149,56 @@ func houseFromAt(project, ref string, scratch bool, done *func()) (dir, sha stri
 	switch t, err := git(top, "cat-file", "-t", sha+":"+inRepo); {
 	case err != nil:
 		if kept := keptHouse(project); kept != "" && isDir(kept) {
-			return realPath(kept), "", nil
+			return realPath(kept), "", keptRef, nil
 		}
-		return "", "", usageError{fmt.Sprintf("--house-from %s: %s has no %s, and no house is kept on this machine for this project", ref, short(sha), inRepo)}
+		return "", "", "", usageError{fmt.Sprintf("--house-from %s: %s has no %s, and no house is kept on this machine for this project", ref, short(sha), inRepo)}
 	case t != "tree":
-		return "", "", usageError{fmt.Sprintf("--house-from %s: %s at %s is a %s (a link or a submodule?), not a folder; a house from a ref is a folder in it", ref, inRepo, short(sha), t)}
+		return "", "", "", usageError{fmt.Sprintf("--house-from %s: %s at %s is a %s (a link or a submodule?), not a folder; a house from a ref is a folder in it", ref, inRepo, short(sha), t)}
 	}
 	books, err := booksDir()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	h := sha256.Sum256([]byte(sha + "\x00" + inRepo))
 	dir = filepath.Join(books, "houses", hex.EncodeToString(h[:8]))
 	if isDir(dir) {
-		return dir, sha, nil
+		// Reused: its time says so, so prune leaves it while this place
+		// gets as far as writing the contract that names it.
+		if !scratch {
+			now := time.Now()
+			_ = os.Chtimes(dir, now, now)
+		}
+		return dir, sha, name, nil
 	}
 	if scratch {
 		tmp, err := os.MkdirTemp("", "administration-house-")
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		if err := unpackHouse(top, sha, inRepo, tmp); err != nil {
 			os.RemoveAll(tmp)
-			return "", "", fmt.Errorf("--house-from %s: %v", ref, err)
+			return "", "", "", fmt.Errorf("--house-from %s: %v", ref, err)
 		}
 		*done = func() { os.RemoveAll(tmp) }
-		return tmp, sha, nil
+		return tmp, sha, name, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	tmp, err := os.MkdirTemp(filepath.Dir(dir), ".unpacking-")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer os.RemoveAll(tmp)
 	if err := unpackHouse(top, sha, inRepo, tmp); err != nil {
-		return "", "", fmt.Errorf("--house-from %s: %v", ref, err)
+		return "", "", "", fmt.Errorf("--house-from %s: %v", ref, err)
 	}
 	// Another place may have unpacked the same commit meanwhile: theirs is
 	// the same files, and stays.
 	if err := os.Rename(tmp, dir); err != nil && !isDir(dir) {
-		return "", "", err
+		return "", "", "", err
 	}
-	return dir, sha, nil
+	return dir, sha, name, nil
 }
 
 // unpackHouse writes the commit's house folder into dst: regular files

@@ -432,7 +432,7 @@ func history(project string) ([]ledgerLine, error) {
 			// A line written twice (by a prune before appendLedger
 			// looked first) counts once.
 			var l ledgerLine
-			if json.Unmarshal(sc.Bytes(), &l) == nil && !seen[l.Contract+"/"+l.Name] {
+			if json.Unmarshal(sc.Bytes(), &l) == nil && !seen[l.Contract+"/"+l.Name] && !(l.ReadOnly && l.HouseFrom == "") {
 				lines = append(lines, l)
 				seen[l.Contract+"/"+l.Name] = true
 			}
@@ -442,7 +442,10 @@ func history(project string) ([]ledgerLine, error) {
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 	for _, file := range files {
 		c, dir, err := loadContract(filepath.Base(filepath.Dir(file)))
-		if err != nil || !sameProject(c, project) {
+		// A read-only contract that read the branch's own house worked
+		// from professionals the branch wrote: not counted in this
+		// project's standings, as review doesn't take it in either.
+		if err != nil || !sameProject(c, project) || branchHoused(c) {
 			continue
 		}
 		for _, p := range c.Professionals {
@@ -768,8 +771,14 @@ func cmdPrune(args []string) error {
 			}
 		}
 	}
+	// The houses unpacked from a ref (place --house-from) that a contract
+	// still in the books names: its close, verify and resume read it.
+	houses := map[string]bool{}
 	for _, file := range files {
 		c, _, err := loadContract(filepath.Base(filepath.Dir(file)))
+		if err == nil && c.House != "" {
+			houses[realPath(c.House)] = true
+		}
 		if err == nil && c.ClosedAt == nil {
 			need(c)
 			if root, err := buildsDir(c); err == nil && buildCommit(c) != "" {
@@ -805,7 +814,9 @@ func cmdPrune(args []string) error {
 		for i, c := range cs {
 			dir := filepath.Join(books, "contracts", c.ID)
 			_, err := os.Stat(filepath.Join(dir, "reviewed"))
-			isReviewed := err == nil
+			// A read-only contract that read the branch's own house is
+			// never taken into a review, so it doesn't wait for one.
+			isReviewed := err == nil || branchHoused(c)
 			old := time.Since(*c.ClosedAt) > older
 			if !isReviewed && !old {
 				// Kept whole until the Director has reviewed it, or it's
@@ -909,6 +920,26 @@ func cmdPrune(args []string) error {
 			copies++
 		}
 	}
+	// The houses unpacked from a ref: one no contract in the books names
+	// goes, as does an unpack cut off before it was renamed into place.
+	// One made or reused in the last hour is left all the same, whatever
+	// --older says: a place unpacks (or reuses) it before its contract is
+	// written, and a house is small.
+	unpacked := 0
+	hs, _ := filepath.Glob(filepath.Join(books, "houses", "*"))
+	for _, d := range hs {
+		st, err := os.Lstat(d)
+		if err != nil || houses[realPath(d)] || time.Since(st.ModTime()) < time.Hour {
+			continue
+		}
+		if dry {
+			fmt.Printf("would remove the house %s\n", d)
+			continue
+		}
+		if gone(d) {
+			unpacked++
+		}
+	}
 	// The build hook's builds, kept per commit: one nobody has used in the
 	// age goes (a contract on it again builds it again). An open
 	// contract's is kept, and so is one a room or a build holds the lock
@@ -956,6 +987,9 @@ func cmdPrune(args []string) error {
 		fmt.Printf("Pruned: %d contracts down to their summaries, %d removed (their numbers are in the ledger).\n", stripped, removed)
 		if copies > 0 {
 			fmt.Printf("Removed %s of the project no contract reads any more.\n", plural(copies, "copy", "copies"))
+		}
+		if unpacked > 0 {
+			fmt.Printf("Removed %s unpacked from a ref that no contract names any more.\n", plural(unpacked, "house", "houses"))
 		}
 		if builds > 0 {
 			fmt.Printf("Removed %s unused for %s.\n", plural(builds, "build", "builds"), map[bool]string{true: f.get("older"), false: "30d"}[f.has("older")])

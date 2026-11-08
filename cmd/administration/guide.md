@@ -73,6 +73,17 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    means to test that build, place again with `--build <sha>`. Don't
    commit to the branch while its contract runs expecting the rooms to
    follow: a web room built after HEAD moved is refused too.
+   **Code nobody here has read** (a branch someone else pushed, a pull
+   request from outside the team): place it with `--read-only`, which
+   casts only critics that read and runs none of the project's own code or
+   hooks, and with `--house-from origin/main` (or another ref the person
+   trusts, or `:kept`), so the critics and their briefs come from that ref
+   and not from the branch. Name the ref as `REMOTE/BRANCH`, `refs/...` or
+   a full commit id: a bare name or a short id is refused. For a Director
+   cast, `director cast --read-only`. Keep anything learned from such a
+   contract in a checkout you trust (`hire --from ID NAME --project DIR`);
+   every Director job run in a checkout that held such a contract is
+   read-only there, so review and apply from a checkout you trust.
 2. **Have the Director cast it** (the default for any contract worth
    doing): run `administration director cast "<target>" [--changes]` with
    `run_in_background`. The Director reads the code in scope, the recent

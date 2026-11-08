@@ -94,6 +94,9 @@ func directorJob(job string, args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	if f.has("contract") && job != "train" {
+		return exitError, usageError{"--contract goes with director train"}
+	}
 	if (job == "train" || job == "cast") && len(f.pos) == 0 {
 		return exitError, usageError{"director " + job + " needs words: who is needed, or the contract's target"}
 	}
@@ -141,6 +144,20 @@ func directorJob(job string, args []string) (int, error) {
 			return exitError, err
 		}
 	}
+	// Any job run in a checkout a read-only contract reviewed (or its
+	// house) is read-only: whatever is checked out there now, the branch
+	// was checked out there to be reviewed, and its roster decides what a
+	// job takes in. It fires no project hook there, and its run can't be
+	// applied there. From a checkout you trust (--project DIR), it's that
+	// checkout's as ever.
+	if c := readOnlyCheckout(project); c != nil && !readOnly {
+		readOnly = true
+		fmt.Fprintf(os.Stderr, "administration: %s is where read-only contract %s reviewed code, so this %s is read-only too: nothing of it is applied here. To apply one, run Director jobs from a fresh clone, or with --project in a checkout that reviewed nothing.\n", project, c.ID, job)
+	}
+	var reviewIDs, reviewSkipped []string
+	if job == "review" {
+		reviewIDs, reviewSkipped = unreviewed(project)
+	}
 	run := &directorRun{ID: runID, Job: job, Project: project, Started: time.Now().UTC().Truncate(time.Second), ReadOnly: readOnly}
 	save := func() { _ = writeJSON(filepath.Join(rd, "run.json"), run) }
 	save()
@@ -174,6 +191,9 @@ func directorJob(job string, args []string) (int, error) {
 		}
 	case "cast":
 		fmt.Fprintf(&jobText, "The contract's target: %s\n\n", strings.Join(f.pos, " "))
+		if readOnly {
+			fmt.Fprintf(&jobText, "This cast is read-only: the contract will be placed with --read-only, on code under review, and that places only critics that read. Cast no users, and no critic that uses equipment (no uses: line): they would be refused, and the whole cast with them. Where a question needs the app running, say so in cast.md as a gap rather than casting for it.\n\n")
+		}
 		if amend != "" {
 			if err := os.MkdirAll(filepath.Join(in, "previous"), 0o700); err != nil {
 				return exitError, err
@@ -223,9 +243,12 @@ func directorJob(job string, args []string) (int, error) {
 		projectNote(&jobText, project)
 		fmt.Fprintf(&jobText, "On onboarding a missing setup hook doesn't stop a browser agent becoming a user: the session writes the hook next. Missing equipment does stop an agent that needs it: plan it in ./out/equipment.md.\n")
 	case "review":
-		ids := unreviewed(project)
+		ids, skipped := reviewIDs, reviewSkipped
 		misses := openMisses(project)
 		if len(ids) == 0 && len(misses) == 0 {
+			if len(skipped) > 0 {
+				return exitError, fmt.Errorf("nothing to review: no misses are open, and the closed contracts here not reviewed yet (%s) are read-only ones that read the branch's own house, which a review leaves out", strings.Join(skipped, ", "))
+			}
 			return exitError, errors.New("nothing to review: every closed contract here has been reviewed, and no misses are open")
 		}
 		if len(misses) > 0 {
@@ -234,7 +257,7 @@ func directorJob(job string, args []string) (int, error) {
 				// The contract it was missed on, reviewed before or not.
 				b, _ := os.ReadFile(filepath.Join(missedDir(project), m))
 				if mm := missContract.FindSubmatch(b); mm != nil && !slices.Contains(ids, string(mm[1])) {
-					if _, cdir, err := loadContract(string(mm[1])); err == nil {
+					if mc, cdir, err := loadContract(string(mm[1])); err == nil && !branchHoused(mc) {
 						copyContract(cdir, filepath.Join(in, "contracts", string(mm[1])))
 					}
 				}
@@ -524,18 +547,23 @@ func gatherAgents(project, only, dst string) (int, error) {
 	return n, os.WriteFile(filepath.Join(dst, "SOURCES.txt"), []byte(sources.String()), 0o600)
 }
 
-// unreviewed is the closed contracts of a project the Director hasn't seen.
-func unreviewed(project string) []string {
+// unreviewed is the closed contracts of a project the Director hasn't seen,
+// and those it leaves out: read-only ones that read the branch's own house
+// (branchHoused).
+func unreviewed(project string) (ids, skipped []string) {
 	books, err := booksDir()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
-	var ids []string
 	for _, file := range files {
 		dir := filepath.Dir(file)
 		c, _, err := loadContract(filepath.Base(dir))
 		if err != nil || !sameProject(c, project) || c.ClosedAt == nil {
+			continue
+		}
+		if branchHoused(c) {
+			skipped = append(skipped, c.ID)
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, "reviewed")); err == nil {
@@ -544,7 +572,16 @@ func unreviewed(project string) []string {
 		ids = append(ids, c.ID)
 	}
 	sort.Strings(ids)
-	return ids
+	return ids, skipped
+}
+
+// branchHoused is a read-only contract that read the reviewed branch's own
+// house: what it found came from a house the branch wrote, and its books
+// key may match a trusted project's by its repository's name alone. The
+// Director's review doesn't take it into a project's dossiers, by a miss
+// or otherwise, and it doesn't wait for one (prune).
+func branchHoused(c *contract) bool {
+	return c.ReadOnly && c.HouseFrom == ""
 }
 
 // copyContract copies what the Director reads of a contract: the summary,

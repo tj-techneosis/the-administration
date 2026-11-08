@@ -493,13 +493,23 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// does, and the contract after it (its House), uses that house.
 	houseSHA, houseKept := "", false
 	if f.has("house-from") {
-		dir, sha, done, err := houseFrom(project, strings.TrimSpace(f.get("house-from")), f.has("dry-run"))
+		dir, sha, name, done, err := houseFrom(project, strings.TrimSpace(f.get("house-from")), f.has("dry-run"))
 		if err != nil {
 			return err
 		}
 		defer done()
 		pinHouse(project, dir)
 		houseSHA, houseKept = sha, sha == ""
+		// Which ref and commit it came from, said before anything else, so
+		// the person sees what --house-from took (stderr: stdout stays the
+		// placement's own lines).
+		if houseKept {
+			fmt.Fprintln(os.Stderr, "House: the one kept on this machine for this project.")
+		} else if name == sha {
+			fmt.Fprintf(os.Stderr, "House: from commit %s.\n", short(sha))
+		} else {
+			fmt.Fprintf(os.Stderr, "House: from %s, at %s.\n", name, short(sha))
+		}
 	}
 	// A house kept on this machine is found by the project's origin remote,
 	// which the repo's own config names: said, so a checkout that only
@@ -566,12 +576,24 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 		fmt.Println("Read-only: the Director cast this was made from was read-only (director cast --read-only), so this contract is too.")
 	}
 	if readOnly {
+		// Who can be placed, said with the refusal: a cast that mixed them
+		// in is placed without them, by naming the others.
+		var readers []string
+		for _, p := range cast {
+			if p.Kind != "user" && len(p.Uses) == 0 {
+				readers = append(readers, p.Name)
+			}
+		}
+		hint := ""
+		if len(readers) > 0 {
+			hint = fmt.Sprintf("; the critics that only read here are %s: name them with --cast, or give their files to --with", strings.Join(readers, ", "))
+		}
 		for _, p := range cast {
 			switch {
 			case p.Kind == "user":
-				return usageError{fmt.Sprintf("--read-only places critics that only read; %s is a user, who needs a room that runs the project", p.Name)}
+				return usageError{fmt.Sprintf("--read-only places critics that only read; %s is a user, who needs a room that runs the project%s", p.Name, hint)}
 			case len(p.Uses) > 0:
-				return usageError{fmt.Sprintf("--read-only places critics that only read; %s uses %s, which runs the project's programs", p.Name, strings.Join(p.Uses, ", "))}
+				return usageError{fmt.Sprintf("--read-only places critics that only read; %s uses %s, which runs the project's programs%s", p.Name, strings.Join(p.Uses, ", "), hint)}
 			}
 		}
 	}
@@ -655,7 +677,16 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// needs it, or when there's uncommitted work (which can't be had
 	// later); otherwise the commit is enough, and verify makes it if it
 	// runs.
-	held := &contract{Project: project, Key: projectKey(project), House: outsideHouse(project)}
+	// A read-only contract's house is the branch under review unless it came
+	// from a ref or this machine: its roster's [project] name is the
+	// branch's to choose, so it doesn't pick which project's books the
+	// contract goes into, nor where its copy is kept. The origin's name, or
+	// the path, does. One key for both, so prune finds the copy it names.
+	key := projectKey(project)
+	if readOnly && !f.has("house-from") {
+		key = untrustedKey(project)
+	}
+	held := &contract{Project: project, Key: key, House: outsideHouse(project)}
 	if err := recordCommit(held, strings.TrimSpace(f.get("build"))); err != nil {
 		return err
 	}
@@ -676,7 +707,7 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// What can refuse the contract cheaply is asked before the copy, which
 	// can take a while on a big project: a placement refused after it would
 	// pay for it each time it's tried again. The flags first, then the rooms.
-	c := &contract{Target: target, Project: project, Key: projectKey(project), House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
+	c := &contract{Target: target, Project: project, Key: key, House: outsideHouse(project), PlacedAt: time.Now().UTC().Truncate(time.Second),
 		PlacedBy: placedBy(), Path: os.Getenv("PATH"), ShowBrowsers: f.has("show-browsers"), Resumes: resumes, Version: version,
 		ReadOnly: readOnly, HouseFrom: houseSHA}
 	if houseKept {
@@ -934,11 +965,14 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	if f.has("dry-run") {
 		os.RemoveAll(dir)
 		// A dry run's house from a ref was unpacked into a folder of its
-		// own, gone when this returns.
+		// own, gone when this returns, unless that commit's was in the books
+		// already: then it's the folder a real place would use, and shown.
 		switch c.HouseFrom {
 		case "", "kept":
 		default:
-			c.House = "(dry run: from " + short(c.HouseFrom) + ")"
+			if books, err := booksDir(); err != nil || !within(realPath(c.House), realPath(filepath.Join(books, "houses"))) {
+				c.House = "(dry run: from " + short(c.HouseFrom) + ")"
+			}
 		}
 		return printJSON(c)
 	}
@@ -1037,6 +1071,9 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 		who = "professionals"
 	}
 	fmt.Printf("Contract %s placed on %q. %d %s took it: %s.\n", id, target, len(names), who, strings.Join(names, ", "))
+	if c.ReadOnly {
+		fmt.Println("  Read-only: none of the project's hooks run for this contract or what's done with it (placed, closed, verified, watch, hired, director); the machine's still do.")
+	}
 	if len(c.Professionals) > 1 {
 		for _, p := range c.Professionals {
 			if p.Task == "" && p.Source != "contract" {

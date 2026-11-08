@@ -705,6 +705,15 @@ func projectKey(project string) string {
 	return project
 }
 
+// untrustedKey is projectKey without the roster's name: for a contract
+// whose roster is the reviewed branch's own.
+func untrustedKey(project string) string {
+	if n := originName(project); n != "" {
+		return n
+	}
+	return project
+}
+
 var originNames sync.Map // project → originName
 
 // originName is the project's name taken from its origin remote, or "" when

@@ -842,13 +842,21 @@ the first two by casting only reading critics, skips the project's hooks
 (not the machine's, which are the person's own), and writes nothing back
 into the project. Each record says `read_only`, and records on changes
 carry `base`, the commit the changes were measured from (the merge base):
-on `status --all --json`, the ledger and stats. `status ID --json` keeps
+on `status --all --json` and the ledger (stats, which totals by
+professional, carries neither). `status ID --json` keeps
 the contract's own `changes`, where `base` is the ref as it was typed and
 `merge_base` the commit. Ledger lines pruned before 0.7.8 have neither
 `read_only` nor `base`.
 The other half is the house itself: a branch can rewrite its critics'
 briefs and its hooks, so `--house-from REF` takes the house from a ref the
-person trusts. It's unpacked from that commit with `git archive` (the
+person trusts. Whoever controls the reviewed repository can push tags and
+branches into the clone, and git's own lookup searches: it takes a tag
+before a remote branch of the same name, and whatever exists when the ref
+meant doesn't. So REF is never searched for. `REMOTE/BRANCH` means
+`refs/remotes/REMOTE/BRANCH` only, `REMOTE` means what its `HEAD` points
+to, a full `refs/...` name means itself and a full commit id that commit;
+anything else (a bare name, a short id that a ref could shadow, `HEAD`)
+is refused with the forms to use. It's unpacked from that commit with `git archive` (the
 repository's filter drivers emptied, so nothing of the repository runs),
 files and folders only, into the books' `houses/`, and the contract's
 `House` points there. When the ref has no house, the one kept on this
@@ -861,7 +869,23 @@ Commands that read many contracts (status --all, pacing, sweeping, prune)
 don't pin, so one contract's house never becomes another's. A ref whose
 `.administration` is a link or a submodule is refused rather than read as
 no house, and a resume of a contract whose house was the kept one asks for
-the kept one again (`--house-from :kept`).
+the kept one again (`--house-from :kept`). Unpacked houses stay while any
+contract in the books names one, since close, verify and resume read it,
+and `prune` removes the rest (any made or reused in the last hour aside,
+whatever `--older` says, since a place unpacks or reuses one before its
+contract is written).
+Without `--house-from`, a read-only contract's roster is the branch's, so
+its `[project] name` doesn't choose the books it's filed in: the origin's
+name does, or the path, for the contract and its copy of the project
+alike. The Director's review leaves such contracts out (misses filed
+against them too), stats doesn't count them, and prune doesn't keep them
+whole waiting for a review that won't come. Any Director job run in a
+checkout where a read-only contract reviewed code is read-only, since the
+branch was checked out there and its roster picks what a job takes in;
+the checkout is the whole working tree, not only the contract's project
+folder. A read-only run's or contract's files can't be hired into it by
+path either, so nothing written by the branch's house reaches a trusted one's
+dossiers or roster.
 
 Pooling books shares more than the office, though. Every contract also
 keeps who placed it (`placed_by`: `ADMINISTRATION_PLACED_BY`, else
