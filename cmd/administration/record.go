@@ -25,13 +25,20 @@ import (
 // houseTools is the record's tools, for the professional's allowed list.
 var houseTools = []string{"record_finding", "record_plan", "record_step", "record_unreached"}
 
+// seriousRule is what makes a finding serious, word for word as the owners
+// agreed it: the verifier rules each finding by it, and a finding that
+// isn't serious goes to the tool's backlog, not into a release.
+const seriousRule = "a finding is serious only if a real user, or an attacker who exists today, would hit it, and it causes data loss, wrong output or exposure"
+
 var houseToolDefs = []map[string]any{
 	{"name": "record_finding", "description": "File one finding the moment you find it: something wrong, with where and what you expected instead. Never a check that held.",
-		"inputSchema": map[string]any{"type": "object", "required": []string{"what"}, "properties": map[string]any{
-			"what":     map[string]any{"type": "string", "description": "What happened, and what you expected instead."},
-			"where":    map[string]any{"type": "string", "description": "The URL and the steps to it, or the file and line in the working tree (src/cart.ts:412)."},
-			"mark":     map[string]any{"type": "string", "enum": []string{"NEW", "CHANGE", "OLD"}, "description": "On a contract on changes only: NEW, CHANGE or OLD, as your brief says."},
-			"evidence": map[string]any{"type": "string", "description": "What showed it: the text on the screen, the call and what came back."}}}},
+		"inputSchema": map[string]any{"type": "object", "required": []string{"what", "consequence", "who"}, "properties": map[string]any{
+			"what":        map[string]any{"type": "string", "description": "What happened, and what you expected instead."},
+			"consequence": map[string]any{"type": "string", "description": "What it causes: data lost, a wrong result, something exposed, or only an annoyance or a slower path."},
+			"who":         map[string]any{"type": "string", "description": "Who hits it today: a real user doing what, or an attacker who exists today; or that nobody does yet, and what would have to change first."},
+			"where":       map[string]any{"type": "string", "description": "The URL and the steps to it, or the file and line in the working tree (src/cart.ts:412)."},
+			"mark":        map[string]any{"type": "string", "enum": []string{"NEW", "CHANGE", "OLD"}, "description": "On a contract on changes only: NEW, CHANGE or OLD, as your brief says."},
+			"evidence":    map[string]any{"type": "string", "description": "What showed it: the text on the screen, the call and what came back."}}}},
 	{"name": "record_plan", "description": "Write your plan before you start: each thing you'll check, in order. They're numbered 1, 2, 3...; call it again to add steps, numbered on from your last (a plan of 5 plus 2 more makes steps 6 and 7).",
 		"inputSchema": map[string]any{"type": "object", "required": []string{"steps"}, "properties": map[string]any{
 			"steps": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}},
@@ -110,14 +117,16 @@ func houseServer() (map[string]any, error) {
 
 // recordCall is a call to one of the record's tools, in its parts.
 type recordCall struct {
-	What     string   `json:"what"`
-	Where    string   `json:"where"`
-	Mark     string   `json:"mark"`
-	Evidence string   `json:"evidence"`
-	Steps    []string `json:"steps"`
-	Step     *int     `json:"step"`
-	Done     *bool    `json:"done"`
-	Why      string   `json:"why"`
+	What        string   `json:"what"`
+	Where       string   `json:"where"`
+	Mark        string   `json:"mark"`
+	Evidence    string   `json:"evidence"`
+	Consequence string   `json:"consequence"`
+	Who         string   `json:"who"`
+	Steps       []string `json:"steps"`
+	Step        *int     `json:"step"`
+	Done        *bool    `json:"done"`
+	Why         string   `json:"why"`
 }
 
 // parseRecord reads a call to the record's tools and says what's wrong
@@ -133,6 +142,9 @@ func parseRecord(name string, input json.RawMessage) (recordCall, error) {
 	case "record_finding":
 		if blank(in.What) {
 			return in, fmt.Errorf("not recorded: what is empty; say what happened and what you expected")
+		}
+		if blank(in.Consequence) || blank(in.Who) {
+			return in, fmt.Errorf("not recorded: say its consequence (what it causes) and who hits it today (a real user doing what, an attacker who exists today, or nobody yet)")
 		}
 		if m := strings.ToUpper(strings.TrimSpace(in.Mark)); m != "" && m != "NEW" && m != "CHANGE" && m != "OLD" {
 			return in, fmt.Errorf("not recorded: mark is NEW, CHANGE or OLD, or left out")
@@ -175,6 +187,12 @@ func (in recordCall) findingBody() (body, what string) {
 	}
 	if in.Evidence != "" {
 		body += " Evidence: " + flat(in.Evidence)
+	}
+	if in.Consequence != "" {
+		body += " Consequence: " + flat(in.Consequence)
+	}
+	if in.Who != "" {
+		body += " Who hits it today: " + flat(in.Who)
 	}
 	if mark != "" {
 		body = mark + ": " + body

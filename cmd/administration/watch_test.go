@@ -41,9 +41,9 @@ func TestToolLabelShowsTheCommandServersArgs(t *testing.T) {
 }
 
 func TestWatchShowsARecordedFindingAsOne(t *testing.T) {
-	line := []byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__house__record_finding","input":{"what":"the total is $5 high","where":"/cart","mark":"NEW"}}]}}`)
+	line := []byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__house__record_finding","input":{"what":"the total is $5 high","where":"/cart","mark":"NEW","consequence":"a wrong total","who":"every shopper"}}]}}`)
 	got := watchLines(line)
-	if len(got) != 1 || got[0] != "★ FINDING: NEW: the total is $5 high (at /cart)" {
+	if len(got) != 1 || got[0] != "★ FINDING: NEW: the total is $5 high (at /cart) Consequence: a wrong total Who hits it today: every shopper" {
 		t.Fatalf("%q", got)
 	}
 }

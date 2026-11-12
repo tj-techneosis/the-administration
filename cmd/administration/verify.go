@@ -383,6 +383,7 @@ func verifyBatch(c *contract, code string, withWork bool, rd string, batch []*su
 		LinkWhy string   `json:"link_why"`
 		Room    bool     `json:"room"`
 		SameAs  string   `json:"same_as"`
+		Serious *bool    `json:"serious"`
 	}
 	if i < 0 || j < i || json.Unmarshal([]byte(text[i:j+1]), &answers) != nil {
 		return nil, "its answer wasn't a list of verdicts; its stream is in " + rd
@@ -417,6 +418,11 @@ func verifyBatch(c *contract, code string, withWork bool, rd string, batch []*su
 		}
 		// Put down to the room only by a false verdict of its own.
 		v.Room = a.Room && a.Verdict == "false" && s.verdict == ""
+		// Serious or not, by seriousRule: only for a finding it checked
+		// and found real.
+		if s.verdict == "" && (a.Verdict == "confirmed" || a.Verdict == "likely") {
+			v.Serious = a.Serious
+		}
 		// A mark that agrees with the finding's own (UNMARKED for none) is
 		// no correction.
 		if t, ok := fixTag(a.Tag); ok && t != s.tag && !(t == "UNMARKED" && s.tag == "") && c.Changes != nil {
@@ -521,7 +527,7 @@ func saveVerdicts(c *contract, dir string, vs map[*summed]verdict, touched map[s
 				continue
 			}
 			n, _ := strconv.Atoi(m[2])
-			byName[m[1]] = append(byName[m[1]], verdict{Finding: n, Verdict: v.Verdict, Why: v.Why, By: "verifier", Tag: v.Tag, Room: v.Room, SameAs: v.SameAs, FromFold: v.FromFold})
+			byName[m[1]] = append(byName[m[1]], verdict{Finding: n, Verdict: v.Verdict, Why: v.Why, By: "verifier", Tag: v.Tag, Room: v.Room, SameAs: v.SameAs, FromFold: v.FromFold, Serious: v.Serious})
 		}
 	}
 	for name, add := range byName {

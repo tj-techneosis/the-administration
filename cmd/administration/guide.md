@@ -122,8 +122,8 @@ The commands are namespaced by the plugin: `/the-administration:contract`,
    **Mix the kinds**: critics catch logic they can read, browser
    professionals are the only ones who see layout. They may add or strike
    names, or change the coins.
-4. **Placing**: `--with <run>` brings the Director's specialists (each one
-   that finds something joins the roster when the contract closes);
+4. **Placing**: `--with <run>` brings the Director's specialists (none
+   joins the roster by itself; keep one with `hire --from`);
    `--cast a,b` adds roster names. **To re-check a fix, skip the Director**:
    cast the professionals who found the bug (`--cast`), so the contract
    starts in seconds.
@@ -309,11 +309,10 @@ When the wait finishes:
    before (OLD) or unmarked; those aren't the release's problem. Then what nobody could
    reach. Keep it to text: findings may contain test data; never paste
    screenshots or personal data into a commit, issue or chat.
-4. **New on the roster**: the summary lists the Director's specialists who
-   found something; they joined the roster at close
-   (`.administration/professionals/<name>.md`), so the next contract casts
-   them by name. Say who joined in one line. If one only found what turned
-   out false, offer to let it go (delete its file); the Director keeps
+4. **One-offs**: the summary lists the Director's specialists with the
+   command to keep each (`administration hire --from <id> <name>`); none
+   joins the roster by itself. Offer to keep one only when what it found
+   was serious and confirmed, in one line; the Director keeps
    managing the rest through `director review`.
 5. **Open rooms**: if the contract needed tags nobody knows, or the summary
    lists open rooms that fit, end with one line offering the Director:
@@ -355,8 +354,15 @@ after a professional ran out of coins or failed; their report says so
 when there's work left. Resume a part once: a second resume of the same
 part says which contract already picked it up, and you resume from that
 one for whatever it left. Each report's "Told along the way" lists
-what the Administration said to them after the brief (asked at halfway to
-write down what they had, sent back to their plan), and when.
+what the Administration said to them after the brief (asked near the
+limit to write down what they had, sent back to their plan), and when.
+
+**One pass is enough.** A second pass, or a repeat contract, needs a named
+serious finding: a finding is serious only if a real user, or an attacker who exists today, would hit it, and it causes data loss, wrong output or exposure. A repeat pass checks only the fixes: place it on
+`--changes --base <the commit the first pass reviewed>`, with a brief that
+names the fixes and says to report an older finding only if it's serious.
+Findings the summary puts under "Backlog (not for this release)" go on the
+tool's backlog, never into this release.
 
 Exit codes: 0 done (a contract queued for rooms is placed, and exits 0),
 1 error, 2 a room or professional failed, 3 refused by the Rules, 4 busy,
@@ -496,9 +502,9 @@ step after writes there and not into the project.
 
 ## Training and hiring (the Director)
 
-- **After a contract**, the Director's specialists who found something are
-  already on the roster. One that found nothing can still be kept by hand
-  (`administration hire --from <id> <name>`).
+- **After a contract**, none of the Director's specialists is on the roster
+  by itself. Keep one by hand (`administration hire --from <id> <name>`)
+  when what it found was serious and confirmed.
 - **When someone is needed** ("hire someone who ..."), run
   `administration director train "<who, and why>" [--contract <id>]` in the
   background. It writes a candidate to the run's `out/candidates/`;

@@ -422,9 +422,9 @@ dossiers.
    - **retag**: its tags never get it cast, or it's cast where it finds
      nothing;
    - **hire**: a one-off specialist (source `contract` in its contract's
-     `contract.json`) that found nothing there but whose focus will come
-     up again (one that found something already joined the roster at
-     close). Name the contract and give the command, `administration hire
+     `contract.json`) whose focus will come up again and whose findings
+     there were serious and confirmed (one-offs don't join the roster by
+     themselves). Name the contract and give the command, `administration hire
      --from <contract> <name>`;
    - **retire**: it has worked several contracts and has nothing confirmed;
    - **re-price**: it always finishes its plan far under its limit (lower

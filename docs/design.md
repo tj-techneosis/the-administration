@@ -332,9 +332,9 @@ changes" into CLI calls, and checks findings against the code afterwards.
 - **Findings that aren't**: a `FINDING:` line that opens with "Held:",
   "Plan 3:", "No issue -" and the like is kept under "Not counted" in the
   report, not counted and never dropped; the word needs a colon or dash
-  after it, so "the OK button" and "the plan page" still count. Halfway
-  through the purse (if nothing's written yet) and near its end, the
-  professional is asked to write down what it has, without being told why:
+  after it, so "the OK button" and "the plan page" still count. Near the
+  end of the purse the professional is asked to write down what it has,
+  without being told why:
   the limit throws away findings kept for the end. Each of these, and each
   send-back, goes in the report under "Told along the way" with when, so a
   reader can see what it was told; one that ran out, failed or lost its
@@ -765,12 +765,20 @@ changes" into CLI calls, and checks findings against the code afterwards.
   records the miss; the Director rewrites the persona to catch the kind of
   thing, keeping everything else about it; and the person applies it. A
   tuning can't change what a professional is or what it gets.
-- **A specialist who found something stays.** Writing one costs the
-  Director minutes of reading; the next contract on the same code needs the
-  same people. So each specialist the Director wrote that found something
-  joins the roster when its contract closes, and the Director casts from the
-  roster before writing anyone. Letting one go is deleting its file; the
+- **A specialist stays only when the person keeps it.** Finding something
+  isn't the measure: every cast finds something. So no specialist joins the
+  roster by itself; the person keeps one with `hire --from` when what it
+  found was serious and confirmed, and the Director casts from the roster
+  before writing anyone. Letting one go is deleting its file; the
   Director's review proposes who to retire.
+- **Serious, or the backlog.** Every finding says its consequence and who
+  hits it today, and the verifier rules each real one serious or not by one
+  rule, word for word as the owners agreed it: a finding is serious only if
+  a real user, or an attacker who exists today, would hit it, and it causes
+  data loss, wrong output or exposure. One that isn't goes under "Backlog
+  (not for this release)" in the summary, never into the release. One pass
+  is enough: nothing sends a professional back for a second pass, and a
+  repeat contract checks only the fixes.
 - **Empty roster.** Personas are specific to a product and its people, so
   the framework ships open rooms, not professionals, and the Director trains
   them in the project.

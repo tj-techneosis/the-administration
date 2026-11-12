@@ -15,15 +15,15 @@ func TestTheRecordTakesItsToolsAsWhatTheyAre(t *testing.T) {
 	call(&r, "record_plan", `{"steps":["the cart","the receipt"]}`)
 	call(&r, "record_plan", `{"steps":["checkout on a phone"]}`)
 	// Two findings that share their evidence's wording are two findings.
-	call(&r, "record_finding", `{"what":"the total is $5 too high","where":"/cart","mark":"NEW","evidence":"screenshot of the cart page"}`)
-	call(&r, "record_finding", `{"what":"the receipt prints twice","where":"/cart","evidence":"screenshot of the cart page"}`)
+	call(&r, "record_finding", `{"what":"the total is $5 too high","where":"/cart","mark":"NEW","evidence":"screenshot of the cart page","consequence":"a wrong total","who":"every shopper"}`)
+	call(&r, "record_finding", `{"what":"the receipt prints twice","where":"/cart","evidence":"screenshot of the cart page","consequence":"paper","who":"shoppers who print"}`)
 	// A mark written into what as well is taken once.
-	call(&r, "record_finding", `{"what":"OLD: the logo is blurry","mark":"OLD"}`)
+	call(&r, "record_finding", `{"what":"OLD: the logo is blurry","mark":"OLD","consequence":"looks poor","who":"nobody yet"}`)
 	// Something unreached that starts with a number isn't a step's answer.
 	call(&r, "record_unreached", `{"what":"2 of the settings pages","why":"no link to them"}`)
 	call(&r, "record_step", `{"step":2,"done":false,"why":"the printer was off"}`)
 	call(&r, "record_step", `{"step":1,"done":true}`)
-	if len(r.findings) != 3 || r.findings[2] != "OLD: the logo is blurry" {
+	if len(r.findings) != 3 || r.findings[2] != "OLD: the logo is blurry Consequence: looks poor Who hits it today: nobody yet" {
 		t.Fatalf("findings %q", r.findings)
 	}
 	if done, steps := r.planDone(); done != 1 || steps != 3 {

@@ -38,6 +38,10 @@ type verdict struct {
 	// A false finding the test room caused, not the app (a seed that
 	// didn't load, a setup that half ran, the wall blocking a font).
 	Room bool `json:"room,omitempty"`
+	// Whether a confirmed or likely finding is serious, by seriousRule, as
+	// the verifier ruled it; nil when nobody ruled. One ruled not serious
+	// goes to the backlog section of the summary, not into a release.
+	Serious *bool `json:"serious,omitempty"`
 	// Another finding of this contract ("name #N") a check found to be the
 	// same bug, worded otherwise: the summary folds this one there
 	// (verify.go, Checking as they come back).

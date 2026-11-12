@@ -1047,10 +1047,9 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 	}
 	fmt.Fprintf(&b, "You are %s, working alone. Keep your record as you go, with the record's tools (mcp__house__…):\n", ci.Name)
 	fmt.Fprintf(&b, "- First record_plan: each thing you'll check, in order. %s When one is done, record_step it done (after any findings it gave); one you can't do is record_step done false, and why. There's no clock for you to watch: you'll be stopped if you take too long, and everything you've recorded is kept.\n", from)
-	fmt.Fprintf(&b, "- The moment you find something, record_finding: what happened and what you expected instead, where (the URL and the steps, or the file and line), and what showed it. One call per finding.\n")
+	fmt.Fprintf(&b, "- The moment you find something, record_finding: what happened and what you expected instead, where (the URL and the steps, or the file and line), what showed it, its consequence (data lost, a wrong result, something exposed, or only an annoyance) and who hits it today (a real user doing what, an attacker who exists today, or nobody yet). One call per finding. Say it as it is: %s, and a finding that isn't goes to the tool's backlog, not into a release.\n", seriousRule)
 	fmt.Fprintf(&b, "- For anything you meant to try and could not reach, record_unreached, and why.\n")
 	fmt.Fprintf(&b, "- A finding is only for something wrong. A check that held, or a comparison you ruled out, goes in your report under what held, never in a finding.\n")
-	fmt.Fprintf(&b, "- Something wrong that you can excuse is still a finding: text cut off whose full version shows elsewhere, a control that's only a scroll away, a task that takes more steps than before. Put the excuse in it and let the reader weigh it; don't drop it.\n")
 	fmt.Fprintf(&b, "- End with a short report: what you tried, what held, what broke. Your findings are already recorded; don't record them again. (Without the tools, a line starting FINDING:, PLAN 1:, COVERED 1 or UNREACHED: is read the same way.)\n\n")
 	if ci.Kind == "user" && len(ci.Uses) > 0 {
 		fmt.Fprintf(&b, "You work through the project's equipment, started fresh for you:\n")
@@ -1073,7 +1072,7 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 		}
 		if ci.NoBrowser {
 			fmt.Fprintf(&b, "Those tools are the only way in. Take a screenshot when you need to see what a person would see, and say in each finding which tool calls get there.\n")
-			fmt.Fprintf(&b, "A finding is anything that would trip up the person you are, however small, with the steps to see it: they can't tell something is a button, don't know it worked, have to scroll to find what they need, read a message that's no longer true, or have to ask someone. Judge it as them, not as a designer. Leave out only your own preferences that wouldn't change what they do: a colour you'd pick, a wording you like better that means the same.\n")
+			fmt.Fprintf(&b, "A finding is anything that would trip up the person you are, with the steps to see it: they can't tell something is a button, don't know it worked, have to scroll to find what they need, read a message that's no longer true, or have to ask someone. Judge it as them, not as a designer. Leave out only your own preferences that wouldn't change what they do: a colour you'd pick, a wording you like better that means the same.\n")
 		}
 	}
 	// A shared test server is the one thing outside the room it may
@@ -1130,7 +1129,7 @@ func brief(c *contract, ci *castItem, m, before *manifest, room string) string {
 			fmt.Fprintf(&b, "On every screen you look at, at every width you test, run the house layout check with browser_evaluate and this function:\n%s\nIt lists candidates: text cut off by its box, text squeezed to a sliver, content clipped by a fixed height, anything past the right edge (a scroll_width over the viewport means sideways scrolling), and actions pushed below the fold. Each is a lead, not a finding: look at it on screen (a screenshot), and report the ones a person in your shoes would trip over, with the width and the element.\n", layoutCheck)
 			fmt.Fprintf(&b, "To measure what the screen shows (never to read the page instead of looking), run the person's-eye check with browser_evaluate once on each screen, then again after every action that should show a result (save, send, add, open, pay, undo, cancel), with this function:\n%s\nappeared_since_last_look is what the action put on the page and where it is against the window; controls_in_the_window is how each control there is drawn. A confirmation, an error or the next step that appeared below the window, and a control drawn as plain text, are findings when the person you are would miss them: say the size, the action and what the check said.\n", lookCheck)
 		}
-		fmt.Fprintf(&b, "A finding is anything that would trip up the person you are, however small, with the steps to see it: they can't tell something is a button, don't know it worked, have to scroll to find what they need, read a message that's no longer true, or have to ask someone. Judge it as them, not as a designer. Leave out only your own preferences that wouldn't change what they do: a colour you'd pick, a wording you like better that means the same.\n")
+		fmt.Fprintf(&b, "A finding is anything that would trip up the person you are, with the steps to see it: they can't tell something is a button, don't know it worked, have to scroll to find what they need, read a message that's no longer true, or have to ask someone. Judge it as them, not as a designer. Leave out only your own preferences that wouldn't change what they do: a colour you'd pick, a wording you like better that means the same.\n")
 		switch ci.SignsInAs {
 		case "":
 			fmt.Fprintf(&b, "You have no login: sign up, or go without, the way a newcomer would.\n")
@@ -1642,21 +1641,20 @@ func runProfessional(ctx context.Context, c *contract, ci *castItem, pd, tag str
 
 	// The limit is the Administration's, not the professional's: it never
 	// hears of it. When it says it's done, it's sent back to what its plan
-	// left unanswered, then once for a careful person's second pass; the
-	// limit stops it wherever it is.
+	// left unanswered (one pass is enough: no second pass is asked for);
+	// the limit stops it wherever it is.
 	coins := time.Duration(ci.CoinsMin * float64(coinUnit()))
 	limit := time.NewTimer(coins)
 	defer limit.Stop()
 	// Models save their findings for the end, and the limit throws the end
 	// away: a 1-minute contract once came back with nothing from two of
-	// three. So halfway (if nothing's written yet) and near the end, it's
-	// asked to write down what it has. Never with a clock: it carries on.
-	half, late := time.NewTimer(coins/2), time.NewTimer(coins*85/100)
-	defer half.Stop()
+	// three. So near the end it's asked to write down what it has. Never
+	// with a clock: it carries on.
+	late := time.NewTimer(coins * 85 / 100)
 	defer late.Stop()
 	started = time.Now()
 	state, reason := "back", ""
-	rounds, secondPass := 0, false
+	rounds := 0
 wait:
 	for {
 		select {
@@ -1665,13 +1663,6 @@ wait:
 				s.ExitCode = code
 			}
 			break wait
-		case <-half.C:
-			repMu.Lock()
-			none := len(rep.findings) == 0
-			repMu.Unlock()
-			if none {
-				nudge("halfway, with nothing written down, asked to write down what they had", writeDownText)
-			}
 		case <-late.C:
 			repMu.Lock()
 			finished := rep.results > 0
@@ -1699,9 +1690,6 @@ wait:
 			case len(open) > 0:
 				msg = "Not done yet. These from your plan have no answer:\n- " + strings.Join(open, "\n- ") +
 					"\nDo each now, as the person you are, and record_step it: done (after any findings it gave), or not, and why."
-			case !secondPass && time.Since(started) < coins*6/10:
-				secondPass = true
-				msg = secondPassText
 			}
 			if msg == "" {
 				stdin.Close()
@@ -1773,10 +1761,7 @@ wait:
 
 // sendBackWhat says, for its report, why a professional was sent back.
 func sendBackWhat(msg string) string {
-	switch {
-	case msg == secondPassText:
-		return "finished early, sent back for a second pass"
-	case strings.HasPrefix(msg, "Before you finish"):
+	if strings.HasPrefix(msg, "Before you finish") {
 		return "finished with no plan, sent back to write one and do it"
 	}
 	return "finished with parts of its plan unanswered, sent back to them"
@@ -1800,10 +1785,6 @@ func exitCode(err error) *int {
 // maxSendBacks is how many times a professional that thinks it's done is
 // sent back to its work.
 const maxSendBacks = 4
-
-// secondPassText sends a professional whose plan is all answered back over
-// the same ground the way a careful person checks their own work.
-const secondPassText = "Your plan is answered. Now a careful person's second pass over the same screens and code: do each flow a second time; take the other branch (cancel instead of save, the wrong input, the empty one, the second tap); leave and come back; go back after an error; try the smallest size your rules name. Add what you try to your plan (record_plan again) and record_step each the same way. Record a finding for anything that would trip up the person you are, however small."
 
 // coinUnit is what one coin buys: a minute. The tests shrink it.
 func coinUnit() time.Duration {

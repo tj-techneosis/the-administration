@@ -678,10 +678,14 @@ func writeSummary(c *contract, dir string) (string, error) {
 	if failed > 0 {
 		fmt.Fprintf(&b, "%s failed: their part of the contract wasn't done, and what they found (marked \"failed\") wasn't seen working the app.\n", plural(failed, "professional", "professionals"))
 	}
+	release, backlog := backlogOf(all)
 	if c.Changes != nil {
-		b.WriteString(releaseVerdict(all, failed))
-	} else if len(all) > 0 {
-		fmt.Fprintf(&b, "\n## Findings\n\nEach with who found it and its number in their report. Several who found the same thing on their own come first.\n\n%s\n", listFindings(all))
+		b.WriteString(releaseVerdict(release, failed, backlog))
+	} else if len(release) > 0 {
+		fmt.Fprintf(&b, "\n## Findings\n\nEach with who found it and its number in their report. Several who found the same thing on their own come first.\n\n%s\n", listFindings(release))
+	}
+	if len(backlog) > 0 {
+		fmt.Fprintf(&b, "\n## Backlog (not for this release)\n\nReal, but not serious by the rule (%s), as the check ruled. They go on the tool's backlog, not into this release:\n\n%s\n", seriousRule, listFindings(backlog))
 	}
 	// One-off specialists who found something joined the roster at close,
 	// so the next contract casts them rather than training them again.
@@ -876,6 +880,14 @@ func sortedKeys(m map[string]bool) []string {
 // is worked out once and kept (read-only: no caller changes it); the keep
 // is emptied when it grows large, as a long-running worker sees many.
 func wordSet(s string) map[string]bool {
+	// The consequence and who a recorded finding ends with (findingBody)
+	// are about who's hurt, not which bug it is, and their labels are in
+	// every one: left out, so they don't fold two bugs into one.
+	for _, label := range []string{" Consequence: ", " Who hits it today: "} {
+		if i := strings.Index(s, label); i >= 0 {
+			s = s[:i]
+		}
+	}
 	if m, ok := wordSets.Load(s); ok {
 		return m.(map[string]bool)
 	}
@@ -966,6 +978,11 @@ type summed struct {
 	verdict   string
 	why       string
 	room      bool     // the verdict says the test room caused it, not the app
+	// Whether any check of it ruled it serious, or not serious
+	// (seriousRule), whatever its verdict and whichever fold it came by:
+	// it's the backlog's only when some check ruled it not serious and
+	// none ruled it serious. An unruled check counts for neither.
+	ruledSerious, ruledMinor bool
 	whose     string   // which of by the verdict was recorded on
 	checker   string   // "verifier", or empty for the session
 	dissent   []string // other checks of it that disagree
@@ -1012,6 +1029,7 @@ func foldSameAs(all []*summed, sameAs map[string]string, folded map[string][]str
 			into.judged = append(into.judged, f.by...)
 			into.judged = append(into.judged, f.judged...)
 			into.dissent = append(into.dissent, f.dissent...)
+			into.ruledSerious, into.ruledMinor = into.ruledSerious || f.ruledSerious, into.ruledMinor || f.ruledMinor
 			switch {
 			case f.verdict == "":
 			case f.verdict == into.verdict:
@@ -1160,6 +1178,12 @@ func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 				folded[p.Name] = append(folded[p.Name], fmt.Sprintf("- #%d: %s", n+1, t))
 			}
 			into.by = append(into.by, ref)
+			// Every check's ruling counts, whichever verdict wins: serious
+			// if any check ruled it so.
+			if v.Serious != nil {
+				into.ruledSerious = into.ruledSerious || *v.Serious
+				into.ruledMinor = into.ruledMinor || !*v.Serious
+			}
 			// Checks of a folded finding can disagree; the best one ranks
 			// it, and the others are shown beside it, never dropped.
 			switch {
@@ -1225,6 +1249,7 @@ func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 		folded[name] = append(folded[name], fmt.Sprintf("- #%s: %s", num, f.text))
 		into.by = append(into.by, f.by...)
 		into.dissent = append(into.dissent, f.dissent...)
+		into.ruledSerious, into.ruledMinor = into.ruledSerious || f.ruledSerious, into.ruledMinor || f.ruledMinor
 		switch {
 		case f.verdict == "":
 		case f.verdict == into.verdict:
@@ -1368,19 +1393,43 @@ func listFindings(fs []*summed) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
+// backlogOf splits the findings into those for the release and the ones a
+// check found real but ruled not serious (seriousRule): those are the
+// tool's backlog, never the release's.
+func backlogOf(all []*summed) (release, backlog []*summed) {
+	for _, f := range all {
+		if f.ruledMinor && !f.ruledSerious && (f.verdict == "confirmed" || f.verdict == "likely") {
+			backlog = append(backlog, f)
+		} else {
+			release = append(release, f)
+		}
+	}
+	return release, backlog
+}
+
 // releaseVerdict leads a contract on changes with what it's for: what the
 // professionals say these changes broke (findings marked NEW), then what's
 // wrong in the change's own text (CHANGE), then what was already so (OLD),
 // then what wasn't marked.
-func releaseVerdict(all []*summed, failed int) string {
+func releaseVerdict(all []*summed, failed int, backlog []*summed) string {
 	by := map[string][]*summed{}
 	for _, f := range all {
 		by[f.tag] = append(by[f.tag], f)
 	}
 	var b strings.Builder
 	b.WriteString("\n## What these changes broke\n\n")
+	backNew := 0
+	for _, f := range backlog {
+		if f.tag == "NEW" {
+			backNew++
+		}
+	}
 	if newF := by["NEW"]; len(newF) == 0 {
-		b.WriteString("Nobody reported anything these changes broke.")
+		if backNew > 0 {
+			fmt.Fprintf(&b, "Nothing serious: %s these changes caused, real but ruled not serious, in the backlog below.", plural(backNew, "finding", "findings"))
+		} else {
+			b.WriteString("Nobody reported anything these changes broke.")
+		}
 		if failed > 0 {
 			b.WriteString(" Some professionals failed, so part of it went unchecked.")
 		}

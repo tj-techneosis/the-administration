@@ -1618,51 +1618,35 @@ func cmdClose(args []string) error {
 	return nil
 }
 
-// keepOneOffs puts each one-off specialist who found something on the
-// project's roster, so the next contract casts them instead of the Director
-// writing them again. One already there (a rerun, or tuned since) stays as
-// it is; letting one go is deleting its file.
+// keepOneOffs says, for each one-off specialist on the contract, how to keep
+// them. None joins the roster by itself, whatever they found: finding
+// something isn't the measure of a professional worth keeping, and a roster
+// that grows by itself is more to cast and pay for. The person keeps one
+// with hire --from. kept is always empty now (older contracts' Kept stays
+// in their books).
 func keepOneOffs(c *contract, dir string) (kept, notKept []string) {
 	for _, p := range c.Professionals {
-		if p.Source != "contract" || readStatus(dir, p.Name).Findings == 0 {
+		if p.Source != "contract" {
 			continue
 		}
-		src := filepath.Join(dir, p.Name, "hire.md")
-		if _, err := os.Stat(src); err != nil {
+		if _, err := os.Stat(filepath.Join(dir, p.Name, "hire.md")); err != nil {
 			continue
 		}
-		// Read-only: the project is code under review, and nothing is
-		// written into it. hire --from keeps one later, where it belongs.
 		if c.ReadOnly {
 			notKept = append(notKept, fmt.Sprintf("%s: a read-only contract writes nothing into the project it reviewed; keep them in a checkout you trust with administration hire --from %s %s --project DIR", p.Name, c.ID, p.Name))
 			continue
 		}
-		// Its house was taken from a ref, not the checkout's: neither is
-		// the place to keep one without being asked.
-		if c.HouseFrom != "" {
-			notKept = append(notKept, fmt.Sprintf("%s: the contract's house was taken from a ref (--house-from); keep them where you want them with administration hire --from %s %s --project DIR", p.Name, c.ID, p.Name))
-			continue
-		}
-		// A worktree removed before close: writing its roster would make a
-		// stray folder where it was. hire --from keeps them later.
-		if !isDir(c.Project) {
-			notKept = append(notKept, fmt.Sprintf("%s: the project, %s, is gone; keep them with administration hire --from %s %s", p.Name, c.Project, c.ID, p.Name))
-			continue
-		}
-		dst := filepath.Join(adminDir(c.Project), "professionals", p.Name+".md")
-		if _, err := os.Stat(dst); err == nil {
+		if isFile(filepath.Join(adminDir(c.Project), "professionals", p.Name+".md")) {
 			notKept = append(notKept, p.Name+": already on the roster")
 			continue
 		}
-		hp, dst, err := hireFile(c.Project, src, false)
-		if err != nil {
-			notKept = append(notKept, fmt.Sprintf("%s: %v", p.Name, err))
-			continue
+		where := ""
+		if c.ReadOnly || c.HouseFrom != "" || !isDir(c.Project) {
+			where = " --project DIR"
 		}
-		kept = append(kept, p.Name)
-		contractHooks(c, "hired", map[string]any{"name": hp.Name, "file": dst, "kind": hp.Kind, "knows": hp.Knows})
+		notKept = append(notKept, fmt.Sprintf("%s: one-offs aren't kept by themselves; to keep them, administration hire --from %s %s%s", p.Name, c.ID, p.Name, where))
 	}
-	return kept, notKept
+	return nil, notKept
 }
 
 func closeGrace() time.Duration {

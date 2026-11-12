@@ -832,7 +832,7 @@ class Critic(Base):
         self.assertEqual((seat["name"], seat["kind"], seat["state"]), ("reader", "critic", "back"))
         self.assertEqual((seat["findings"], seat["confirmed"], seat["false"], seat["checked"]), (2, 1, 1, True))
         self.assertTrue(seat["started_at"] and seat["finished_at"])
-        self.assertEqual((seat["tokens_in"], seat["tokens_out"], seat["tokens_cache"]), (20, 340, 1090))
+        self.assertEqual((seat["tokens_in"], seat["tokens_out"], seat["tokens_cache"]), (15, 320, 1040))  # one pass: no second-pass answer
         self.assertEqual(r["checking"], {"verifier": {"cost_usd": 1.0, "runs": 2, "unfinished": 0,
                                                        "tokens_in": 21, "tokens_out": 40, "tokens_cache": 600}})
         ids = [r["id"] for r in json.loads(self.cli("status", "--all", "--since", "100000d", "--json").stdout)]
@@ -907,9 +907,9 @@ class Critic(Base):
         findings = [e for e in rec if e["kind"] == "finding" and e["source"] == "tool"]
         self.assertEqual(len(findings), 2)
         self.assertEqual(findings[0]["text"], "NEW: the export downloads an empty file; expected the orders in it (at /orders, Export) "
-                                              "Evidence: orders.csv is 0 bytes")
+                                              "Evidence: orders.csv is 0 bytes Consequence: no orders exported Who hits it today: staff exporting orders")
         self.assertEqual(findings[0]["mark"], "NEW")
-        self.assertEqual(findings[1]["text"], "the photo upload hangs at 99 percent (at /profile)")
+        self.assertEqual(findings[1]["text"], "the photo upload hangs at 99 percent (at /profile) Consequence: no photo saved Who hits it today: anyone adding a photo")
         self.assertIn({"kind": "unreached", "text": "billing (no link to it)", "source": "tool"},
                       [{k: e[k] for k in ("kind", "text", "source")} for e in rec])
         st = self.status(cid)["status"]["keeper"]
@@ -924,7 +924,7 @@ class Critic(Base):
         self.assertIn("step 2 (the profile screen): the profile page needs a photo", [e["text"] for e in rec if e["kind"] == "unreached"])
         # The record's server lists its tools and only acknowledges.
         reqs = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "record_finding", "arguments": {"what": "x"}}}]
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "record_finding", "arguments": {"what": "x", "consequence": "y", "who": "z"}}}]
         p = subprocess.run([binary(), "_house"], input="".join(json.dumps(r) + "\n" for r in reqs), capture_output=True, text=True, timeout=10)
         out = {r["id"]: r for r in map(json.loads, p.stdout.splitlines())}
         self.assertEqual(sorted(t["name"] for t in out[1]["result"]["tools"]), ["record_finding", "record_plan", "record_step", "record_unreached"])
@@ -961,14 +961,14 @@ class Critic(Base):
         cid = self.place("x", "--cast", "hoarder")
         self.cli("wait", cid)
         sent = [json.loads(l) for l in open(os.path.join(self.pdir(cid, "hoarder"), "fake-sent-back.jsonl"))]
-        self.assertEqual(len(sent), 2, sent)  # halfway (nothing written yet), and near the end
+        self.assertEqual(len(sent), 1, sent)  # near the end only: no halfway nudge
         self.assertTrue(all(m.startswith("Write down what you've found so far") for m in sent))
         self.assertTrue(all("minute" not in m and "time" not in m for m in sent))  # no clock
         self.assertEqual(self.status(cid)["status"]["hoarder"]["state"], "out")
         # What it was told is on record, and the way to finish its part.
         report = open(os.path.join(self.pdir(cid, "hoarder"), "report.md")).read()
         told = report[report.index("## Told along the way"):report.index("## Their report")]
-        self.assertRegex(told, r"- [\dhms]+ in: halfway, with nothing written down, asked to write down what they had")
+        self.assertNotIn("halfway", told)
         self.assertIn("near the limit, asked to write down what they had", told)
         self.assertIn(f"`administration resume {cid} hoarder`", report)
 
@@ -1003,6 +1003,25 @@ class Critic(Base):
         self.assertIn("error_max_turns", self.status(cid)["status"]["bad"]["reason"])
 
 
+class Backlog(Base):
+    def test_a_finding_the_verifier_rules_not_serious_goes_to_the_backlog_not_the_release(self):
+        self.hire_file("r", kind="critic", fake="minor")
+        cid = self.place("x", "--cast", "r")
+        self.cli("wait", cid)
+        self.cli("close", cid)
+        self.cli("verify", cid)
+        summary = self.cli("report", cid).stdout
+        self.assertIn("## Backlog (not for this release)", summary)
+        release = summary[:summary.index("## Backlog (not for this release)")]
+        backlog = summary[summary.index("## Backlog (not for this release)"):summary.index("\n---\n")]
+        self.assertIn("the save button does nothing on /settings", release)  # serious: in the release
+        self.assertNotIn("label is cut off", release)
+        self.assertIn("the settings label is cut off at 20 characters", backlog)  # real, not serious
+        self.assertIn("a finding is serious only if a real user, or an attacker who exists today, would hit it, and it causes data loss, wrong output or exposure", backlog)
+        v = json.load(open(os.path.join(self.pdir(cid, "r"), "verdicts.json")))
+        self.assertEqual(sorted((x["verdict"], x.get("serious")) for x in v), [("confirmed", False), ("confirmed", True), ("false", None)])  # no ruling on a false one
+
+
 class SentBack(Base):
     def test_a_professional_that_thinks_its_done_is_sent_back_to_its_plan(self):
         self.hire_file("planner", kind="critic", fake="plan", coins="30m")
@@ -1012,14 +1031,13 @@ class SentBack(Base):
         sent = [json.loads(l) for l in open(os.path.join(pd, "fake-sent-back.jsonl"))]
         self.assertIn("PLAN 2: the profile screen", sent[0])  # what it skipped, by name
         self.assertNotIn("PLAN 1", sent[0])
-        self.assertIn("second pass", sent[1])  # then once over the same ground
-        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(sent), 1)  # one pass is enough: no second pass over the same ground
         report = open(os.path.join(pd, "report.md")).read()
         self.assertIn("in: finished with parts of its plan unanswered, sent back to them", report)
-        self.assertIn("in: finished early, sent back for a second pass", report)
+        self.assertNotIn("second pass", report)
         self.assertNotIn("administration resume", report)  # it came back
         self.assertNotIn("Not covered", report)
-        self.assertIn("Nothing more.", report)  # what it said when sent back is kept
+        self.assertIn("COVERED 2", report)  # what it said when sent back is kept
         self.assertEqual(self.status(cid)["status"]["planner"]["state"], "back")
 
     def test_what_its_plan_never_answered_is_in_the_report(self):
@@ -1241,7 +1259,10 @@ for line in sys.stdin:
         self.assertIn("member@example.com", brief)
         self.assertIn("A finding is only for something wrong", brief)
         self.assertIn("record_finding", brief)
-        self.assertIn("Something wrong that you can excuse is still a finding", brief)
+        self.assertNotIn("excuse", brief)  # an excuse is no longer a finding by itself
+        self.assertNotIn("however small", brief)
+        self.assertIn("a finding is serious only if a real user, or an attacker who exists today, would hit it, and it causes data loss, wrong output or exposure", brief)
+        self.assertIn("who hits it today", brief)
         self.assertIn("Your findings are already recorded", brief)
         self.assertIn("There's no clock for you to watch", brief)
         self.assertNotIn("coins", brief)
@@ -2984,7 +3005,7 @@ class Books(Base):
         # each reports is the session's so far.
         # Fresh input apart from the prompt cache's reads and writes.
         self.assertEqual((s["cost_usd"], s["turns"], s["tokens_in"], s["tokens_out"], s["tokens_cache"]),
-                         (0.0125, 9, 20, 340, 1090))
+                         (0.0125, 8, 15, 320, 1040))
         self.assertNotIn("--max-budget-usd", self.call(cid, "a")["argv"])
         for out in (self.cli("stats").stdout, self.cli("status", cid).stdout, self.cli("wait", cid).stdout,
                     open(self.cli("close", cid).stdout.strip()).read()):
@@ -4025,7 +4046,7 @@ class With(Base):
         names = [p["name"] for p in json.loads(self.cli("roster", "--json").stdout)["professionals"]]
         self.assertNotIn("gate-critic", names)
 
-    def test_a_one_off_that_found_something_joins_the_roster_at_close(self):
+    def test_a_one_off_doesnt_join_the_roster_by_itself_and_is_kept_by_hand(self):
         spec = os.path.join(self.tmp, "gate-critic.md")
         write(spec, professional("gate-critic", kind="critic", knows=("forms", "abuse")))
         quiet = os.path.join(self.tmp, "quiet-critic.md")
@@ -4037,12 +4058,16 @@ class With(Base):
         self.assertNotIn("gate-critic", names)  # not before the contract closes
         self.cli("close", cid)
         summary = self.cli("report", cid).stdout
-        self.assertIn("On the roster now", summary)
-        self.assertIn("- gate-critic: .administration/professionals/gate-critic.md", summary)
+        self.assertNotIn("On the roster now", summary)  # finding something doesn't hire it
+        self.assertIn(f"gate-critic: one-offs aren't kept by themselves; to keep them, administration hire --from {cid} gate-critic", summary)
+        names = [p["name"] for p in json.loads(self.cli("roster", "--json").stdout)["professionals"]]
+        self.assertNotIn("gate-critic", names)
+        self.assertNotIn("quiet-critic", names)
+        # Kept by hand, with the record it earned there.
+        self.cli("hire", "--from", cid, "gate-critic")
         names = [p["name"] for p in json.loads(self.cli("roster", "--json").stdout)["professionals"]]
         self.assertIn("gate-critic", names)
-        self.assertNotIn("quiet-critic", names)  # found nothing: not kept
-        self.assertIn("gate-critic", self.cli("stats").stdout)  # its record came with the name
+        self.assertIn("gate-critic", self.cli("stats").stdout)
         # Next time it's cast by name, no Director needed.
         cid2 = self.place("the forms again", "--cast", "gate-critic")
         self.cli("wait", cid2)

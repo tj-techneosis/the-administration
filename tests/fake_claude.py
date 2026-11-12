@@ -65,7 +65,10 @@ if os.path.basename(persona) == "verifier.md":
         if f.get("already_checked"):
             a = {"id": f["id"], "verdict": f["already_checked"], "why": "as before"}
         elif "save button" in f["text"]:
-            a = {"id": f["id"], "verdict": "confirmed", "why": "settings.js:12 never calls save()"}
+            a = {"id": f["id"], "verdict": "confirmed", "why": "settings.js:12 never calls save()", "serious": True}
+        elif "label is cut off" in f["text"]:
+            # Real, but nobody loses data or gets a wrong result: not serious.
+            a = {"id": f["id"], "verdict": "confirmed", "why": "settings.css:3 caps the label; the tooltip has it", "serious": False}
         elif "error says" in f["text"]:
             a = {"id": f["id"], "verdict": "false", "why": "errors.js:4 shows the message"}
         elif "$5 too high" in f["text"]:
@@ -168,14 +171,17 @@ if mode == "error":
     sys.exit(1)
 if mode == "release":
     text("FINDING: NEW: the total on /cart is $5 too high since the change\nFINDING: OLD: the logo is blurry on both\nFINDING: CHANGE: the comment on total() still says tax is added later")
+if mode == "minor":
+    text("FINDING: the save button does nothing on /settings\nFINDING: the settings label is cut off at 20 characters")
 if mode == "retag":
     text("FINDING: NEW: the total on /cart is $5 too high since the change\nFINDING: New: the receipt prints twice after paying")
 if mode == "record":
     record("record_plan", steps=["the settings screen", "the profile screen"])
     record("record_finding", what="the export downloads an empty file; expected the orders in it", where="/orders, Export",
-           mark="NEW", evidence="orders.csv is 0 bytes")
+           mark="NEW", evidence="orders.csv is 0 bytes", consequence="no orders exported", who="staff exporting orders")
     record("record_step", step=1, done=True)
-    record("record_finding", what="the photo upload hangs at 99 percent", where="/profile")
+    record("record_finding", what="the photo upload hangs at 99 percent", where="/profile",
+           consequence="no photo saved", who="anyone adding a photo")
     record("record_step", step=2, done=False, why="the profile page needs a photo")
     record("record_unreached", what="billing", why="no link to it")
     # A restatement in prose at the end is folded into the recorded one.
