@@ -2067,6 +2067,7 @@ for line in sys.stdin:
         self.assertEqual(self.status(cid)["status"]["owner"]["state"], "back")
         room = self.status(cid)["status"]["owner"]["room"]
         self.assertEqual(json.load(open(os.path.join(room, "desk-files.json"))), ["photo.jpg"])
+        self.cli("close", cid)
         self.assertIn('- At place: desk file "only-on-dev-428/hero.png" isn\'t in this checkout', self.cli("report", cid).stdout)
         # Anything else wrong with a desk file still refuses: a path out of
         # the project, there or not.
