@@ -2047,6 +2047,34 @@ for line in sys.stdin:
         self.cli("wait", cid)
         self.assertEqual(json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))["desk"], {})
 
+    def test_a_desk_file_missing_from_the_branch_is_left_off_not_refused(self):
+        # roster.toml is outside the repo and every branch's contracts read
+        # it; a desk file only one branch has must not refuse the others'
+        # contracts (it took every phone tester off main's reviews once).
+        self.house()
+        write(os.path.join(self.project, "photo.jpg"), "here\n")
+        roster = os.path.join(self.project, ".administration", "roster.toml")
+        with open(roster, "a") as f:
+            f.write('[desk]\nfiles = ["photo.jpg", "only-on-dev-428/hero.png"]\n')
+        self.hire_file("owner")
+        r = self.cli("place", "x", "--cast", "owner")
+        self.assertIn('desk file "only-on-dev-428/hero.png" isn\'t in this checkout', r.stderr)
+        cid = r.stdout.split()[1]
+        self.cli("wait", cid)
+        c = json.load(open(os.path.join(self.books, "contracts", cid, "contract.json")))
+        self.assertEqual(c["desk"], {"files": ["photo.jpg"]})
+        self.assertEqual(len(c["desk_warnings"]), 1)
+        self.assertEqual(self.status(cid)["status"]["owner"]["state"], "back")
+        room = self.status(cid)["status"]["owner"]["room"]
+        self.assertEqual(json.load(open(os.path.join(room, "desk-files.json"))), ["photo.jpg"])
+        self.assertIn('- At place: desk file "only-on-dev-428/hero.png" isn\'t in this checkout', self.cli("report", cid).stdout)
+        # Anything else wrong with a desk file still refuses: a path out of
+        # the project, there or not.
+        write(roster, open(roster).read().replace('"only-on-dev-428/hero.png"', '"../elsewhere.png"'))
+        r = self.cli("place", "x", "--cast", "owner", check=None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("inside the project", r.stderr)
+
     def test_users_get_the_projects_handout_and_can_read_only_their_desk(self):
         self.house()
         write(os.path.join(self.project, "rules", "house-rules.md"), "Every decision is a bordered button.\n")

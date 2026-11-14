@@ -150,6 +150,32 @@ var deskNameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._ -]{0,99}[A-Za-z0-
 // deskDir is where a room's files are.
 func deskDir(room string) string { return filepath.Join(room, "desk", "files") }
 
+// presentDesk is cfg without the files the project doesn't have, and a
+// warning for each. The roster is outside the repo and shared by every
+// branch's contracts, but a desk file is a path in the branch under review:
+// one that only some branches have is left off the others' desks, not a
+// refusal of their whole contract. Anything else wrong with a file (a link
+// out, a secret, a folder) still refuses, in fillDeskWith.
+func presentDesk(project string, cfg deskConfig) (deskConfig, []string) {
+	var warn []string
+	var files []string
+	for _, rel := range cfg.Files {
+		// Only a path inside the project: one outside it is refused,
+		// there or not.
+		src := housePath(project, rel)
+		if _, err := os.Lstat(src); os.IsNotExist(err) && !filepath.IsAbs(rel) && inProject(project, src) {
+			warn = append(warn, fmt.Sprintf("desk file %q isn't in this checkout or its house, so no user has it on their desk (roster.toml's [desk] is shared by every branch)", rel))
+			continue
+		}
+		files = append(files, rel)
+	}
+	if len(warn) == 0 {
+		return cfg, nil
+	}
+	cfg.Files = files
+	return cfg, warn
+}
+
 // fillDesk puts the project's declared files on a room's desk; with no
 // room it only checks them (place does, before anyone starts).
 func fillDesk(project, room string) ([]deskFile, error) {

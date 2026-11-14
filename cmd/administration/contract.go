@@ -86,6 +86,9 @@ type contract struct {
 	// What place warned about the changes' base (a branch missing the
 	// local default branch's commits), kept for whoever triages later.
 	BaseWarnings []string `json:"base_warnings,omitempty"`
+	// The roster's desk files this checkout doesn't have, left off every
+	// user's desk (presentDesk).
+	DeskWarnings []string `json:"desk_warnings,omitempty"`
 	// What it's for, as other records name it (place --ticket,
 	// --requested-by, --release): joined on, never shown as prose.
 	Ticket      string `json:"ticket,omitempty"`
@@ -660,8 +663,17 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	}
 	// The desk is checked now, not when each user starts after its room is
 	// built; so is the handout, which every user gets.
+	// A file missing from this checkout is left off, with a warning: the
+	// roster is every branch's, and one branch's file mustn't refuse the
+	// others' contracts.
+	var desk deskConfig
+	var deskWarnings []string
 	if deskUsers > 0 {
-		if _, err := fillDesk(project, ""); err != nil {
+		desk, deskWarnings = presentDesk(project, loadProjectConfig(project).Desk)
+		for _, w := range deskWarnings {
+			fmt.Fprintln(os.Stderr, "administration: "+w)
+		}
+		if _, err := fillDeskWith(project, desk, "", ""); err != nil {
 			return usageError{err.Error()}
 		}
 	}
@@ -1029,7 +1041,8 @@ func placeContract(args []string, resumes string, placed func(id string)) error 
 	// reach this contract's rooms (a contract with none recorded is one
 	// placed before contracts kept it, and gets the project's).
 	if deskUsers > 0 {
-		cfg, kept := loadProjectConfig(project).Desk, ""
+		cfg, kept := desk, ""
+		c.DeskWarnings = deskWarnings
 		if from := f.get("persona-from"); from != "" {
 			var old contract
 			if b, err := os.ReadFile(filepath.Join(from, "contract.json")); err == nil && json.Unmarshal(b, &old) == nil && old.Desk != nil {
