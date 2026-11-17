@@ -39,17 +39,17 @@ class Kept(Base):
         p = self.cli("room-keep", *args, "--json", check=check, env=env)
         return json.loads(p.stdout) if check == 0 else p
 
-    def rooms(self):
+    def kept(self):
         return {r["id"]: r for r in json.loads(self.cli("rooms", "--json").stdout)}
 
     def wait_kept(self, rid, states, within=20):
         deadline = time.time() + within
         while time.time() < deadline:
-            r = self.rooms().get(rid)
+            r = self.kept().get(rid)
             if r and r["state"] in states:
                 return r
             time.sleep(0.1)
-        self.fail(f"kept room {rid} never reached {states}: {self.rooms()}")
+        self.fail(f"kept room {rid} never reached {states}: {self.kept()}")
 
     def gone(self, rid, within=20):
         deadline = time.time() + within
@@ -57,7 +57,7 @@ class Kept(Base):
             if not os.path.exists(os.path.join(self.books, "contracts", rid)):
                 return
             time.sleep(0.1)
-        self.fail(f"kept room {rid} still in the books: {self.rooms()}")
+        self.fail(f"kept room {rid} still in the books: {self.kept()}")
 
     def answers(self, url):
         try:
@@ -95,7 +95,7 @@ class Kept(Base):
         self.assertEqual(open(self.torn).read(), r["id"] + "\n")
         self.assertFalse(self.answers(up["url"]))
         self.assertFalse(os.path.exists(room))
-        self.assertEqual(self.rooms(), {})
+        self.assertEqual(self.kept(), {})
         self.assertEqual(self.rooms_left(), [])
         self.assertFalse(os.path.exists(os.path.join(self.books, "contracts", r["id"])))
         self.assertIn("No open contracts. Rooms: 0 of 4 in use, 4 free.", self.cli("status").stdout)
@@ -130,7 +130,7 @@ class Kept(Base):
         # --no-queue refuses it instead.
         self.assertIn("1 of 1 rooms are in use and 1 user is waiting for one", self.keep(self.head, "--no-queue", check=4).stderr)
         time.sleep(1)
-        self.assertEqual(self.rooms()[rid]["state"], "waiting")
+        self.assertEqual(self.kept()[rid]["state"], "waiting")
         # The contract's room frees: the kept room takes it by itself.
         self.cli("close", cid)
         up = self.wait_kept(rid, {"up"})
@@ -151,7 +151,7 @@ class Kept(Base):
         self.assertEqual(self.wait_state(cid, "member", {"waiting"})["reason"], "waiting for a room (all 1 in use)")
         time.sleep(1)
         # The kept room is untouched by it.
-        self.assertEqual(self.rooms()[rid]["state"], "up")
+        self.assertEqual(self.kept()[rid]["state"], "up")
         self.assertTrue(self.answers(up["url"]))
         self.cli("room-close", rid)
         self.cli("wait", cid)
@@ -163,7 +163,7 @@ class Kept(Base):
         rid = self.keep(self.head)["id"]
         self.wait_kept(rid, {"up"})
         self.assertIn(f"Kept room {rid} closed and torn down.", self.cli("close", rid).stdout)
-        self.assertEqual(self.rooms(), {})
+        self.assertEqual(self.kept(), {})
 
     def test_closing_a_kept_room_while_it_waits_takes_it_out_of_line(self):
         self.env["ADMINISTRATION_MAX_ROOMS"] = "1"
@@ -172,7 +172,7 @@ class Kept(Base):
         second = self.keep(self.head)["id"]
         self.wait_kept(second, {"waiting"})
         self.cli("room-close", second)
-        self.assertEqual(list(self.rooms()), [first])
+        self.assertEqual(list(self.kept()), [first])
         self.assertIn("Rooms: 1 of 1 in use, 0 free.", self.cli("status").stdout)
         self.cli("room-close", first)
 
@@ -184,7 +184,7 @@ class Kept(Base):
         self.assertIn("no database", open(r["setup_log"]).read())
         self.assertIn("Rooms: 0 of 4 in use", self.cli("status").stdout)
         self.cli("room-close", rid)
-        self.assertEqual(self.rooms(), {})
+        self.assertEqual(self.kept(), {})
 
     def test_refused_up_front(self):
         # A commit this checkout doesn't have.
