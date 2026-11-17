@@ -44,6 +44,9 @@ func cmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := notKept(c, "verify"); err != nil {
+		return err
+	}
 	if c.ClosedAt == nil && !early {
 		return usageError{fmt.Sprintf("contract %s isn't closed yet: close it, then verify", c.ID)}
 	}

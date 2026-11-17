@@ -39,6 +39,9 @@ func cmdResume(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := notKept(c, "resume"); err != nil {
+		return err
+	}
 	name := f.pos[1]
 	var ci *castItem
 	for i := range c.Professionals {

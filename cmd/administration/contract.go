@@ -110,6 +110,9 @@ type contract struct {
 	// The rooms left behind that place stopped before it began (sweep.go):
 	// each one's folder, how many processes, the memory they held.
 	Swept []string `json:"swept,omitempty"`
+	// A kept room (keep.go): one room kept up on a commit, with no
+	// professional in it.
+	KeptRoom *keptRoom `json:"kept_room,omitempty"`
 }
 
 type castItem struct {
@@ -208,6 +211,8 @@ type status struct {
 	HandedFrom string   `json:"handed_from,omitempty"`
 	Resets     int      `json:"resets,omitempty"`
 	RoomTags   []string `json:"room_tags,omitempty"`
+	// A kept room's: when its time runs out (keep.go).
+	KeptUntil *time.Time `json:"kept_until,omitempty"`
 }
 
 // partial says when someone came back with most of their plan undone: back,
@@ -1266,6 +1271,7 @@ func cmdStatus(args []string) error {
 			return err
 		}
 		sweepChecks()
+		expireKept()
 		files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 		for _, file := range files {
 			id := filepath.Base(filepath.Dir(file))
@@ -1307,6 +1313,12 @@ func cmdStatus(args []string) error {
 		return nil
 	}
 	for _, vw := range views {
+		if vw.KeptRoom != nil {
+			if dir, err := contractDir(vw.ID); err == nil {
+				fmt.Println(keptLine(vw.contract, dir))
+			}
+			continue
+		}
 		state := "open"
 		if vw.ClosedAt != nil {
 			state = "closed"
@@ -1433,6 +1445,9 @@ func cmdWait(args []string) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	if err := notKept(c, "wait"); err != nil {
+		return exitError, err
+	}
 	deadline := time.Now().Add(limit)
 	// A line each time someone's state changes, so whoever reads this later
 	// sees how it went; and a failure while others work ends the wait at
@@ -1532,9 +1547,15 @@ func cmdClose(args []string) error {
 		return err
 	}
 	defer unuse()
-	_, dir, err := loadContract(f.pos[0])
+	kc, dir, err := loadContract(f.pos[0])
 	if err != nil {
 		return err
+	}
+	if kc.KeptRoom != nil {
+		if f.has("keep") {
+			return usageError{"close --keep keeps a contract's rooms' folders; a kept room is closed with room-close " + kc.ID}
+		}
+		return closeKeptSaying(kc, dir)
 	}
 	// One close at a time: a second waits for the first, then finds the
 	// contract closed and prints its summary, rather than stopping,
@@ -1741,6 +1762,9 @@ func cmdReport(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := notKept(c, "report"); err != nil {
+		return err
+	}
 	path := filepath.Join(dir, "summary.md")
 	if len(args) == 2 {
 		found := false
@@ -1917,7 +1941,7 @@ func statusAll(f *flags) error {
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 	for _, file := range files {
 		c, dir, err := loadContract(filepath.Base(filepath.Dir(file)))
-		if err != nil || c.PlacedAt.Before(from) {
+		if err != nil || c.KeptRoom != nil || c.PlacedAt.Before(from) {
 			continue
 		}
 		r := record{ID: c.ID, Target: c.Target, Key: contractKey(c), Project: c.Project, PlacedAt: c.PlacedAt.UTC(),

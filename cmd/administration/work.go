@@ -259,6 +259,12 @@ func work(id, name string) error {
 	// contract's other users may share it (share.go), and this
 	// professional's coins start now.
 	endSetupTurn()
+	if c.KeptRoom != nil {
+		// A kept room (keep.go): nobody works in it; it's held until it's
+		// closed or its time runs out.
+		keptRun(ctx, c, dir, &s, save, finish)
+		return nil
+	}
 	if ci.Kind == "user" {
 		offerRoom(c, dir, name, ci, &s)
 	}
@@ -399,6 +405,12 @@ func roomEnv(c *contract, name, room, ports, mf, tag string) []string {
 	)
 	if c.Data != "" {
 		env = append(env, "ADMINISTRATION_DATA="+c.Data)
+	}
+	if c.KeptRoom != nil {
+		// A room kept up for people to look at (keep.go), not one a
+		// professional works in: a setup may serve it to more than this
+		// machine's own browsers.
+		env = append(env, "ADMINISTRATION_KEPT=1")
 	}
 	for _, kv := range strings.Split(ports, ",") {
 		if k, v, ok := strings.Cut(kv, "="); ok {

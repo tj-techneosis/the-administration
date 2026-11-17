@@ -102,6 +102,22 @@ const usage = `administration: contracts for persona agents.
   administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]
       build one room with the project's setup hook, check it comes up on
       seed data, show its address and logins, and clear it away
+  administration room-keep REF [--project DIR] [--hours 8] [--data NAME] [--house-from REF] [--no-queue] [--json]
+      keep one room up on commit REF, with nobody in it, for people to
+      look at the app: set up as a contract's room is (the setup hook, the
+      build hook's build of REF, seed data), in the same line for rooms,
+      so it never takes one from a contract (queued, or exit 4 with
+      --no-queue). Returns at once with its id; it's kept for --hours
+      once it's up, then torn down. Its setup gets ADMINISTRATION_KEPT=1.
+      With no build hook, the checkout must be at REF, with no
+      uncommitted work
+  administration rooms [--json]
+      the kept rooms: each one's state, address, time left; --json adds
+      the other addresses its pages load, its ports by name and its logins
+  administration room-extend ID [--hours 8] [--json]
+      give a kept room more time (at most 72 hours left at once)
+  administration room-close ID
+      tear a kept room down and take it out of the books
   administration build [REF] [--project DIR]
       the house's build hook's build of REF (HEAD, with any uncommitted
       work): from the books, or built now in a clean checkout; prints its
@@ -226,6 +242,14 @@ func run(args []string) int {
 		err = cmdRoomCheck(args[1:])
 	case "build":
 		err = cmdBuild(args[1:])
+	case "room-keep":
+		err = cmdRoomKeep(args[1:])
+	case "room-extend":
+		err = cmdRoomExtend(args[1:])
+	case "room-close":
+		err = cmdRoomClose(args[1:])
+	case "rooms":
+		err = cmdRooms(args[1:])
 	case "equipment-check":
 		err = cmdEquipmentCheck(args[1:])
 	case "resume":

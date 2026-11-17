@@ -703,6 +703,29 @@ changes" into CLI calls, and checks findings against the code afterwards.
 - **Checks first**: `room-check` and `equipment-check` take tickets that
   sort before every contract's (`0-` before the time), so a person
   sitting waiting for one isn't behind a contract's whole cast of setups.
+- **Kept rooms** (`keep.go`): `room-keep REF` keeps one room up on a
+  commit with nobody in it, for people to look at the app (behind a
+  preview button, say). It is a contract with one seat, `room`, and no
+  professional: its worker waits for a room in the same line as every
+  contract's users (`awaitRoom`), so it holds a real slot and can never
+  take one from a contract, and it builds through the same build cache
+  (`ensureBuild`, keyed by the commit, as `--build` is), so a commit just
+  reviewed comes up without a build. It's set up exactly as a contract's
+  room (the setup hook, seed data, the manifest's checks), with
+  `ADMINISTRATION_KEPT=1` added so the setup can tell it's one people
+  will open. Once it answers its state is `up`, and its time (8 hours by
+  default, at most 72 left at once) starts; the worker reads the hours
+  again each poll, so `room-extend` reaches it, and when they run out it
+  tears the room down and takes the contract out of the books, as
+  `room-close` does. Nothing of it is kept: it found nothing, so the
+  ledger, `status --all`, stats and the Director never see it, and
+  `wait`, `report`, `verify` and `resume` refuse it. One whose worker
+  ended (a setup that failed, a worker killed) stays listed, holding no
+  room unless it's still standing, until it's closed or its hours pass
+  from when it ended; `rooms` and `status` clear those. `rooms --json`
+  gives each one's address, the other addresses its pages load, its
+  ports by name and its seed logins, for a tool that puts it in front of
+  people.
 - **Equipment restart**: a screen's equipment can declare `restart`, run
   once by the screen's server when the device would otherwise be called
   lost (an emulator that crashed came back when booted again, each loss

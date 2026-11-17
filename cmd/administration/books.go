@@ -449,7 +449,7 @@ func history(project string) ([]ledgerLine, error) {
 		// A read-only contract that read the branch's own house worked
 		// from professionals the branch wrote: not counted in this
 		// project's standings, as review doesn't take it in either.
-		if err != nil || !sameProject(c, project) || branchHoused(c) {
+		if err != nil || c.KeptRoom != nil || !sameProject(c, project) || branchHoused(c) {
 			continue
 		}
 		for _, p := range c.Professionals {
