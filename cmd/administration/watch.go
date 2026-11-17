@@ -32,6 +32,9 @@ func cmdWatch(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := notKept(c, "watch"); err != nil {
+		return err
+	}
 	names := make([]string, 0, len(c.Professionals))
 	for _, p := range c.Professionals {
 		if len(f.pos) == 1 || p.Name == f.pos[1] {

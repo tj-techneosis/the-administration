@@ -110,14 +110,36 @@ func cmdRoomKeep(args []string) error {
 			fmt.Fprintf(os.Stderr, "House: from %s, at %s.\n", name, short(sha))
 		}
 	}
-	if h := houseOf(project); h.Where == "machine" {
+	// The house's hooks run as the person, outside every wall, and the
+	// commit kept is often a branch nobody has reviewed: its own
+	// .administration/ (or a worktree's main checkout's) is never the
+	// house. It comes from a ref (--house-from), or is the one kept on this
+	// machine for a checkout that has none of its own.
+	key := projectKey(project)
+	if !f.has("house-from") {
+		h := houseOf(project)
+		if h.Where != "machine" || lexists(filepath.Join(project, ".administration")) {
+			return usageError{"a kept room runs the house's hooks as you, outside every wall, so its house can't come from the checkout, which the branch can write: give --house-from REMOTE/BRANCH (origin/main) or a full commit id you trust, or :kept for the house kept on this machine"}
+		}
 		fmt.Fprintf(os.Stderr, "administration: the house kept on this machine for %s (by the project's origin remote): %s\n", h.Origin, h.Dir)
+		// Nor does the checkout's roster name the books it goes into.
+		key = untrustedKey(project)
 	}
 	if _, _, err := houseSetup(project, false); err != nil {
 		return usageError{"a kept room is set up as a contract's is, and " + err.Error()}
 	}
-	held := &contract{Project: project, Key: projectKey(project), House: outsideHouse(project)}
-	if err := recordCommit(held, ref); err != nil {
+	// REF is resolved as --house-from's is: a full commit id, refs/..., or
+	// REMOTE/BRANCH, never a bare name git would look up across kinds of
+	// ref (a tag named like a branch would shadow it).
+	sha, _, err := resolveHouseRef(project, ref)
+	if err != nil {
+		if u, ok := err.(usageError); ok {
+			return usageError{strings.Replace(u.msg, "--house-from ", "room-keep ", 1)}
+		}
+		return err
+	}
+	held := &contract{Project: project, Key: key, House: outsideHouse(project)}
+	if err := recordCommit(held, sha); err != nil {
 		if u, ok := err.(usageError); ok {
 			return usageError{strings.Replace(u.msg, "--build ", "room-keep ", 1)}
 		}
@@ -228,7 +250,7 @@ func cmdRoomKeep(args []string) error {
 		}
 		return startErr
 	}
-	fmt.Printf("Kept room %s placed on %s, for %s once it's up.\n", id, short(c.Build), hoursSaid(hours))
+	fmt.Printf("Kept room %s placed on %s, for %s once it's up.\n", id, c.Build, hoursSaid(hours))
 	if queued != "" {
 		fmt.Println(queued)
 	}
@@ -434,15 +456,14 @@ func cmdRoomExtend(args []string) error {
 // keptView is a kept room as rooms --json says it, for a tool that puts
 // the room's addresses in front of people.
 type keptView struct {
+	// No paths, and not who placed it (its Claude session): a tool shows
+	// these to people.
 	ID       string    `json:"id"`
 	State    string    `json:"state"` // waiting, setup, up; failed or closed when its worker ended
 	Reason   string    `json:"reason,omitempty"`
-	Project  string    `json:"project"`
-	Key      string    `json:"key,omitempty"`
 	Ref      string    `json:"ref"`
 	Commit   string    `json:"commit"`
 	Data     string    `json:"data,omitempty"`
-	PlacedBy string    `json:"placed_by"`
 	PlacedAt time.Time `json:"placed_at"`
 	// Its time: hours once it's up, until when, and how long is left.
 	Hours    float64    `json:"hours"`
@@ -456,17 +477,17 @@ type keptView struct {
 	Origins []string        `json:"origins,omitempty"`
 	Ports   map[string]int  `json:"ports,omitempty"`
 	Logins  map[string]role `json:"logins,omitempty"`
-	// Its setup's output, for one that failed, and what teardown found.
-	SetupLog  string `json:"setup_log,omitempty"`
-	Leftovers string `json:"leftovers,omitempty"`
 }
 
 func keptViewOf(c *contract, dir string) keptView {
 	pd := filepath.Join(dir, keptSeat)
 	s := readStatus(dir, keptSeat)
-	v := keptView{ID: c.ID, State: s.State, Reason: s.Reason, Project: c.Project, Key: c.Key, Ref: c.KeptRoom.Ref,
-		Commit: c.Build, Data: c.Data, PlacedBy: c.PlacedBy, PlacedAt: c.PlacedAt, Hours: c.KeptRoom.Hours,
-		ReadyAt: s.ReadyAt, Waited: s.WaitedSecs, Leftovers: s.Leftovers}
+	// A failed setup's reason names its log in the books: just the log's
+	// name here (status ID says where).
+	reason := strings.ReplaceAll(s.Reason, pd+string(filepath.Separator), "")
+	v := keptView{ID: c.ID, State: s.State, Reason: reason, Ref: c.KeptRoom.Ref,
+		Commit: c.Build, Data: c.Data, PlacedAt: c.PlacedAt, Hours: c.KeptRoom.Hours,
+		ReadyAt: s.ReadyAt, Waited: s.WaitedSecs}
 	if s.ReadyAt != nil {
 		until := s.ReadyAt.Add(time.Duration(c.KeptRoom.Hours * float64(time.Hour))).UTC().Truncate(time.Second)
 		v.Until = &until
@@ -489,15 +510,13 @@ func keptViewOf(c *contract, dir string) keptView {
 			}
 		}
 	}
-	if s.State == "failed" && isFile(filepath.Join(pd, "setup.log")) {
-		v.SetupLog = filepath.Join(pd, "setup.log")
-	}
 	return v
 }
 
 // keptLine is a kept room in status's words.
 func keptLine(c *contract, dir string) string {
 	v := keptViewOf(c, dir)
+	v.Reason = readStatus(dir, keptSeat).Reason
 	who, _, _ := strings.Cut(c.PlacedBy, " (claude:")
 	head := fmt.Sprintf("Kept room %s at %s, placed %s by %s: ", c.ID, short(c.Build), c.PlacedAt.Local().Format("Mon 15:04"), who)
 	switch v.State {
@@ -591,4 +610,10 @@ func cmdRooms(args []string) error {
 	}
 	fmt.Println(roomsLine())
 	return nil
+}
+
+// lexists says whether anything is at path, a broken link included.
+func lexists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }

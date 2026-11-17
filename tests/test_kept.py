@@ -35,7 +35,11 @@ class Kept(Base):
         return subprocess.run(["git", *args], cwd=self.project, check=True, capture_output=True, text=True,
                               env={**os.environ, **self.env}).stdout.strip()
 
-    def keep(self, *args, check=0, env=None):
+    def keep(self, *args, check=0, env=None, house=None):
+        # The house from a commit, as it must be: the checkout's own is
+        # never the house (house="" leaves it out).
+        house = self.head if house is None else house
+        args = [*args, "--house-from", house] if house else list(args)
         p = self.cli("room-keep", *args, "--json", check=check, env=env)
         return json.loads(p.stdout) if check == 0 else p
 
@@ -122,8 +126,9 @@ class Kept(Base):
         self.hire_file("slow", fake="slow", coins="30m")
         cid = self.place("x", "--cast", "slow")
         self.wait_state(cid, "slow", {"working"})
-        p = self.cli("room-keep", self.head)
+        p = self.cli("room-keep", self.head, "--house-from", self.head)
         rid = p.stdout.split()[2]
+        self.assertIn(f"placed on {self.head},", p.stdout)
         self.assertIn(f"Queued, 1 ahead: 1 of 1 rooms are in use (contract {cid}, placed by t).", p.stdout)
         self.assertEqual(self.wait_kept(rid, {"waiting"})["reason"], "waiting for a room (all 1 in use)")
         self.assertIn("waiting for a room (all 1 in use)", self.cli("status").stdout)
@@ -178,29 +183,70 @@ class Kept(Base):
 
     def test_a_setup_that_fails_frees_its_room_and_says_why(self):
         write(os.path.join(self.project, ".administration", "setup"), "#!/bin/sh\necho no database >&2\nexit 1\n", 0o755)
-        rid = self.keep(self.head)["id"]
+        self.git("commit", "-qam", "a setup that fails")
+        head = self.git("rev-parse", "HEAD")
+        rid = self.keep(head, house=head)["id"]
         r = self.wait_kept(rid, {"failed"})
         self.assertIn("setup failed", r["reason"])
-        self.assertIn("no database", open(r["setup_log"]).read())
+        # What a tool shows people: no paths, nor who placed it.
+        self.assertNotIn(self.books, json.dumps(r))
+        self.assertNotIn(self.project, json.dumps(r))
+        for k in ("project", "key", "placed_by", "setup_log", "leftovers"):
+            self.assertNotIn(k, r)
+        log = os.path.join(self.pdir(rid, "room"), "setup.log")
+        self.assertIn("no database", open(log).read())
+        self.assertIn(log, self.cli("status", rid).stdout)
         self.assertIn("Rooms: 0 of 4 in use", self.cli("status").stdout)
         self.cli("room-close", rid)
         self.assertEqual(self.kept(), {})
 
+    def test_the_checkouts_own_house_never_runs(self):
+        # A branch that commits its own setup: kept with no --house-from,
+        # it must be refused before anything of its house runs.
+        marker = os.path.join(self.tmp, "ran")
+        for hook in ("setup", "build", "teardown"):
+            write(os.path.join(self.project, ".administration", hook), f'#!/bin/sh\necho {hook} >> "{marker}"\n', 0o755)
+        self.git("commit", "-qam", "the branch's own hooks")
+        head = self.git("rev-parse", "HEAD")
+        p = self.keep(head, house="", check=1)
+        self.assertIn("its house can't come from the checkout", p.stderr)
+        self.assertIn("--house-from", p.stderr)
+        # Nor in a linked worktree of it, whose main checkout has one.
+        wt = os.path.join(self.tmp, "wt")
+        self.git("worktree", "add", "-q", wt, head)
+        self.assertIn("its house can't come from the checkout", self.keep(head, "--project", wt, house="", check=1).stderr)
+        time.sleep(1)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(self.glob_contracts(), [])
+        # :kept with none kept on this machine is refused too.
+        self.assertIn("no house is kept on this machine", self.keep(head, house=":kept", check=1).stderr)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_watch_refuses_a_kept_room(self):
+        rid = self.keep(self.head)["id"]
+        self.assertIn("is a kept room, not a contract", self.cli("watch", rid, "--panes", check=1).stderr)
+        self.cli("room-close", rid)
+
     def test_refused_up_front(self):
-        # A commit this checkout doesn't have.
-        self.assertIn("doesn't have that commit", self.keep("0" * 40, check=1).stderr)
-        self.assertIn("not a commit here", self.keep("no-such-branch", check=1).stderr)
+        # REF is named as --house-from's is: a commit this checkout doesn't
+        # have, a bare name (a tag could shadow a branch), a short id, HEAD.
+        self.assertIn("no such commit here", self.keep("0" * 40, check=1).stderr)
+        self.git("tag", "main")
+        for ref in ("main", "no-such-branch", self.head[:10], "HEAD"):
+            p = self.keep(ref, check=1)
+            self.assertIn(f"room-keep {ref}: ", p.stderr)
         self.assertIn("--hours", self.keep(self.head, "--hours", "0", check=1).stderr)
         self.assertIn("at most 72 hours", self.keep(self.head, "--hours", "100", check=1).stderr)
         # Without a build hook the setup builds from the checkout: it must
         # be that commit, with no uncommitted work.
-        os.remove(os.path.join(self.project, ".administration", "build"))
         first = self.head
+        self.git("rm", "-q", os.path.join(".administration", "build"))
         write(os.path.join(self.project, "app.txt"), "two\n")
-        self.git("commit", "-qam", "two")
-        self.assertIn("check out " + first[:7], self.keep(first, check=1).stderr)
+        self.git("commit", "-qam", "two, with no build hook")
+        two = self.git("rev-parse", "HEAD")
+        self.assertIn("check out " + first[:7], self.keep(first, house=two, check=1).stderr)
         write(os.path.join(self.project, "app.txt"), "wip\n")
-        self.assertIn("uncommitted work", self.keep("HEAD", check=1).stderr)
+        self.assertIn("uncommitted work", self.keep(two, house=two, check=1).stderr)
         self.assertEqual(self.glob_contracts(), [])
         # A contract's id isn't a kept room's.
         self.git("checkout", "-q", "app.txt")
@@ -209,7 +255,6 @@ class Kept(Base):
         self.assertIn("is a contract, not a kept room", self.cli("room-close", cid, check=1).stderr)
         self.cli("wait", cid)
         self.cli("close", cid)
-
 
 if __name__ == "__main__":
     unittest.main()

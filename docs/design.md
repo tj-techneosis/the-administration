@@ -711,21 +711,28 @@ changes" into CLI calls, and checks findings against the code afterwards.
   take one from a contract, and it builds through the same build cache
   (`ensureBuild`, keyed by the commit, as `--build` is), so a commit just
   reviewed comes up without a build. It's set up exactly as a contract's
-  room (the setup hook, seed data, the manifest's checks), with
-  `ADMINISTRATION_KEPT=1` added so the setup can tell it's one people
+  room (the setup hook, seed data, the manifest's checks). Its house
+  never comes from the checkout: the commit kept is often a branch nobody
+  has reviewed, and the house's hooks run as the person outside every
+  wall, so `room-keep` wants `--house-from` (a ref, or `:kept`), or the
+  house kept on the machine for a checkout with no `.administration/` of
+  its own, whose roster then doesn't name its books (`untrustedKey`, as
+  `--read-only`). REF is resolved as `--house-from`'s is, never by a
+  bare name a tag could shadow. The room's setup gets
+  `ADMINISTRATION_KEPT=1`, so it can tell it's one people
   will open. Once it answers its state is `up`, and its time (8 hours by
   default, at most 72 left at once) starts; the worker reads the hours
   again each poll, so `room-extend` reaches it, and when they run out it
   tears the room down and takes the contract out of the books, as
   `room-close` does. Nothing of it is kept: it found nothing, so the
   ledger, `status --all`, stats and the Director never see it, and
-  `wait`, `report`, `verify` and `resume` refuse it. One whose worker
+  `wait`, `watch`, `report`, `verify` and `resume` refuse it. One whose worker
   ended (a setup that failed, a worker killed) stays listed, holding no
   room unless it's still standing, until it's closed or its hours pass
   from when it ended; `rooms` and `status` clear those. `rooms --json`
   gives each one's address, the other addresses its pages load, its
   ports by name and its seed logins, for a tool that puts it in front of
-  people.
+  people; no paths, and not who placed it.
 - **Equipment restart**: a screen's equipment can declare `restart`, run
   once by the screen's server when the device would otherwise be called
   lost (an emulator that crashed came back when booted again, each loss
