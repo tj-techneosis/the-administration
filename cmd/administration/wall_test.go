@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,11 +32,11 @@ func TestRefusedCommandsIgnoreCaseAndVersion(t *testing.T) {
 func TestTheDbPortIsNeverAnOrigin(t *testing.T) {
 	names, ports := []string{"web", "api", "db", "aux"}, []int{4100, 4101, 4102, 4103}
 	ok := &manifest{URL: "http://127.0.0.1:4100/", Origins: []string{"http://127.0.0.1:4101", "http://localhost:4103"}, Data: "seed"}
-	if err := checkManifest(ok, names, ports, ""); err != nil {
+	if err := checkManifest(ok, names, ports, "", false); err != nil {
 		t.Errorf("web, api and aux: %v", err)
 	}
 	bad := &manifest{URL: "http://127.0.0.1:4100/", Origins: []string{"http://127.0.0.1:4102"}, Data: "seed"}
-	if err := checkManifest(bad, names, ports, ""); err == nil || !strings.Contains(err.Error(), "db port") {
+	if err := checkManifest(bad, names, ports, "", false); err == nil || !strings.Contains(err.Error(), "db port") {
 		t.Errorf("an origin on the db port: %v", err)
 	}
 }
@@ -181,6 +184,65 @@ func TestSecretDeniesHoldOutsideTheWorkingDirectoryAndInAnyCase(t *testing.T) {
 		"Read(//**/.administration/env/**)", "Read(//srv/house/env/**)"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("no %s", want)
+		}
+	}
+}
+
+func TestOnlyAKeptRoomNamesTheMachineByItsOwnAddress(t *testing.T) {
+	names, ports := []string{"web", "api", "db"}, []int{4100, 4101, 4102}
+	// This machine, as the test has it: loopback and a tailnet address.
+	mine := "100.64.0.2"
+	defer func(f func() ([]net.Addr, error)) { interfaceAddrs = f }(interfaceAddrs)
+	interfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)},
+			&net.IPNet{IP: net.ParseIP(mine), Mask: net.CIDRMask(32, 32)}}, nil
+	}
+	own := &manifest{URL: "http://127.0.0.1:4100/", Origins: []string{"http://" + mine + ":4101"}, Data: "seed"}
+	if err := checkManifest(own, names, ports, "", true); err != nil {
+		t.Errorf("a kept room on this machine's own %s: %v", mine, err)
+	}
+	if err := checkManifest(own, names, ports, "", false); err == nil || !strings.Contains(err.Error(), "only reach their own room") {
+		t.Errorf("a contract's room on %s: %v", mine, err)
+	}
+	db := &manifest{URL: "http://" + mine + ":4102/", Data: "seed"}
+	if err := checkManifest(db, names, ports, "", true); err == nil || !strings.Contains(err.Error(), "db port") {
+		t.Errorf("a kept room's origin on the db port: %v", err)
+	}
+	other := &manifest{URL: "http://" + mine + ":4999/", Data: "seed"}
+	if err := checkManifest(other, names, ports, "", true); err == nil || !strings.Contains(err.Error(), "this room's ports") {
+		t.Errorf("a kept room's origin on another port: %v", err)
+	}
+	// Names, resolved by the test: one that is this machine alone is
+	// accepted for a kept room; one with a foreign address too is not.
+	defer func(f func(context.Context, string) ([]net.IPAddr, error)) { lookupIP = f }(lookupIP)
+	lookupIP = func(_ context.Context, h string) ([]net.IPAddr, error) {
+		switch h {
+		case "me.example":
+			return []net.IPAddr{{IP: net.ParseIP(mine)}}, nil
+		case "both.example":
+			return []net.IPAddr{{IP: net.ParseIP(mine)}, {IP: net.ParseIP("192.0.2.10")}}, nil
+		case "away.example":
+			return []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	named := &manifest{URL: "http://me.example:4100/", Data: "seed"}
+	if err := checkManifest(named, names, ports, "", true); err != nil {
+		t.Errorf("a kept room on a name for this machine: %v", err)
+	}
+	if err := checkManifest(named, names, ports, "", false); err == nil || !strings.Contains(err.Error(), "only reach their own room") {
+		t.Errorf("a contract's room on a name for this machine: %v", err)
+	}
+	for _, h := range []string{"both.example", "away.example", "gone.example"} {
+		m := &manifest{URL: "http://" + h + ":4100/", Data: "seed"}
+		if err := checkManifest(m, names, ports, "", true); err == nil || !strings.Contains(err.Error(), "not on this machine") {
+			t.Errorf("a kept room on %s: %v", h, err)
+		}
+	}
+	for _, h := range []string{"192.0.2.10", "0.0.0.0", "example.invalid"} {
+		away := &manifest{URL: "http://" + h + ":4100/", Data: "seed"}
+		if err := checkManifest(away, names, ports, "", true); err == nil || !strings.Contains(err.Error(), "not on this machine") {
+			t.Errorf("a kept room on %s: %v", h, err)
 		}
 	}
 }

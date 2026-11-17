@@ -720,7 +720,11 @@ changes" into CLI calls, and checks findings against the code afterwards.
   `--read-only`). REF is resolved as `--house-from`'s is, never by a
   bare name a tag could shadow. The room's setup gets
   `ADMINISTRATION_KEPT=1`, so it can tell it's one people
-  will open. Once it answers its state is `up`, and its time (8 hours by
+  will open, often from another machine: so a kept room's manifest may
+  also name this machine by one of its own interfaces' addresses (its
+  tailnet's, say) or by a name that resolves to those alone, where a
+  contract's room is loopback only, since a professional only reaches
+  their own room. The ports are still the room's own, never its db. Once it answers its state is `up`, and its time (8 hours by
   default, at most 72 left at once) starts; the worker reads the hours
   again each poll, so `room-extend` reaches it, and when they run out it
   tears the room down and takes the contract out of the books, as

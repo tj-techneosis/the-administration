@@ -519,7 +519,7 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("the room's manifest: %v", err)
 	}
-	if err := checkManifest(&m, names, ps, ci.SignsInAs); err != nil {
+	if err := checkManifest(&m, names, ps, ci.SignsInAs, c.KeptRoom != nil); err != nil {
 		return nil, err
 	}
 	// A checkout that moved while the setup ran is as far off as one that
@@ -640,8 +640,12 @@ func roomData(d string) bool { return d == "seed" || d == "local" }
 // checkManifest holds the room to Rule 1: seed or local data, and nothing
 // but this room's own ports on this machine. names are the ports' names, in
 // order: the db port is the app's own, never the browser's, so an origin on
-// it is refused (the gate would open it, and tunnel to it).
-func checkManifest(m *manifest, names []string, ports []int, signsInAs string) error {
+// it is refused (the gate would open it, and tunnel to it). A contract's
+// room is loopback only: professionals only reach their own room. A kept
+// room has no professional and no browser, and people open it from other
+// machines, so it may also name this machine by one of its own addresses
+// (its tailnet's, say), or by a name that resolves to them alone.
+func checkManifest(m *manifest, names []string, ports []int, signsInAs string, kept bool) error {
 	if !roomData(m.Data) {
 		return refusal{fmt.Sprintf("the room's data is %q; contracts run on seed data or a local copy on this machine (\"seed\" or \"local\"), never production (no business on consecrated ground)", m.Data)}
 	}
@@ -664,7 +668,12 @@ func checkManifest(m *manifest, names []string, ports []int, signsInAs string) e
 		}
 		h := u.Hostname()
 		if h != "127.0.0.1" && h != "localhost" {
-			return refusal{fmt.Sprintf("origin %q is not on this machine; professionals only reach their own room", o)}
+			if !kept {
+				return refusal{fmt.Sprintf("origin %q is not on this machine; professionals only reach their own room", o)}
+			}
+			if !ownHost(h) {
+				return refusal{fmt.Sprintf("origin %q is not on this machine: a kept room answers on loopback or on one of this machine's own addresses (or a name that resolves to them alone)", o)}
+			}
 		}
 		if u.Port() == db {
 			return refusal{fmt.Sprintf("origin %q is the room's db port ($ADMINISTRATION_PORT_DB): the database is the app's, and the browser never reaches it", o)}
@@ -684,6 +693,46 @@ func checkManifest(m *manifest, names []string, ports []int, signsInAs string) e
 		}
 	}
 	return nil
+}
+
+// This machine's addresses, and how a kept room's origin's name resolves
+// (a test's own, in tests).
+var (
+	interfaceAddrs = net.InterfaceAddrs
+	lookupIP       = net.DefaultResolver.LookupIPAddr
+)
+
+// ownHost: a host that is this machine, by an address on one of its own
+// interfaces, or by a name every address of which is one (resolved here,
+// briefly). Never the unspecified address, which names no machine to a
+// person opening the room.
+func ownHost(h string) bool {
+	h = strings.Trim(h, "[]")
+	own := map[string]bool{}
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && !n.IP.IsUnspecified() {
+			own[n.IP.String()] = true
+		}
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return own[ip.String()]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := lookupIP(ctx, h)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !own[ip.IP.String()] {
+			return false
+		}
+	}
+	return true
 }
 
 // allowedOrigins is what Playwright may request: the room's origins under

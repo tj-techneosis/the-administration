@@ -132,7 +132,7 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("the before app's manifest: %v", err)
 	}
-	if err := checkManifest(&m, names, ps, ci.SignsInAs); err != nil {
+	if err := checkManifest(&m, names, ps, ci.SignsInAs, false); err != nil {
 		return nil, err
 	}
 	s.BeforeURL = m.URL
