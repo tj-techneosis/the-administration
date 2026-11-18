@@ -188,6 +188,26 @@ func listening(ports []int) []int {
 	return open
 }
 
+// heldPorts is the ports something on this machine holds on any of its
+// addresses (a forwarder on its tailnet's, say), not only loopback: one
+// that answers there, or that can't be bound on every address.
+func heldPorts(ports []int) []int {
+	var held []int
+	for _, p := range ports {
+		if len(listening([]int{p})) > 0 {
+			held = append(held, p)
+			continue
+		}
+		l, err := net.Listen("tcp", ":"+strconv.Itoa(p))
+		if err != nil {
+			held = append(held, p)
+			continue
+		}
+		l.Close()
+	}
+	return held
+}
+
 // procStarted is when pid started, as ps prints it (to the second, in UTC
 // and the C locale, so whoever asks gets the same text), or "" when ps
 // can't say: with the pid, it names one process, as a pid is reused, but

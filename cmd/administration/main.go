@@ -102,13 +102,17 @@ const usage = `administration: contracts for persona agents.
   administration room-check [--project DIR] [--data NAME] [--changes [--base REF]]
       build one room with the project's setup hook, check it comes up on
       seed data, show its address and logins, and clear it away
-  administration room-keep REF --house-from REF [--project DIR] [--hours 8] [--data NAME] [--no-queue] [--json]
+  administration room-keep REF --house-from REF [--project DIR] [--hours 8] [--data NAME] [--publish PORTS] [--no-queue] [--json]
       keep one room up on commit REF, with nobody in it, for people to
       look at the app: set up as a contract's room is (the setup hook, the
       build hook's build of REF, seed data), in the same line for rooms,
       so it never takes one from a contract (queued, or exit 4 with
       --no-queue). Returns at once with its id; it's kept for --hours
       once it's up, then torn down. Its setup gets ADMINISTRATION_KEPT=1.
+      --publish 8443-8447 (or 8443,8445): ports the house serves it on
+      beyond its own (a forwarder's), given to the setup as
+      ADMINISTRATION_PUBLISH and allowed as its origins; none another
+      kept room publishes, none below 1025, at most 16.
       REF and --house-from are named as place --house-from's REF is (a full
       commit id, refs/..., REMOTE/BRANCH). The house never comes from the
       checkout: --house-from, or :kept (or no --house-from) for the house

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,83 @@ type keptRoom struct {
 	Ref string `json:"ref"`
 	// How long it's kept once it's up, in hours; room-extend adds to it.
 	Hours float64 `json:"hours"`
+	// The ports the house publishes the room on, beyond the room's own
+	// (--publish): the placer's to choose, so a forwarder can serve the
+	// room to other machines at an address people know.
+	Publish []int `json:"publish,omitempty"`
+}
+
+// The most ports a kept room may publish, and the lowest one.
+const (
+	keptMaxPublish = 16
+	keptMinPublish = 1025
+)
+
+// keptPublish reads --publish: ports and ranges, comma separated
+// (8443-8447, or 8443,8445), each once, above the privileged ports.
+func keptPublish(f *flags) ([]int, error) {
+	if !f.has("publish") {
+		return nil, nil
+	}
+	v := strings.TrimSpace(f.get("publish"))
+	bad := func(why string) error {
+		return usageError{fmt.Sprintf("--publish %q: %s", v, why)}
+	}
+	var out []int
+	seen := map[int]bool{}
+	for _, part := range strings.Split(v, ",") {
+		lo, hi, isRange := strings.Cut(strings.TrimSpace(part), "-")
+		if !isRange {
+			hi = lo
+		}
+		a, err1 := strconv.Atoi(strings.TrimSpace(lo))
+		b, err2 := strconv.Atoi(strings.TrimSpace(hi))
+		if err1 != nil || err2 != nil || a > b {
+			return nil, bad("ports and ranges, comma separated, such as 8443-8447 or 8443,8445")
+		}
+		if a < keptMinPublish || b > 65535 {
+			return nil, bad(fmt.Sprintf("ports from %d to 65535", keptMinPublish))
+		}
+		if b-a+1+len(out) > keptMaxPublish {
+			return nil, bad(fmt.Sprintf("at most %d ports", keptMaxPublish))
+		}
+		for p := a; p <= b; p++ {
+			if seen[p] {
+				return nil, bad(fmt.Sprintf("%d is named twice", p))
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// publishedBy is the kept room still standing (not ended) that publishes
+// one of ports, and the port: two rooms can't be served on one.
+func publishedBy(ports []int) (string, int) {
+	books, err := booksDir()
+	if err != nil {
+		return "", 0
+	}
+	for _, c := range keptRooms() {
+		if readStatus(filepath.Join(books, "contracts", c.ID), keptSeat).terminal() {
+			continue
+		}
+		for _, p := range c.KeptRoom.Publish {
+			if slices.Contains(ports, p) {
+				return c.ID, p
+			}
+		}
+	}
+	return "", 0
+}
+
+func joinPorts(ps []int) string {
+	var s []string
+	for _, p := range ps {
+		s = append(s, strconv.Itoa(p))
+	}
+	return strings.Join(s, ",")
 }
 
 // keptSeat is the one seat of a kept room.
@@ -63,18 +141,22 @@ func hoursSaid(h float64) string {
 // cmdRoomKeep places a kept room on a commit and returns at once: its
 // room is set up in the background, in line with the contracts' rooms.
 func cmdRoomKeep(args []string) error {
-	f, err := parseFlags(args, map[string]bool{"project": true, "hours": true, "data": true, "no-queue": false, "json": false, "house-from": true})
+	f, err := parseFlags(args, map[string]bool{"project": true, "hours": true, "data": true, "no-queue": false, "json": false, "house-from": true, "publish": true})
 	if err != nil {
 		return err
 	}
 	if len(f.pos) != 1 {
-		return usageError{"room-keep REF [--project DIR] [--hours 8] [--data NAME] [--house-from REF] [--no-queue] [--json]"}
+		return usageError{"room-keep REF [--project DIR] [--hours 8] [--data NAME] [--house-from REF] [--publish PORTS] [--no-queue] [--json]"}
 	}
 	ref := strings.TrimSpace(f.pos[0])
 	if ref == "" || strings.HasPrefix(ref, "-") {
 		return usageError{fmt.Sprintf("room-keep %q: give the commit to keep a room of (a hash, a branch or a tag)", ref)}
 	}
 	hours, err := keptHours(f)
+	if err != nil {
+		return err
+	}
+	publish, err := keptPublish(f)
 	if err != nil {
 		return err
 	}
@@ -187,6 +269,14 @@ func cmdRoomKeep(args []string) error {
 	if len(rooms)+len("/xxxx/r99/tmp") > maxRoomTmp {
 		return usageError{fmt.Sprintf("the rooms folder's path (%s) is too long for the browser's socket; set ADMINISTRATION_ROOMS to a folder of at most %d characters", rooms, maxRoomTmp-len("/xxxx/r99/tmp"))}
 	}
+	// Under the books' lock, so two kept at once can't both take a port.
+	if id, p := publishedBy(publish); id != "" {
+		return usageError{fmt.Sprintf("--publish: kept room %s publishes %d; close it first (room-close %s), or publish on others", id, p, id)}
+	}
+	// Nor one anything else holds: another room, or anything of the machine's.
+	if held := heldPorts(publish); len(held) > 0 {
+		return usageError{fmt.Sprintf("--publish: already held on this machine: %s; publish on others", joinPorts(held))}
+	}
 	queued := ""
 	if inUse, waiting, ids := roomUse(); inUse+waiting+1 > maxRooms() && len(ids) > 0 {
 		line := fmt.Sprintf("%d of %d rooms are in use", inUse, maxRooms())
@@ -221,7 +311,7 @@ func cmdRoomKeep(args []string) error {
 		Path: os.Getenv("PATH"), Version: version, HouseFrom: houseSHA, Data: data,
 		Commit: held.Commit, Build: held.Build, Tested: held.Tested,
 		Professionals: []castItem{{Name: keptSeat, Kind: "user", Source: "house"}},
-		KeptRoom:      &keptRoom{Ref: ref, Hours: hours}}
+		KeptRoom:      &keptRoom{Ref: ref, Hours: hours, Publish: publish}}
 	if houseKept {
 		c.HouseFrom = "kept"
 	}

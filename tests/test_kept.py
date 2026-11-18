@@ -13,6 +13,13 @@ import urllib.request
 from test_administration import Base, write, setUpModule  # noqa: F401
 
 
+def free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 class Kept(Base):
     def setUp(self):
         super().setUp()
@@ -221,6 +228,40 @@ class Kept(Base):
         # :kept with none kept on this machine is refused too.
         self.assertIn("no house is kept on this machine", self.keep(head, house=":kept", check=1).stderr)
         self.assertFalse(os.path.exists(marker))
+
+    def test_a_kept_room_may_be_served_on_the_ports_its_placer_publishes(self):
+        # A house's forwarder serves the room on ports the placer chose:
+        # those are the room's origins too, and only that room's.
+        pub = free_port()
+        env = {"ROOM_ORIGIN": f"http://127.0.0.1:{pub}"}
+        r = self.keep(self.head, "--publish", str(pub), env=env)
+        up = self.wait_kept(r["id"], {"up"})
+        self.assertIn(f"http://127.0.0.1:{pub}", up["origins"])
+        room = self.status(r["id"])["status"]["room"]["room"]
+        self.assertIn(f"ADMINISTRATION_PUBLISH={pub}", open(os.path.join(room, "app", "setup-env")).read())
+        # Another kept room can't publish the same port while it stands.
+        p = self.keep(self.head, "--publish", f"{pub - 1}-{pub}", check=1)
+        self.assertIn(f"kept room {r['id']} publishes {pub}", p.stderr)
+        self.cli("room-close", r["id"])
+        # Not published, the same origin is refused.
+        rid = self.keep(self.head, env=env)["id"]
+        failed = self.wait_kept(rid, {"failed", "refused"})
+        self.assertIn("this room's ports", failed["reason"])
+        self.cli("room-close", rid)
+        self.assertIn("from 1025", self.keep(self.head, "--publish", "80", check=1).stderr)
+        # Nor a port anything else on the machine holds.
+        import socket
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            port = held.getsockname()[1]
+            p = self.keep(self.head, "--publish", str(port), check=1)
+            self.assertIn(f"already held on this machine: {port}", p.stderr)
+        # A contract has no published ports.
+        self.hire_file("member")
+        self.assertIn("unknown flag --publish", self.place("x", "--cast", "member", "--publish", str(pub), check=1).stderr)
+        self.assertEqual(self.kept(), {})
+        self.assertEqual(self.glob_contracts(), [])
 
     def test_watch_refuses_a_kept_room(self):
         rid = self.keep(self.head)["id"]

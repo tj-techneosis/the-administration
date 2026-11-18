@@ -411,6 +411,10 @@ func roomEnv(c *contract, name, room, ports, mf, tag string) []string {
 		// professional works in: a setup may serve it to more than this
 		// machine's own browsers.
 		env = append(env, "ADMINISTRATION_KEPT=1")
+		if len(c.KeptRoom.Publish) > 0 {
+			// The ports the placer chose to publish it on (--publish).
+			env = append(env, "ADMINISTRATION_PUBLISH="+joinPorts(c.KeptRoom.Publish))
+		}
 	}
 	for _, kv := range strings.Split(ports, ",") {
 		if k, v, ok := strings.Cut(kv, "="); ok {
@@ -519,7 +523,7 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("the room's manifest: %v", err)
 	}
-	if err := checkManifest(&m, names, ps, ci.SignsInAs, c.KeptRoom != nil); err != nil {
+	if err := checkManifest(&m, names, ps, ci.SignsInAs, c.KeptRoom); err != nil {
 		return nil, err
 	}
 	// A checkout that moved while the setup ran is as far off as one that
@@ -644,8 +648,10 @@ func roomData(d string) bool { return d == "seed" || d == "local" }
 // room is loopback only: professionals only reach their own room. A kept
 // room has no professional and no browser, and people open it from other
 // machines, so it may also name this machine by one of its own addresses
-// (its tailnet's, say), or by a name that resolves to them alone.
-func checkManifest(m *manifest, names []string, ports []int, signsInAs string, kept bool) error {
+// (its tailnet's, say), or by a name that resolves to them alone, and on
+// the ports its placer chose to publish it on (--publish) as well as its
+// own. kept is nil for a contract's room.
+func checkManifest(m *manifest, names []string, ports []int, signsInAs string, kept *keptRoom) error {
 	if !roomData(m.Data) {
 		return refusal{fmt.Sprintf("the room's data is %q; contracts run on seed data or a local copy on this machine (\"seed\" or \"local\"), never production (no business on consecrated ground)", m.Data)}
 	}
@@ -660,6 +666,12 @@ func checkManifest(m *manifest, names []string, ports []int, signsInAs string, k
 			db = fmt.Sprint(p)
 		}
 	}
+	if kept != nil && len(kept.Publish) > 0 {
+		ports = append(slices.Clone(ports), kept.Publish...)
+		for _, p := range kept.Publish {
+			own[fmt.Sprint(p)] = true
+		}
+	}
 	origins := append([]string{m.URL}, m.Origins...)
 	for _, o := range origins {
 		u, err := url.Parse(o)
@@ -668,7 +680,7 @@ func checkManifest(m *manifest, names []string, ports []int, signsInAs string, k
 		}
 		h := u.Hostname()
 		if h != "127.0.0.1" && h != "localhost" {
-			if !kept {
+			if kept == nil {
 				return refusal{fmt.Sprintf("origin %q is not on this machine; professionals only reach their own room", o)}
 			}
 			if !ownHost(h) {
@@ -861,10 +873,26 @@ func teardown(c *contract, dir, name string, s *status) {
 	}
 	// A process killed a moment ago can still hold its port: give it two
 	// seconds to let go before calling it a leftover.
-	open := listening(s.Ports)
+	// A kept room's published ports too, on any address (its forwarder's).
+	var published []int
+	if c.KeptRoom != nil {
+		published = c.KeptRoom.Publish
+	}
+	stillOpen := func(ports []int) []int {
+		var own, pub []int
+		for _, p := range ports {
+			if slices.Contains(published, p) {
+				pub = append(pub, p)
+			} else {
+				own = append(own, p)
+			}
+		}
+		return append(listening(own), heldPorts(pub)...)
+	}
+	open := stillOpen(append(slices.Clone(s.Ports), published...))
 	for i := 0; i < 8 && len(open) > 0; i++ {
 		time.Sleep(250 * time.Millisecond)
-		open = listening(open)
+		open = stillOpen(open)
 	}
 	if len(open) > 0 && s.Leftovers == "" {
 		s.Leftovers = fmt.Sprintf("still listening after teardown: %v (check %s)", open, houseFile(c.Project, "teardown"))
