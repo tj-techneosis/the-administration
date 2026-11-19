@@ -590,6 +590,10 @@ The books grow: a phone user's stream can pass 10MB in ten minutes.
 `administration prune` strips reviewed or old contracts to their summaries
 (`--keep 10`, `--older 30d`), and past `--keep` (the last to close are
 kept) to a line each in the project's ledger, so the stats outlive them.
+With `--mined FILE` (a contract id a line, say the ones something else has
+already read the findings out of) it takes only those, once older than
+`--older`, and keeps every other contract whole, so if whatever writes FILE
+stops, nothing is lost; a FILE it can't read prunes nothing.
 Each line keeps the seat's times (started, room up, finished, in UTC), how
 long it waited and how long its room took to set up, where the room came
 from (its own, shared, handed on), the contract's data set and room plan,

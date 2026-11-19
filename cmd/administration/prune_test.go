@@ -522,3 +522,113 @@ func TestASecondCloseWaitsForTheFirst(t *testing.T) {
 		t.Fatal("the second close summed the contract up again")
 	}
 }
+
+// minedFile writes prune --mined's list.
+func minedFile(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "mined")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// stripped is whether a contract's raw material is gone and its summary kept.
+func stripped(t *testing.T, dir string) bool {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, "contract.json")); err != nil {
+		t.Fatalf("%s lost its summary: %v", dir, err)
+	}
+	_, err := os.Stat(filepath.Join(dir, "a", "stream.jsonl"))
+	return err != nil
+}
+
+func closedWithStream(t *testing.T, books, id string) string {
+	t.Helper()
+	dir := closedContract(t, books, id)
+	writeOld(t, filepath.Join(dir, "a", "stream.jsonl"), "{}\n")
+	return dir
+}
+
+// With --mined, only the old contracts FILE lists are stripped; an
+// unlisted one is kept whole however old, and so is a listed one still
+// younger than --older. The others' copies stay too.
+func TestPruneMinedStripsOnlyListedRuns(t *testing.T) {
+	books := pruneBooks(t)
+	listed := closedWithStream(t, books, "aaaa")
+	unlisted := closedWithStream(t, books, "bbbb")
+	if err := os.WriteFile(filepath.Join(unlisted, "reviewed"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := minedFile(t, "aaaa\n")
+	if err := cmdPrune([]string{"--mined", file, "--older", "1h", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if stripped(t, listed) {
+		t.Fatal("a dry run stripped a contract")
+	}
+	if err := cmdPrune([]string{"--mined", file, "--older", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if stripped(t, listed) {
+		t.Fatal("a listed contract younger than --older was stripped")
+	}
+	if err := cmdPrune([]string{"--mined", file, "--older", "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	if !stripped(t, listed) {
+		t.Fatal("a listed old contract wasn't stripped")
+	}
+	if stripped(t, unlisted) {
+		t.Fatal("an unlisted contract (old and reviewed) was stripped")
+	}
+}
+
+// An empty FILE, or one of nothing but junk, prunes nothing.
+func TestPruneMinedEmptyFilePrunesNothing(t *testing.T) {
+	books := pruneBooks(t)
+	dir := closedWithStream(t, books, "aaaa")
+	build := filepath.Join(books, "builds", "app-0123456789ab", "abc")
+	writeOld(t, filepath.Join(build, "build.log"), "failed\n")
+	for _, body := range []string{"", "\n\n", "not an id\n"} {
+		if err := cmdPrune([]string{"--mined", minedFile(t, body), "--older", "1h"}); err != nil {
+			t.Fatal(err)
+		}
+		if stripped(t, dir) || !isDir(build) {
+			t.Fatalf("a --mined FILE of %q pruned something", body)
+		}
+	}
+}
+
+// A FILE that's missing is refused, and nothing is pruned.
+func TestPruneMinedMissingFileRefuses(t *testing.T) {
+	books := pruneBooks(t)
+	dir := closedWithStream(t, books, "aaaa")
+	err := cmdPrune([]string{"--mined", filepath.Join(t.TempDir(), "nope"), "--older", "1h"})
+	if err == nil || !strings.Contains(err.Error(), "can't read") || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("a missing FILE: %v", err)
+	}
+	if stripped(t, dir) {
+		t.Fatal("a refused prune stripped a contract")
+	}
+}
+
+// Lines that aren't contract ids are ignored and counted; the ids among
+// them still count.
+func TestPruneMinedIgnoresAndCountsJunk(t *testing.T) {
+	ids, ignored, err := readMined(minedFile(t, "aaaa\n  bbbb  \n\nAAAA\naaaaa\n# a note\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || !ids["aaaa"] || !ids["bbbb"] || ignored != 3 {
+		t.Fatalf("ids %v, %d ignored", ids, ignored)
+	}
+	books := pruneBooks(t)
+	dir := closedWithStream(t, books, "aaaa")
+	if err := cmdPrune([]string{"--mined", minedFile(t, "junk\naaaa\n"), "--older", "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	if !stripped(t, dir) {
+		t.Fatal("a listed contract among junk lines wasn't stripped")
+	}
+}

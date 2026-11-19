@@ -709,8 +709,15 @@ func countContracts(lines []ledgerLine) int {
 // ledger before it's set aside, and appendLedger writes only the lines the
 // ledger lacks, so a prune cut off or failing anywhere neither loses them
 // nor counts them twice.
+//
+// With --mined FILE (one contract id a line, those whose findings have been
+// mined elsewhere), it takes only the contracts FILE lists, once they're
+// older than --older, reviewed or not; one FILE doesn't list is kept whole
+// whatever its age, so a miner that stops running loses nothing. A FILE it
+// can't read is refused before anything is touched, and one that lists no
+// contract prunes nothing.
 func cmdPrune(args []string) error {
-	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false})
+	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false, "mined": true})
 	if err != nil {
 		return err
 	}
@@ -724,6 +731,21 @@ func cmdPrune(args []string) error {
 	if f.has("older") {
 		if older, err = parseAge(f.get("older")); err != nil || older < 0 {
 			return usageError{"--older: an age like 30d or 12h"}
+		}
+	}
+	// Read before anything else: a FILE that isn't there prunes nothing.
+	var mined map[string]bool
+	if f.has("mined") {
+		var ignored int
+		if mined, ignored, err = readMined(f.get("mined")); err != nil {
+			return err
+		}
+		if ignored > 0 {
+			fmt.Printf("--mined: %s ignored (not a contract id).\n", plural(ignored, "line", "lines"))
+		}
+		if len(mined) == 0 {
+			fmt.Printf("--mined: %s lists no contract; pruned nothing.\n", f.get("mined"))
+			return nil
 		}
 	}
 	books, err := booksDir()
@@ -822,6 +844,11 @@ func cmdPrune(args []string) error {
 			// never taken into a review, so it doesn't wait for one.
 			isReviewed := err == nil || branchHoused(c)
 			old := time.Since(*c.ClosedAt) > older
+			if mined != nil {
+				// Only what's been mined, and only once it's old.
+				isReviewed = false
+				old = old && mined[c.ID]
+			}
 			if !isReviewed && !old {
 				// Kept whole until the Director has reviewed it, or it's
 				// old, past the keep or not: its findings may not be
@@ -852,6 +879,9 @@ func cmdPrune(args []string) error {
 				}
 				removed++
 				continue
+			}
+			if dry && mined != nil {
+				fmt.Printf("would strip %s (%q)\n", c.ID, c.Target)
 			}
 			var paths []string
 			for _, p := range c.Professionals {
@@ -1004,6 +1034,32 @@ func cmdPrune(args []string) error {
 			plural(len(failed), "thing", "things"), strings.Join(failed, "; "))
 	}
 	return nil
+}
+
+// readMined reads prune --mined's FILE: one contract id a line. Blank
+// lines are skipped; any other line that isn't an id is ignored, and
+// counted. A FILE that can't be read is an error.
+func readMined(path string) (map[string]bool, int, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, 0, fmt.Errorf("--mined: can't read %s, so pruned nothing: %v", path, err)
+	}
+	ids, ignored := map[string]bool{}, 0
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case l == "":
+		case idRE.MatchString(l):
+			ids[l] = true
+		default:
+			ignored++
+		}
+	}
+	return ids, ignored, nil
 }
 
 // aside renames path into the books' .pruned folder, whole, and says where

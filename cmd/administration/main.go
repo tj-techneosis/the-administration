@@ -170,8 +170,10 @@ const usage = `administration: contracts for persona agents.
       another contract
   administration stats [--project DIR] [--json]
       each professional's record: runs, findings, how many held up, coins used
-  administration prune [--keep 10] [--older 30d] [--dry-run]
-      strip reviewed or old contracts to their summaries; past --keep, to the ledger
+  administration prune [--keep 10] [--older 30d] [--dry-run] [--mined FILE]
+      strip reviewed or old contracts to their summaries; past --keep, to the ledger.
+      --mined: only the contracts FILE lists (an id a line), once older than
+      --older; one it doesn't list is kept whole
   administration sweep [--dry-run]
       stop what rooms left behind still run: processes whose room folder and
       working folder are both gone, that no open contract owns (Linux).
