@@ -632,3 +632,26 @@ func TestPruneMinedIgnoresAndCountsJunk(t *testing.T) {
 		t.Fatal("a listed contract among junk lines wasn't stripped")
 	}
 }
+
+// Under --mined nothing is removed, past the keep or not: a listed old
+// contract beyond --keep is stripped to its summary and stays.
+func TestPruneMinedNeverRemoves(t *testing.T) {
+	books := pruneBooks(t)
+	a := closedWithStream(t, books, "aaaa")
+	b := closedWithStream(t, books, "bbbb")
+	file := minedFile(t, "aaaa\nbbbb\n")
+	if err := cmdPrune([]string{"--mined", file, "--older", "1h", "--keep", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{a, b} {
+		if !isDir(dir) {
+			t.Fatalf("%s was removed under --mined", dir)
+		}
+		if !stripped(t, dir) {
+			t.Fatalf("%s wasn't stripped", dir)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "contract.json")); err != nil {
+			t.Fatalf("%s lost its summary: %v", dir, err)
+		}
+	}
+}

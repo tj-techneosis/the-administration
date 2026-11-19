@@ -856,7 +856,9 @@ func cmdPrune(args []string) error {
 				need(c)
 				continue
 			}
-			if i >= keep {
+			// Under --mined nothing is removed, past the keep or not: every
+			// summary stays, and only the transcripts of mined runs go.
+			if i >= keep && mined == nil {
 				// Past the keep: its numbers go to the ledger, then all of
 				// it. The ledger first, so it has them before the contract
 				// is gone; a prune cut off in between leaves the contract
