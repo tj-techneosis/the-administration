@@ -164,10 +164,10 @@ func (r *hookRunner) preflight() error {
 			switch {
 			case perr != nil:
 				r.preErr = refusal{fmt.Sprintf("the hook runner (%s) ran `id -u` and printed %q, not an account's number; no hook was run", r, oneLine(out.String(), 80))}
-			case uid == os.Getuid():
-				r.preErr = refusal{fmt.Sprintf("the hook runner (%s) runs commands as this same account, which keeps nothing from the hooks; no hook was run", r)}
 			case uid == 0:
 				r.preErr = refusal{fmt.Sprintf("the hook runner (%s) runs commands as root, and must run them as an account of their own; no hook was run", r)}
+			case uid == os.Getuid():
+				r.preErr = refusal{fmt.Sprintf("the hook runner (%s) runs commands as this same account, which keeps nothing from the hooks; no hook was run", r)}
 			}
 		}
 	})
