@@ -128,7 +128,14 @@ func TestABrokenHookRunnerRefusesBeforeAnyHookRuns(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, log := fakeRunnerT(t, tc.uid, tc.fail)
 			_, err := roomRunner()
-			if err == nil || !strings.Contains(err.Error(), tc.says) || !strings.Contains(err.Error(), "no hook was run") {
+			says := tc.says
+			// In a user namespace mapped to root (tests/isolated.sh) this
+			// account is uid 0, so "as me" and "as root" are one id and the
+			// root refusal is the one given; both refuse with no hook run.
+			if name == "as me" && os.Getuid() == 0 {
+				says = "as root"
+			}
+			if err == nil || !strings.Contains(err.Error(), says) || !strings.Contains(err.Error(), "no hook was run") {
 				t.Fatalf("roomRunner: %v", err)
 			}
 			// And a build with it: refused, its hook never started.
