@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -169,7 +170,6 @@ func cmdVerdicts(args []string) error {
 		}
 		// A later call adds to the earlier ones; a finding checked again
 		// takes its new verdict.
-		byN := map[int]verdict{}
 		unlock, err := lockFile(filepath.Join(dir, name, "verdicts.lock"))
 		if err != nil {
 			return err
@@ -178,30 +178,7 @@ func cmdVerdicts(args []string) error {
 		if b, err := os.ReadFile(filepath.Join(dir, name, "verdicts.json")); err == nil {
 			_ = json.Unmarshal(b, &old)
 		}
-		for _, v := range append(old, vs...) {
-			v.Tag, _ = fixTag(v.Tag)
-			// Agreeing without repeating a corrected mark keeps it: to undo
-			// one, give the mark the finding was written with (UNMARKED for
-			// none). A false finding shows its own mark, but its correction
-			// is kept for a later check that isn't false.
-			if o, ok := byN[v.Finding]; ok && v.Tag == "" {
-				v.Tag = o.Tag
-			}
-			// A fold a check made (same_as) stays under the session's own
-			// verdict, unless it gives another, or "-" to part it.
-			if o, ok := byN[v.Finding]; ok && v.SameAs == "" {
-				v.SameAs = o.SameAs
-			}
-			if v.SameAs == "-" {
-				v.SameAs = ""
-			}
-			byN[v.Finding] = v
-		}
-		merged := make([]verdict, 0, len(byN))
-		for _, v := range byN {
-			merged = append(merged, v)
-		}
-		sort.Slice(merged, func(i, j int) bool { return merged[i].Finding < merged[j].Finding })
+		merged := mergeVerdicts(old, vs)
 		err = writeJSON(filepath.Join(dir, name, "verdicts.json"), merged)
 		unlock()
 		if err != nil {
@@ -1292,4 +1269,49 @@ func contractKey(c *contract) string {
 		return c.Key
 	}
 	return c.Project
+}
+
+// mergeVerdicts is a professional's verdicts once a call's are added to the
+// earlier ones: a finding checked again takes its new verdict.
+func mergeVerdicts(old, vs []verdict) []verdict {
+	byN := map[int]verdict{}
+	for _, v := range append(old, vs...) {
+		v.Tag, _ = fixTag(v.Tag)
+		// Agreeing without repeating a corrected mark keeps it: to undo
+		// one, give the mark the finding was written with (UNMARKED for
+		// none). A false finding shows its own mark, but its correction
+		// is kept for a later check that isn't false.
+		if o, ok := byN[v.Finding]; ok && v.Tag == "" {
+			v.Tag = o.Tag
+		}
+		// A fold a check made (same_as) stays under the session's own
+		// verdict, unless it gives another, or "-" to part it.
+		if o, ok := byN[v.Finding]; ok && v.SameAs == "" {
+			v.SameAs = o.SameAs
+		}
+		// Agreeing with the same verdict adds nothing to its reason: a
+		// bare "agree with the verifier" keeps the reason given before,
+		// so the books still say why a finding is false.
+		if o, ok := byN[v.Finding]; ok && v.Verdict == o.Verdict && o.Why != "" && bareAgreement(v.Why) {
+			v.Why = o.Why
+		}
+		if v.SameAs == "-" {
+			v.SameAs = ""
+		}
+		byN[v.Finding] = v
+	}
+	merged := make([]verdict, 0, len(byN))
+	for _, v := range byN {
+		merged = append(merged, v)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Finding < merged[j].Finding })
+	return merged
+}
+
+// bareAgreement is a reason that only agrees with the check before it: empty,
+// or "agree", "agreed with the verifier.", "concur" and the like.
+var bareAgreementRE = regexp.MustCompile(`(?i)^\s*(i\s+)?(agree[sd]?|concur|same|ok|yes)(\s+with\s+(the\s+)?(verifier|check|verdict))?\s*[.!]?\s*$`)
+
+func bareAgreement(why string) bool {
+	return strings.TrimSpace(why) == "" || bareAgreementRE.MatchString(why)
 }

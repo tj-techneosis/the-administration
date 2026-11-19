@@ -254,7 +254,10 @@ changes" into CLI calls, and checks findings against the code afterwards.
   `verdicts.json` marked `by: verifier`, under every name a folded finding
   carries, batch by batch as each verifier finishes, so a verify stopped
   part way keeps what was done; a verdict the session recorded is never
-  replaced, and one it records later replaces the verifier's. The ledger
+  replaced, and one it records later replaces the verifier's. A later
+  verdict that only agrees (the same verdict, and a reason that's empty or
+  a bare "agree with the verifier") keeps the reason before it, so the
+  books still say why a finding was false. The ledger
   counts a finding folded into another's checked one as checked the same
   way. A verifier that fails keeps its
   folder (`.verify/N`) and its findings stay unchecked for the next run.
@@ -895,7 +898,10 @@ on `status --all --json` and the ledger (stats, which totals by
 professional, carries neither). `status ID --json` keeps
 the contract's own `changes`, where `base` is the ref as it was typed and
 `merge_base` the commit. Ledger lines pruned before 0.7.8 have neither
-`read_only` nor `base`.
+`read_only` nor `base`. Each `status --all --json` record with findings also
+carries `folded`: its findings, confirmed, likely and false once the same
+claim from several is folded into one, as its report counts them (the
+seats' counts are raw, and a cast with two of a kind counts a claim twice).
 The other half is the house itself: a branch can rewrite its critics'
 briefs and its hooks, so `--house-from REF` takes the house from a ref the
 person trusts. Whoever controls the reviewed repository can push tags and

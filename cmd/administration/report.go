@@ -1132,6 +1132,31 @@ func dissentText(ref, verdict, why string) string {
 // twice) into one. What's confirmed comes first, then what several found on
 // their own; what was found false goes last. It also returns, for each
 // professional, the findings folded into another's, as they wrote them.
+// foldedCount is a contract's findings as its report counts them: the same
+// claim from several folded into one, and the checks' verdicts on those.
+type foldedCount struct {
+	Findings  int `json:"findings"`
+	Confirmed int `json:"confirmed"`
+	Likely    int `json:"likely"`
+	False     int `json:"false"`
+}
+
+func foldedCounts(c *contract, dir string) *foldedCount {
+	all, _ := gatherFindings(c, dir)
+	n := &foldedCount{Findings: len(all)}
+	for _, f := range all {
+		switch f.verdict {
+		case "confirmed":
+			n.Confirmed++
+		case "likely":
+			n.Likely++
+		case "false":
+			n.False++
+		}
+	}
+	return n
+}
+
 func gatherFindings(c *contract, dir string) ([]*summed, map[string][]string) {
 	var all []*summed
 	folded := map[string][]string{}
