@@ -399,7 +399,7 @@ func keptRun(ctx context.Context, c *contract, dir string, s *status, save func(
 // removeKept takes a kept room out of the books and the rooms folder.
 func removeKept(c *contract, dir string) {
 	if rooms, err := roomsDir(); err == nil {
-		_ = os.RemoveAll(filepath.Join(rooms, c.ID))
+		_ = removeTree(filepath.Join(rooms, c.ID))
 	}
 	_ = os.RemoveAll(dir)
 }

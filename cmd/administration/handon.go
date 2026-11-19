@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -263,23 +261,35 @@ func resetRoom(ctx context.Context, c *contract, dir, name string, s *status, be
 	if before {
 		sides = append(sides, struct{ app, src, ports, mf, side string }{filepath.Join(s.Room, "before"), s.BeforeSrc, "ports-before", "room-before.json", "before"})
 	}
+	// With a hook runner, the room's copy's reset, as the hook account.
+	r, hr, err := runnerFor(s.Room)
+	if err != nil {
+		return fmt.Errorf("reset: %v", err)
+	}
 	for _, sd := range sides {
 		ports, _ := os.ReadFile(filepath.Join(pd, sd.ports))
 		rctx, cancel := context.WithTimeout(ctx, setupTimeout())
-		cmd := exec.Command(resetHook(c), sd.src, sd.app)
-		cmd.Dir = sd.src
+		hook, src, hdir := resetHook(c), sd.src, sd.src
 		if !isDir(sd.src) {
 			// The project's folder gone (a worktree removed): where
 			// teardown runs, its house's checkout.
-			cmd.Dir = hookDir(c)
+			hdir = hookDir(c)
 		}
 		env := roomEnv(c, name, sd.app, strings.TrimSpace(string(ports)), filepath.Join(pd, sd.mf), readTag(dir, name))
 		if sd.side == "before" {
 			env = append(beforeEnv(env, sd.src), "ADMINISTRATION_SIDE=before")
 		}
-		cmd.Env = env
+		if hr != nil {
+			main := ""
+			if sd.side == "before" {
+				main = sd.src
+			} else {
+				src = hr.main
+			}
+			hook, hdir, env = hr.hook("reset"), src, hr.env(env, filepath.Join(pd, sd.mf), main)
+		}
+		cmd := startHook(r, hook, []string{src, sd.app}, hdir, env)
 		cmd.Stdout, cmd.Stderr = logf, logf
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		fmt.Fprintf(logf, "administration: reset %s (%s)\n", sd.app, time.Now().UTC().Format(time.RFC3339))
 		if err := cmd.Start(); err != nil {
 			cancel()
@@ -294,6 +304,9 @@ func resetRoom(ctx context.Context, c *contract, dir, name string, s *status, be
 			}
 			return fmt.Errorf("the reset hook failed (%v); see %s", err, filepath.Join(pd, "reset.log"))
 		}
+	}
+	if hr != nil {
+		hr.papersBack(pd)
 	}
 	for _, d := range []string{"desk", "tmp"} {
 		p := filepath.Join(s.Room, d)

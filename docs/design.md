@@ -786,6 +786,22 @@ changes" into CLI calls, and checks findings against the code afterwards.
   network and the project's tools, which professionals must never have. So
   the Administration does it, and holds the result to the Rules before
   anyone enters.
+- **Or as an account of its own** (`runner.go`, `docs/hook-runner.md`).
+  The hooks run the branch's code and its dependencies', and the person's
+  account holds their sign-ins, keys and the books. A hook runner, set in
+  the machine's config (never the project's, which the branch could
+  change), runs every room hook through a command prefix as another
+  account: on a copy of the project made in the room (the checkout is in
+  the person's home, and a checkout a hook can write is one whose
+  `.git/hooks` it can write), the room's folders given to a group the two
+  accounts share, the hook contract's variables on the command line (sudo
+  clears an environment) with `HOME` the room's and nothing naming the
+  person's home. What it leaves running can only be stopped as that
+  account, so a copy of the binary in the rooms folder is run through the
+  runner to clear its tagged processes. The runner is tried first (`id
+  -u` must work, unasked, and be neither the person nor root), and
+  anything wrong fails the room with no hook run: a misconfigured runner
+  is never taken for none.
 - **Seed data only.** The manifest declares the data, and anything but
   `seed` is refused. It's a declaration, so the hook is trusted to tell the
   truth; the README asks for it in plain words. Equipment is held to the
@@ -986,7 +1002,7 @@ which are time. Anyone who wants to track usage can read them from
 | `ADMINISTRATION_RESTART_TIMEOUT` | 10m | an equipment's restart hook's limit |
 | `ADMINISTRATION_DEVICE_PORTS` | 5620-5680 | the emulator console ports kept for rooms, handed to equipment hooks |
 | `ADMINISTRATION_TOOLS` | `~/.local/share/administration/tools` | the pinned Playwright MCP, from `install.sh` |
-| `ADMINISTRATION_CONFIG` | `~/.config/administration` | the machine's own professionals and hooks |
+| `ADMINISTRATION_CONFIG` | `~/.config/administration` | the machine's own professionals and hooks, and `config.toml` (the hook runner) |
 | `ADMINISTRATION_PROJECTS` | `$ADMINISTRATION_CONFIG/projects` | houses kept on the machine, at `<host>/<owner>/<repo>` of each project's origin |
 | `ADMINISTRATION_POLL`, `_CLOSE_GRACE`, `_COIN` | 2s, 30s, 1m | test knobs |
 | `ADMINISTRATION_MEMINFO` | | a test knob: a file in `/proc/meminfo`'s form read as the machine's memory, on any system |

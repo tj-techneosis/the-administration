@@ -1072,10 +1072,23 @@ func awaitRoom(ctx context.Context, c *contract, name string, s *status, save fu
 // shell command, the last first, each on its own so one that fails doesn't
 // stop the rest. It runs at every teardown, whether or not the setup got as
 // far as its manifest, and once: the file goes after.
-func runCleanup(c *contract, file string, env []string, logf *os.File) {
+func runCleanup(c *contract, room, file string, env []string, logf *os.File) {
 	b, err := os.ReadFile(file)
 	if err != nil {
 		return
+	}
+	// With a hook runner, the lines (the branch's) run as the hook
+	// account, in the room's copy, or not at all.
+	r, hr, rerr := runnerFor(room)
+	dir := hookDir(c)
+	if rerr != nil {
+		if logf != nil {
+			fmt.Fprintf(logf, "administration: cleanup not run: %v\n", rerr)
+		}
+		return
+	}
+	if hr != nil {
+		env, dir = hr.env(env, "", ""), hr.main
 	}
 	var cmds []string
 	for _, l := range strings.Split(string(b), "\n") {
@@ -1086,14 +1099,11 @@ func runCleanup(c *contract, file string, env []string, logf *os.File) {
 	ctx, cancel := context.WithTimeout(context.Background(), teardownLimit)
 	defer cancel()
 	for i := len(cmds) - 1; i >= 0 && ctx.Err() == nil; i-- {
-		cmd := exec.Command("/bin/sh", "-c", cmds[i])
-		cmd.Dir = hookDir(c)
-		cmd.Env = env
+		cmd := startHook(r, "/bin/sh", []string{"-c", cmds[i]}, dir, env)
 		if logf != nil {
 			fmt.Fprintf(logf, "administration: cleanup: %s\n", cmds[i])
 			cmd.Stdout, cmd.Stderr = logf, logf
 		}
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if cmd.Start() == nil {
 			if err := waitGroup(ctx, cmd); err != nil && logf != nil {
 				fmt.Fprintf(logf, "administration: cleanup failed: %v\n", err)

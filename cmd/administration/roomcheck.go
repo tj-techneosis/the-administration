@@ -137,7 +137,7 @@ func cmdRoomCheck(args []string) error {
 	endSetupTurn()
 	teardown(c, dir, name, &s)
 	if s.Room != "" {
-		_ = os.RemoveAll(filepath.Dir(s.Room))
+		_ = removeTree(filepath.Dir(s.Room))
 	}
 	if berr != nil && ctx.Err() != nil {
 		if bTail != "" {

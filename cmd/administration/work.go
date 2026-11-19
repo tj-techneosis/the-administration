@@ -493,11 +493,31 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if c.Commit != "" {
 		head, _ = git(c.Project, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
 	}
-	cmd := exec.Command(filepath.Join(contractHouse(c), "setup"), c.Project, app)
-	cmd.Dir = c.Project
-	cmd.Env = append(roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name)), buildEnv(s)...)
+	env := append(roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name)), buildEnv(s)...)
+	hook, main := filepath.Join(contractHouse(c), "setup"), c.Project
+	// With a hook runner, the setup runs as the hook account, on the
+	// room's copy of the project (runner.go), and nothing of the branch
+	// runs before the runner has shown it works.
+	r, err := roomRunner()
+	if err != nil {
+		return nil, err
+	}
+	var hr *hookRoom
+	if r != nil {
+		if hr, err = prepareHookRoom(r, c, room); err != nil {
+			return nil, err
+		}
+		hook, main = hr.hook("setup"), hr.main
+		if env, err = hr.withBuild(r, hr.env(env, mf, ""), s.BuildArtifact, "after"); err != nil {
+			return nil, err
+		}
+		if err := r.check([]string{app, hr.papers, hr.home, main}, []string{hook}); err != nil {
+			return nil, err
+		}
+		defer hr.papersBack(pd)
+	}
+	cmd := startHook(r, hook, []string{main, app}, main, env)
 	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("setup: %v", err)
 	}
@@ -515,6 +535,9 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		return nil, fmt.Errorf("setup failed (%v); see %s", err, filepath.Join(pd, "setup.log"))
 	}
 
+	if hr != nil {
+		hr.papersBack(pd)
+	}
 	b, err := os.ReadFile(mf)
 	if err != nil {
 		return nil, errors.New("setup finished without writing $ADMINISTRATION_MANIFEST")
@@ -542,6 +565,10 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 		if head != "" && head != c.Commit {
 			rb.Note = fmt.Sprintf("the checkout moved to %s while the room was built; the setup was given the build hook's build of %s", short(head), short(c.want()))
 		}
+	case rb.Commit == "" && hr != nil:
+		// Built from the room's copy, made at the contract's commit with
+		// the work as it was placed, whatever the checkout has done since.
+		rb.Commit, rb.withWork, head = c.want(), true, c.want()
 	case rb.Commit == "" && head == c.Commit && c.Build == "":
 		rb.Commit = c.Commit
 		// Built from the checkout, uncommitted work and all: the work placed,
@@ -587,12 +614,20 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 
 // waitGroup waits for cmd; if ctx ends first, the whole group is stopped.
 func waitGroup(ctx context.Context, cmd *exec.Cmd) error {
+	defer runnerTags.Delete(cmd)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		// Started through the hook runner: its processes are the hook
+		// account's, which only that account can stop.
+		if tag, ok := runnerTags.Load(cmd); ok {
+			if r, err := configuredRunner(); r != nil && err == nil {
+				r.reap(tag.(string))
+			}
+		}
 		killGroup(cmd.Process.Pid, done)
 		return ctx.Err()
 	}
@@ -814,7 +849,20 @@ func teardown(c *contract, dir, name string, s *status) {
 	house := contractHouse(c)
 	hook := filepath.Join(house, "teardown")
 	roomed := ci == nil || !ci.NoBrowser && ci.Kind != "critic"
-	if _, err := os.Stat(hook); err != nil && roomed && s.Room != "" && !isDir(house) {
+	// With a hook runner, the teardown is the room's copy's, run as the
+	// hook account, or not run at all.
+	r, hr, rerr := runnerFor(s.Room)
+	switch {
+	case hr != nil:
+		house, hook = hr.house, hr.hook("teardown")
+		hr.papersBack(pd)
+	case rerr != nil:
+		hook = ""
+		if roomed && s.Room != "" && !errors.Is(rerr, errNoHookCopy) {
+			s.Leftovers = fmt.Sprintf("its teardown wasn't run: %v, so whatever its setup started outside the room (a docker compose, a database) may still be running", rerr)
+		}
+	}
+	if _, err := os.Stat(hook); err != nil && hook != "" && roomed && s.Room != "" && !isDir(house) {
 		// The house can't be found: the project gone with it (a worktree
 		// removed, on a contract placed before contracts kept their house;
 		// a house kept on the machine is found through the project), or a
@@ -832,11 +880,13 @@ func teardown(c *contract, dir, name string, s *status) {
 		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		ctx, cancel := context.WithTimeout(context.Background(), teardownLimit)
 		app := filepath.Join(s.Room, "app")
-		cmd := exec.Command(hook, c.Project, app)
-		cmd.Dir = hookDir(c)
-		cmd.Env = roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room.json"), readTag(dir, name))
+		mf := filepath.Join(pd, "room.json")
+		env, main, hdir := roomEnv(c, name, app, strings.TrimSpace(string(ports)), mf, readTag(dir, name)), c.Project, hookDir(c)
+		if hr != nil {
+			env, main, hdir = hr.env(env, mf, ""), hr.main, hr.main
+		}
+		cmd := startHook(r, hook, []string{main, app}, hdir, env)
 		cmd.Stdout, cmd.Stderr = logf, logf
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if cmd.Start() == nil {
 			_ = waitGroup(ctx, cmd)
 		}
@@ -856,7 +906,7 @@ func teardown(c *contract, dir, name string, s *status) {
 		if s.Room != "" {
 			app = filepath.Join(s.Room, "app")
 		}
-		runCleanup(c, f, roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room.json"), readTag(dir, name)), logf)
+		runCleanup(c, s.Room, f, roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room.json"), readTag(dir, name)), logf)
 		if logf != nil {
 			logf.Close()
 		}

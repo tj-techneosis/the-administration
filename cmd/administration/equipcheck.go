@@ -97,7 +97,7 @@ func cmdEquipmentCheck(args []string) error {
 	defer func() {
 		teardown(c, dir, name, &s)
 		if s.Room != "" {
-			_ = os.RemoveAll(filepath.Dir(s.Room))
+			_ = removeTree(filepath.Dir(s.Room))
 		}
 		if s.Leftovers != "" {
 			fmt.Printf("After teardown: %s\n", s.Leftovers)

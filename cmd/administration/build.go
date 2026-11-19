@@ -348,7 +348,77 @@ func (e hookFailed) Unwrap() error { return e.error }
 // runBuild builds sha into dir/out from a clean checkout in dir/src, which
 // goes once it's done: what the hook keeps is what it put in out.
 func runBuild(ctx context.Context, c *contract, hook, sha, dir string) (string, error) {
-	src, out := filepath.Join(dir, "src"), filepath.Join(dir, "out")
+	// With a hook runner, the build is made as the hook account, in a
+	// folder of the rooms' (the books are this account's alone), and what
+	// it put in out is copied into the books after.
+	r, err := roomRunner()
+	if err != nil {
+		return "", hookFailed{err}
+	}
+	if r != nil {
+		return runBuildAs(ctx, r, c, hook, sha, dir)
+	}
+	return runBuildIn(ctx, nil, c, hook, sha, dir, dir, nil)
+}
+
+// runBuildAs is runBuild through the hook runner: built in a staging
+// folder in the rooms, the hook the house's copied there with it, then
+// out copied into dir.
+func runBuildAs(ctx context.Context, r *hookRunner, c *contract, hook, sha, dir string) (string, error) {
+	rooms, err := roomsDir()
+	if err != nil {
+		return "", err
+	}
+	stage, err := os.MkdirTemp(rooms, ".build-")
+	if err != nil {
+		return "", err
+	}
+	defer removeTree(stage)
+	if err := r.share(stage, true); err != nil {
+		return "", err
+	}
+	home := filepath.Join(stage, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return "", err
+	}
+	if err := r.share(home, true); err != nil {
+		return "", err
+	}
+	hooks := filepath.Join(stage, "house")
+	if out, err := exec.Command("cp", "-a", contractHouse(c), hooks).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("the house, for the build: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if err := r.shareTree(hooks); err != nil {
+		return "", err
+	}
+	staged, err := runBuildIn(ctx, r, c, filepath.Join(hooks, filepath.Base(hook)), sha, stage, dir, &stagedBuild{home: home, house: hooks})
+	if err != nil {
+		return "", err
+	}
+	// What the build made, into the books as this account's own: a file
+	// it made that this account can't read (the group's read taken off)
+	// is a build that can't be kept.
+	out := filepath.Join(dir, "out")
+	_ = removeTree(out)
+	if b, err := exec.Command("cp", "-a", filepath.Join(stage, "out"), out).CombinedOutput(); err != nil {
+		return "", hookFailed{fmt.Errorf("the build hook's build can't be copied out of its folder (made unreadable to the group %q?): %v: %s", r.Group, err, strings.TrimSpace(string(b)))}
+	}
+	rel, _ := filepath.Rel(filepath.Join(stage, "out"), staged)
+	artifact := filepath.Join(out, rel)
+	if err := os.WriteFile(filepath.Join(dir, "artifact"), []byte(artifact+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return artifact, nil
+}
+
+// stagedBuild is where a build through the hook runner has its home and
+// its copy of the house.
+type stagedBuild struct{ home, house string }
+
+// runBuildIn builds sha into at/out from a checkout in at/src, with logs
+// and the artifact's record in dir.
+func runBuildIn(ctx context.Context, r *hookRunner, c *contract, hook, sha, at, dir string, st *stagedBuild) (string, error) {
+	src, out := filepath.Join(at, "src"), filepath.Join(at, "out")
 	_ = os.RemoveAll(src)
 	_ = os.RemoveAll(out)
 	if err := os.MkdirAll(out, 0o700); err != nil {
@@ -384,26 +454,42 @@ func runBuild(ctx context.Context, c *contract, hook, sha, dir string) (string, 
 	bctx, cancel := context.WithTimeout(ctx, buildTimeout())
 	defer cancel()
 	var stdout bytes.Buffer
-	cmd := exec.Command(hook, commit, out)
-	cmd.Dir = work
-	cmd.Env = append(setupEnv(c.Project),
-		"ADMINISTRATION_PROJECT="+c.Project,
-		"ADMINISTRATION_HOUSE="+contractHouse(c),
+	project, house := c.Project, contractHouse(c)
+	if st != nil {
+		project, house = work, st.house
+	}
+	env := append(setupEnv(c.Project),
+		"ADMINISTRATION_PROJECT="+project,
+		"ADMINISTRATION_HOUSE="+house,
 		"ADMINISTRATION_SRC="+work,
 		"ADMINISTRATION_BUILD_COMMIT="+commit,
 		"ADMINISTRATION_BUILD_OUT="+out,
 		// The checkout has no .git: a script that asks git for its commit
 		// gets an error, not the repository the books happen to be in.
 		// ADMINISTRATION_BUILD_COMMIT is the commit.
-		"GIT_CEILING_DIRECTORIES="+dir,
+		"GIT_CEILING_DIRECTORIES="+at,
 	)
 	if uncommittedWork != "" {
 		// The checkout has the uncommitted work on top: a build that
 		// stamps its commit can say so.
-		cmd.Env = append(cmd.Env, "ADMINISTRATION_BUILD_WORK="+uncommittedWork)
+		env = append(env, "ADMINISTRATION_BUILD_WORK="+uncommittedWork)
 	}
+	if r != nil {
+		// Its own tag, so a build stopped for its time is stopped as the
+		// hook account.
+		if idRE.MatchString(c.ID) {
+			env = tagEnv(env, newTag(c.ID, "build"))
+		}
+		env = hookEnv(env, st.home)
+		if err := r.shareTree(at); err != nil {
+			return "", err
+		}
+		if err := r.check([]string{out, work, st.home}, []string{hook}); err != nil {
+			return "", hookFailed{err}
+		}
+	}
+	cmd := startHook(r, hook, []string{commit, out}, work, env)
 	cmd.Stdout, cmd.Stderr = io.MultiWriter(&stdout, logf), logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return "", hookFailed{fmt.Errorf("the build hook: %v", err)}
 	}

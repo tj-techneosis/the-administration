@@ -297,6 +297,9 @@ func run(args []string) int {
 		// Internal: open a gate on the given ports and hold it until stdin
 		// closes. For tests/live/gate_probe.py.
 		err = gateCmd(args[1:])
+	case "_reap":
+		// Internal: run as the hook account, clears its processes by tag.
+		err = cmdReap(args[1:])
 	case "_work":
 		// Internal: the detached worker for one professional.
 		if len(args) != 3 {

@@ -140,8 +140,17 @@ func taggedAlive(pid int, tag string) bool {
 }
 
 // clearTagged stops every live process carrying the tag except the caller:
-// SIGTERM, a moment to go, then SIGKILL for whatever stayed.
+// SIGTERM, a moment to go, then SIGKILL for whatever stayed. With a hook
+// runner, the hook account's are stopped too, as that account.
 func clearTagged(tag string, except ...int) {
+	clearTaggedHere(tag, except...)
+	if r, err := configuredRunner(); r != nil && err == nil {
+		r.reap(tag)
+	}
+}
+
+// clearTaggedHere is clearTagged for this account's processes only.
+func clearTaggedHere(tag string, except ...int) {
 	skip := map[int]bool{os.Getpid(): true}
 	for _, p := range except {
 		skip[p] = true

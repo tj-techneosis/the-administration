@@ -473,6 +473,17 @@ project. Each professional is a separate headless Claude Code session:
   macOS and `/var/tmp/administration-<uid>` on Linux: one per account, so two
   accounts on one machine never share. The rooms folder must be a real
   folder that's yours, not a link.
+- **a room's hooks can run as an account of their own.** Setup, teardown,
+  reset, the build hook and the cleanup lines build the branch under
+  review, and so run its code and its dependencies' install scripts. By
+  default they run as you. With a hook runner in the machine's config
+  (`[hooks] runner = ["sudo", "-n", "-u", "<hooks account>", "--"]` and
+  the `group` you share), each runs as that account instead, on a copy of
+  the project in the room, with the room's own `HOME` and nothing that
+  names yours: one bad package can't read your keys and sign-ins or touch
+  the books. A runner that can't run a command as another account fails
+  the room before any hook runs; it never falls back to you. The setup, and
+  why the Docker group would undo it, are in `docs/hook-runner.md`.
 - **cleanup only touches what's provably the room's**: processes in the
   room's process groups that work in or name the room's folders. A port
   still answering after teardown is reported, not hunted down.

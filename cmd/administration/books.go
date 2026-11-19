@@ -854,7 +854,7 @@ func cmdPrune(args []string) error {
 					continue
 				}
 				if r := keptRooms(c.ID); r != "" {
-					_ = os.RemoveAll(r)
+					_ = removeTree(r)
 				}
 				removed++
 				continue

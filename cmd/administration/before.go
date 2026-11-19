@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -102,14 +101,38 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 	defer cancel()
 	// The hook is the project's current one: an older checkout may not have
 	// it, and it's the person's to trust either way.
-	cmd := exec.Command(filepath.Join(contractHouse(c), "setup"), src, app)
-	cmd.Dir = src
-	cmd.Env = append(beforeEnv(roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name)), src), "ADMINISTRATION_SIDE=before")
+	env := append(beforeEnv(roomEnv(c, ci.Name, app, ports, mf, readTag(filepath.Dir(pd), ci.Name)), src), "ADMINISTRATION_SIDE=before")
 	// The build hook's build of the merge base, when the house has one:
 	// the setup installs it instead of building the app in every room.
-	cmd.Env = append(cmd.Env, buildEnv(&status{BuildArtifact: s.BeforeBuildArtifact, BuildCommit: s.BeforeBuildCommit})...)
+	env = append(env, buildEnv(&status{BuildArtifact: s.BeforeBuildArtifact, BuildCommit: s.BeforeBuildCommit})...)
+	hook := filepath.Join(contractHouse(c), "setup")
+	// With a hook runner, as the hook account, the clone given to it.
+	r, err := roomRunner()
+	if err != nil {
+		return nil, err
+	}
+	if r != nil {
+		hr, err := prepareHookRoom(r, c, s.Room)
+		if err != nil {
+			return nil, err
+		}
+		if err := r.shareTree(clone); err != nil {
+			return nil, err
+		}
+		if err := r.share(app, true); err != nil {
+			return nil, err
+		}
+		hook = hr.hook("setup")
+		if env, err = hr.withBuild(r, hr.env(env, mf, src), s.BeforeBuildArtifact, "before"); err != nil {
+			return nil, err
+		}
+		if err := r.check([]string{app, hr.papers, hr.home, src}, []string{hook}); err != nil {
+			return nil, err
+		}
+		defer hr.papersBack(pd)
+	}
+	cmd := startHook(r, hook, []string{src, app}, src, env)
 	cmd.Stdout, cmd.Stderr = logf, logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("before setup: %v", err)
 	}
@@ -123,6 +146,9 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 			return nil, ctx.Err()
 		}
 		return nil, fmt.Errorf("the before app's setup failed (%v); see %s", err, filepath.Join(pd, "setup-before.log"))
+	}
+	if hr := hookRoomOf(s.Room); r != nil {
+		hr.papersBack(pd)
 	}
 	b, err := os.ReadFile(mf)
 	if err != nil {
@@ -185,7 +211,7 @@ func teardownBefore(c *contract, dir, name string, s *status) {
 			if s.BeforeSrc != "" {
 				env = beforeEnv(env, s.BeforeSrc)
 			}
-			runCleanup(c, f, env, logf)
+			runCleanup(c, s.Room, f, env, logf)
 			if logf != nil {
 				logf.Close()
 			}
@@ -193,25 +219,33 @@ func teardownBefore(c *contract, dir, name string, s *status) {
 		if s.BeforeSrc == "" {
 			return
 		}
-		_ = os.RemoveAll(s.BeforeSrc)
+		_ = removeTree(s.BeforeSrc)
 		if s.Room != "" {
-			_ = os.RemoveAll(filepath.Join(s.Room, "before-src")) // the whole clone, for a subfolder's
+			_ = removeTree(filepath.Join(s.Room, "before-src")) // the whole clone, for a subfolder's
 		}
 	}()
 	if s.BeforeSrc == "" {
 		return
 	}
 	hook := filepath.Join(contractHouse(c), "teardown")
-	if st, err := os.Stat(hook); err == nil && st.Mode()&0o111 != 0 {
+	r, hr, rerr := runnerFor(s.Room)
+	if hr != nil {
+		hook = hr.hook("teardown")
+		hr.papersBack(pd)
+	} else if rerr != nil {
+		hook = ""
+	}
+	if st, err := os.Stat(hook); hook != "" && err == nil && st.Mode()&0o111 != 0 {
 		ports, _ := os.ReadFile(filepath.Join(pd, "ports-before"))
 		logf, _ := os.OpenFile(filepath.Join(pd, "teardown.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		ctx, cancel := context.WithTimeout(context.Background(), teardownLimit)
 		app := filepath.Join(s.Room, "before")
-		cmd := exec.Command(hook, s.BeforeSrc, app)
-		cmd.Dir = hookDir(c)
-		cmd.Env = beforeEnv(roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room-before.json"), readTag(dir, name)), s.BeforeSrc)
+		env, hdir := beforeEnv(roomEnv(c, name, app, strings.TrimSpace(string(ports)), filepath.Join(pd, "room-before.json"), readTag(dir, name)), s.BeforeSrc), hookDir(c)
+		if hr != nil {
+			env, hdir = hr.env(env, "", s.BeforeSrc), hr.main
+		}
+		cmd := startHook(r, hook, []string{s.BeforeSrc, app}, hdir, env)
 		cmd.Stdout, cmd.Stderr = logf, logf
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if cmd.Start() == nil {
 			_ = waitGroup(ctx, cmd)
 		}

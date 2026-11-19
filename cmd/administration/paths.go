@@ -217,7 +217,13 @@ func roomsDir() (string, error) {
 	if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Getuid() {
 		return "", refusal{fmt.Sprintf("the rooms (%s) belong to someone else", d)}
 	}
-	if err := os.Chmod(d, 0o700); err != nil {
+	// With a hook runner, the hook account's group may pass through to its
+	// rooms (runner.go); nobody else may.
+	if r, err := configuredRunner(); r != nil && err == nil {
+		if err := r.share(d, false); err != nil {
+			return "", err
+		}
+	} else if err := os.Chmod(d, 0o700); err != nil {
 		return "", err
 	}
 	if err := outsideHome(d); err != nil {

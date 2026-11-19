@@ -62,6 +62,12 @@ var eqLine = regexp.MustCompile(`^([A-Z][A-Z0-9_]{0,40})=(.*)$`)
 // outside any wall, like the house's setup hook.
 func startEquipment(ctx context.Context, c *contract, ci *castItem, pd, tag string, s *status, save func()) (eqVars, error) {
 	vars := eqVars{}
+	// Equipment's hooks, drivers and declared programs are the project's
+	// code too, and don't run through the hook runner yet: with one
+	// configured they don't run at all, rather than as this account.
+	if r, err := configuredRunner(); len(ci.Uses) > 0 && (r != nil || err != nil) {
+		return nil, refusal{"equipment doesn't run through the hook runner yet, so with one configured (docs/hook-runner.md) a professional that uses equipment can't be given a room; nothing of the equipment was run"}
+	}
 	for _, name := range ci.Uses {
 		eq, err := checkEquipment(c.Project, name)
 		if err != nil {
@@ -320,6 +326,9 @@ func equipmentEnv(c *contract, ci *castItem, name string, s *status, v map[strin
 // stopEquipment runs each piece's teardown; what the setups left running
 // carries the room's setup tag and is cleared with the rest of the room.
 func stopEquipment(c *contract, ci *castItem, pd, tag string, s *status) {
+	if r, err := configuredRunner(); r != nil || err != nil {
+		return // none was started (startEquipment)
+	}
 	for _, name := range ci.Uses {
 		eq, err := checkEquipment(c.Project, name)
 		if err != nil || eq.Teardown == "" {

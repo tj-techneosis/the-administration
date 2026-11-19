@@ -441,7 +441,7 @@ func sweepChecks() {
 				s := readStatus(dir, p.Name)
 				teardown(c, dir, p.Name, &s)
 				if s.Room != "" {
-					_ = os.RemoveAll(filepath.Dir(s.Room))
+					_ = removeTree(filepath.Dir(s.Room))
 				}
 			}
 		}
@@ -1626,14 +1626,14 @@ func cmdClose(args []string) error {
 	}
 	if !f.has("keep") {
 		if rooms, err := roomsDir(); err == nil {
-			_ = os.RemoveAll(filepath.Join(rooms, c.ID))
+			_ = removeTree(filepath.Join(rooms, c.ID))
 		}
 		// Each room where it really was: a contract placed before the
 		// rooms moved (one folder per account) has them in the old one.
 		for _, p := range c.Professionals {
 			// A room is <rooms>/<contract>/rN.
 			if s := readStatus(dir, p.Name); s.Room != "" && filepath.Base(filepath.Dir(s.Room)) == c.ID {
-				_ = os.RemoveAll(filepath.Dir(s.Room))
+				_ = removeTree(filepath.Dir(s.Room))
 			}
 		}
 	}
