@@ -502,6 +502,11 @@ func buildRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *sta
 	if err != nil {
 		return nil, err
 	}
+	if r != nil {
+		if err := passEnvRefusal(c.Project); err != nil {
+			return nil, err
+		}
+	}
 	var hr *hookRoom
 	if r != nil {
 		if hr, err = prepareHookRoom(r, c, room); err != nil {

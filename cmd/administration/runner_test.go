@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -377,5 +378,48 @@ func TestTeardownRunsThroughTheHookRunner(t *testing.T) {
 	}
 	if n := strings.Count(readT(t, log), " administration-hook "); n != 2 {
 		t.Fatalf("%d commands through the runner, want the teardown and the cleanup:\n%s", n, readT(t, log))
+	}
+}
+
+// With a runner set, a house that passes a secret-named variable is refused
+// before any hook runs, and hookEnv never hands such a name on.
+func TestASecretPassEnvIsRefusedUnderAHookRunner(t *testing.T) {
+	project := t.TempDir()
+	adm := filepath.Join(project, ".administration")
+	if err := os.MkdirAll(adm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adm, "roster.toml"), []byte("[setup]\npass_env = [\"GH_TOKEN\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if k := secretPassEnv(project); k != "GH_TOKEN" {
+		t.Fatalf("secretPassEnv = %q, want GH_TOKEN", k)
+	}
+	if err := passEnvRefusal(project); err == nil || !strings.Contains(err.Error(), "no hook was run") {
+		t.Fatalf("passEnvRefusal = %v, want a refusal naming no hook run", err)
+	}
+	for _, k := range []string{"GH_TOKEN", "STRIPE_SECRET", "DB_DSN", "CLAUDE_CODE_OAUTH_TOKEN", "SSH_AUTH_SOCK", "MY_API_KEY", "PGPASSWORD"} {
+		if !secretNameRE.MatchString(k) {
+			t.Errorf("%s isn't treated as a secret", k)
+		}
+	}
+	for _, k := range []string{"NODE_ENV", "PORT", "DATABASE_PORT"} {
+		if secretNameRE.MatchString(k) {
+			t.Errorf("%s is treated as a secret", k)
+		}
+	}
+	out := hookEnv([]string{"GH_TOKEN=x", "NODE_ENV=test", "PATH=/usr/bin"}, "/rooms/r/home")
+	for _, kv := range out {
+		if strings.HasPrefix(kv, "GH_TOKEN=") {
+			t.Fatalf("hookEnv passed GH_TOKEN on: %v", out)
+		}
+	}
+	if !slices.Contains(out, "NODE_ENV=test") {
+		t.Fatalf("hookEnv dropped NODE_ENV: %v", out)
+	}
+
+	clean := t.TempDir()
+	if err := passEnvRefusal(clean); err != nil {
+		t.Fatalf("a house with no pass_env was refused: %v", err)
 	}
 }

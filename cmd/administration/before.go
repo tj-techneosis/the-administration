@@ -112,6 +112,11 @@ func beforeRoom(ctx context.Context, c *contract, ci *castItem, pd string, s *st
 		return nil, err
 	}
 	if r != nil {
+		if err := passEnvRefusal(c.Project); err != nil {
+			return nil, err
+		}
+	}
+	if r != nil {
 		hr, err := prepareHookRoom(r, c, s.Room)
 		if err != nil {
 			return nil, err

@@ -356,6 +356,11 @@ func runBuild(ctx context.Context, c *contract, hook, sha, dir string) (string, 
 		return "", hookFailed{err}
 	}
 	if r != nil {
+		if err := passEnvRefusal(c.Project); err != nil {
+			return "", hookFailed{err}
+		}
+	}
+	if r != nil {
 		return runBuildAs(ctx, r, c, hook, sha, dir)
 	}
 	return runBuildIn(ctx, nil, c, hook, sha, dir, dir, nil)

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -213,16 +214,40 @@ func (r *hookRunner) command(hook string, args []string, dir string, env []strin
 // so a hook stopped for its time limit is stopped as the hook account.
 var runnerTags sync.Map
 
+// secretNameRE is a variable name that looks like it holds a secret: none
+// of these reaches the hook account, whatever the house's pass_env says.
+var secretNameRE = regexp.MustCompile(`(?i)(_TOKEN$|_KEY$|_SECRET$|PASSWORD|_DSN$|OAUTH|^GH_|^GITHUB_|^ANTHROPIC_|^CLAUDE_|^SSH_AUTH_SOCK$)`)
+
+// secretPassEnv is the first name in the house's [setup] pass_env that
+// looks like a secret, or "". With a hook runner set, such a name is a room
+// failure before any hook runs: the hook account is meant to hold no keys.
+func secretPassEnv(project string) string {
+	for _, k := range loadProjectConfig(project).Setup.PassEnv {
+		if secretNameRE.MatchString(k) {
+			return k
+		}
+	}
+	return ""
+}
+
+// passEnvRefusal is the refusal for a secret-named pass_env under a runner.
+func passEnvRefusal(project string) error {
+	if k := secretPassEnv(project); k != "" {
+		return refusal{fmt.Sprintf("the house's [setup] pass_env names %s, which looks like a secret, and a hook runner is set: the hook account holds no keys, so it isn't passed; no hook was run", k)}
+	}
+	return nil
+}
+
 // hookEnv is a hook's environment for the hook account: the contract's
 // variables, HOME the room's own, and nothing that names this account's
-// home.
+// home or looks like a secret.
 func hookEnv(env []string, home string) []string {
 	own, _ := os.UserHomeDir()
 	drop := map[string]bool{"HOME": true, "USER": true, "LOGNAME": true, "SHELL": true, "TMPDIR": true, "MAIL": true}
 	var out []string
 	for _, kv := range env {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || drop[k] || strings.HasPrefix(k, "MISE_") || strings.HasPrefix(k, "__MISE_") || strings.HasPrefix(k, "XDG_") {
+		if !ok || drop[k] || strings.HasPrefix(k, "MISE_") || strings.HasPrefix(k, "__MISE_") || strings.HasPrefix(k, "XDG_") || secretNameRE.MatchString(k) {
 			continue
 		}
 		if k == "PATH" {
