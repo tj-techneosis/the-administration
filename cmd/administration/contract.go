@@ -1936,6 +1936,9 @@ func statusAll(f *flags) error {
 		Rooms    string              `json:"rooms,omitempty"`
 		Seats    []ledgerLine        `json:"seats"`
 		Checking map[string]spent `json:"checking"`
+		// The findings once the same claim from several is folded into one,
+		// as the report counts them; the seats' own counts are raw.
+		Folded *foldedCount `json:"folded,omitempty"`
 	}
 	out := []record{}
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
@@ -1948,8 +1951,14 @@ func statusAll(f *flags) error {
 			PlacedBy: c.PlacedBy, ClosedAt: c.ClosedAt, Version: c.Version, Commit: c.want(), Branch: c.Branch, PR: c.PR,
 			Ticket: c.Ticket, RequestedBy: c.RequestedBy, Release: c.Release, Office: c.Office, OS: c.OS, ReadOnly: c.ReadOnly, Base: c.base(), HouseFrom: c.HouseFrom,
 			Data: c.Data, Rooms: c.Rooms, Seats: []ledgerLine{}, Checking: contractSpend(dir)}
+		raw := 0
 		for _, p := range c.Professionals {
-			r.Seats = append(r.Seats, lineFor(c, dir, p))
+			l := lineFor(c, dir, p)
+			raw += l.Findings
+			r.Seats = append(r.Seats, l)
+		}
+		if raw > 0 {
+			r.Folded = foldedCounts(c, dir)
 		}
 		out = append(out, r)
 	}
