@@ -450,7 +450,7 @@ commands = [".administration/run"]
 
     def hold(self, body):
         path = os.path.join(self.tmp, "hold")
-        write(path, body)
+        write(path, body + "# end\n")
         return path
 
     def copies(self):
@@ -503,6 +503,8 @@ commands = [".administration/run"]
         self.assertEqual(self.copies(), [self.head()], "held: kept")
         self.assertIn("pruned nothing", self.cli("prune", "--older", "0h", "--hold", self.hold(f"{name}\n"), check=1).stderr)
         self.assertIn("pruned nothing", self.cli("prune", "--older", "0h", "--hold", os.path.join(self.tmp, "nope"), check=1).stderr)
+        write(os.path.join(self.tmp, "cut"), f"{name} some-other-branch\n")  # no "# end": cut short
+        self.assertIn("cut short", self.cli("prune", "--older", "0h", "--hold", os.path.join(self.tmp, "cut"), check=1).stderr)
         self.assertEqual(self.copies(), [self.head()], "a broken hold list touches nothing")
         self.cli("prune", "--older", "0h", "--hold", self.hold(f"{name} some-other-branch\n"))
         self.assertEqual(self.copies(), [])

@@ -608,16 +608,22 @@ already read the findings out of) it takes only those, once older than
 stops, nothing is lost; a FILE it can't read prunes nothing.
 The copies of the project critics and verifiers read stay until a
 change is live: close and verify leave them, and only `prune --hold FILE`
-removes them. FILE is the owner's hold list, `<repo> <branch>` a line
-(the repo a name or `org/repo`; blank lines and `#` comments ignored), the
-changes not live yet: a closed contract whose project (by its folder's
-name or the books' key) and branch match a line keeps its copies, with
-and without the uncommitted work, and is never removed past `--keep`.
-The others go, once no open contract is on them; a copy with uncommitted
-work, which can't be made again, is kept until its contract is reviewed
-or old all the same. Without `--hold`, prune removes no copy at all and
-says so; a FILE it can't read, or a line that isn't a repo and a branch,
-prunes nothing, so a half list never lets a held copy go. An empty one
+removes them. FILE is the owner's hold list, `<repo> <branch> [<sha>...]`
+a line (the repo a name or `org/repo`, the commits the change is: its
+head, its merge; blank lines and `#` comments ignored), the changes not
+live yet, and its last line is `# end`. A closed contract on a listed repo
+(by its project's folder name or the books' key) keeps its copies, with
+and without the uncommitted work, and is never removed past `--keep`,
+when its branch is a line's (either may carry an owner's prefix,
+`someone/dev-1` is `dev-1`) or the commit it tested is one a line lists.
+One whose branch can't say which change it reviewed (none, a detached
+HEAD, a placement branch `adm/...`) is held for 30 days, then let go; one
+on the default branch is held only by its commit. The others go, once no
+open contract is on them; a copy with uncommitted work, which can't be
+made again, is kept until its contract is reviewed or old all the same.
+Without `--hold`, prune removes no copy at all and says so; a FILE it
+can't read, cut short (no `# end`) or with a malformed line prunes
+nothing, so a half list never lets a held copy go. One with only its end
 holds nothing. Builds, a whole app each, are kept to each
 project's last `--builds 2` used, plus any an open contract's rooms
 install, and none unused for `--older`. `--dry-run` says what each copy

@@ -175,11 +175,14 @@ const usage = `administration: contracts for persona agents.
       --mined: only the contracts FILE lists (an id a line), once older than
       --older; one it doesn't list is kept whole. Removes each project's
       builds past the last --builds used (an open contract's are kept).
-      --hold: the changes not live yet, "<repo> <branch>" a line (repo a name
-      or org/repo; # comments); removes the copies of the project no open
-      contract is on and no held contract read (an unreviewed one's copy with
-      uncommitted work stays too). Without --hold, every copy is kept; a FILE
-      it can't read or a malformed line prunes nothing. --dry-run says the bytes
+      --hold: the changes not live yet, "<repo> <branch> [<sha>...]" a line
+      (repo a name or org/repo; # comments), its last line "# end"; removes
+      the copies of the project no open contract is on and no held contract
+      read: one on a held repo whose branch or tested commit is listed, or
+      whose branch says nothing (none, detached, adm/...) for 30 days (an
+      unreviewed one's copy with uncommitted work stays too). Without --hold,
+      every copy is kept; a FILE it can't read, cut short or malformed prunes
+      nothing. --dry-run says the bytes
   administration sweep [--dry-run]
       stop what rooms left behind still run: processes whose room folder and
       working folder are both gone, that no open contract owns (Linux).

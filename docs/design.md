@@ -500,12 +500,19 @@ changes" into CLI calls, and checks findings against the code afterwards.
   the change is live: whoever follows up a fix that isn't deployed yet
   reads what was tested. Close and verify leave them; only prune removes
   them, and only with `--hold FILE`, the owner's list of changes not live
-  yet (`<repo> <branch>` a line; something outside the Administration
-  writes it, from wherever the owner's releases are tracked). A closed
-  contract matching a line (its branch, and its project's folder name or
-  key against the repo or the repo's last part) keeps both its copies and
-  isn't removed past the keep; the rest go once no open contract is on
-  them. No list, no copy goes; an unreadable or malformed list prunes
+  yet (`<repo> <branch> [<sha>...]` a line, ending `# end`; something
+  outside the Administration writes it, from wherever the owner's releases
+  are tracked). A closed contract on a listed repo (its project's folder
+  name or key against the repo or the repo's last part) is held when its
+  branch is a line's, an owner's prefix (`someone/`) aside on either side,
+  or its tested commit is one a line lists. The branch a contract records
+  is the placing checkout's, which may not be the change's: a review placed
+  from its own worktree (`adm/...`) or a detached HEAD records nothing
+  useful, so such a contract on a listed repo is held for a fixed 30 days
+  unless its commit places it. One on the default branch is held only by
+  its commit. A held one keeps both its copies and isn't removed past the
+  keep; the rest go once no open contract is on them. No list, no copy
+  goes; an unreadable, cut-short (no `# end`) or malformed list prunes
   nothing, so a half list can't let a held copy go. A copy with
   uncommitted work is kept until its contract is reviewed or old as
   well, since it can't be made again. The contract's folder keeps which copy it read (`copy-read`), so the

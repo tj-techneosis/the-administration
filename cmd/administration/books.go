@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -679,13 +680,15 @@ func countContracts(lines []ledgerLine) int {
 //
 // The copies of the project critics and verifiers read are removed here
 // and nowhere else, and only with --hold FILE, the owner's hold list: a
-// line "<repo> <branch>" a change not yet live (blank lines and # comments
-// ignored). A closed contract's copies are kept while its project and
-// branch match a line (holdList.holds), and an unreviewed contract's copy
-// with uncommitted work is kept as well; an open contract's always are.
-// Without --hold, no copy goes at all. A FILE it can't read, or a line
-// that isn't a repo and a branch, is refused before anything is touched,
-// so a half list never lets a held copy go; an empty one holds nothing.
+// line "<repo> <branch> [<sha>...]" a change not yet live (blank lines and
+// # comments ignored), ending "# end". A closed contract's copies are kept
+// while it's on the list (holdList.holds: its branch or its tested commit,
+// or for 30 days when its branch can't say), and an unreviewed contract's
+// copy with uncommitted work is kept as well; an open contract's always
+// are. Without --hold, no copy goes at all. A FILE it can't read, cut
+// short or with a line that isn't one of those is refused before anything
+// is touched, so a half list never lets a held copy go; one with only its
+// end holds nothing.
 //
 // It holds the books' use lock (useBooks) exclusive while it looks and
 // renames, so nothing it removes is being placed, closed, verified or
@@ -1129,14 +1132,31 @@ func copyRoots(c *contract) []string {
 	return out
 }
 
-// holdList is the owner's hold list (prune --hold): for each repo name,
-// the branches whose changes aren't live yet.
-type holdList map[string]map[string]bool
+// holdList is the owner's hold list (prune --hold): for each repo name
+// (as the line gave it, and its last part), the changes on it that aren't
+// live yet.
+type holdList map[string][]holdLine
 
-// readHold reads a hold list: "<repo> <branch>" a line, the repo a name
-// or org/repo, blank lines and # comments ignored. A FILE it can't read,
-// or a line that isn't two words, is an error: a broken list holds
-// nothing it means to.
+// holdLine is a line of the hold list: a change's branch, and the commits
+// that are it (its head, its merge, ...), any of which may be what a
+// contract on it tested.
+type holdLine struct {
+	branch string
+	shas   []string
+}
+
+// holdUnsure is how long a contract the hold list can't place is held: on
+// a held repo but on no branch, a detached HEAD or a placement branch
+// (adm/...), so its branch says nothing of which change it reviewed.
+const holdUnsure = 30 * 24 * time.Hour
+
+var shaRE = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+
+// readHold reads a hold list: "<repo> <branch> [<sha>...]" a line, the
+// repo a name or org/repo, blank lines and # comments ignored, and "# end"
+// its last line. A FILE it can't read, one cut short (no "# end"), or a
+// line that isn't a repo, a branch and commits is an error: a broken list
+// holds nothing it means to.
 func readHold(path string) (holdList, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -1147,43 +1167,105 @@ func readHold(path string) (holdList, error) {
 		return nil, fmt.Errorf("--hold: can't read %s, so pruned nothing: %v", path, err)
 	}
 	h := holdList{}
+	ended := false
 	for i, l := range strings.Split(string(b), "\n") {
 		l = strings.TrimSpace(l)
-		if l == "" || strings.HasPrefix(l, "#") {
+		if l == "" {
+			continue
+		}
+		if ended {
+			return nil, fmt.Errorf("--hold: %s goes on after its \"# end\" (line %d), so pruned nothing", path, i+1)
+		}
+		if l == "# end" {
+			ended = true
+			continue
+		}
+		if strings.HasPrefix(l, "#") {
 			continue
 		}
 		w := strings.Fields(l)
-		if len(w) != 2 || strings.Trim(w[0], "/") == "" {
-			return nil, fmt.Errorf("--hold: line %d of %s isn't \"<repo> <branch>\", so pruned nothing: %q", i+1, path, l)
+		repo := ""
+		if len(w) >= 2 {
+			repo = strings.Trim(w[0], "/")
 		}
-		repo := strings.Trim(w[0], "/")
-		for _, name := range []string{repo, filepath.Base(repo)} {
-			if h[name] == nil {
-				h[name] = map[string]bool{}
-			}
-			h[name][w[1]] = true
+		ok := repo != ""
+		for _, sha := range w[min(len(w), 2):] {
+			ok = ok && shaRE.MatchString(strings.ToLower(sha))
 		}
+		if !ok {
+			return nil, fmt.Errorf("--hold: line %d of %s isn't \"<repo> <branch> [<sha>...]\", so pruned nothing: %q", i+1, path, l)
+		}
+		line := holdLine{branch: w[1]}
+		for _, sha := range w[2:] {
+			line.shas = append(line.shas, strings.ToLower(sha))
+		}
+		for _, name := range uniq(repo, filepath.Base(repo)) {
+			h[name] = append(h[name], line)
+		}
+	}
+	if !ended {
+		return nil, fmt.Errorf("--hold: %s has no \"# end\" line (cut short?), so pruned nothing", path)
 	}
 	return h, nil
 }
 
-// holds is whether a contract's change is on the hold list: its branch,
-// with its project's folder name, its books' key or the key's last part
-// as the repo. No list (nil) holds every contract; a contract on no
-// branch is held by none.
+func uniq(ss ...string) []string {
+	var out []string
+	for _, s := range ss {
+		if s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// holds is whether a contract's change is on the hold list. Its repo is
+// its project's folder name, its books' key or the key's last part; on a
+// held repo, it's held when its branch is a line's (either may carry an
+// owner's prefix, like someone/dev-1), when the commit it tested is one a
+// line lists (either a prefix of the other), or, for one whose branch
+// can't say which change it reviewed (none, detached, adm/...), until it's
+// holdUnsure old. One on the default branch is held only by its commit.
+// No list (nil) holds every contract.
 func (h holdList) holds(c *contract) bool {
 	if h == nil {
 		return true
 	}
-	if c.Branch == "" {
-		return false
-	}
-	for _, name := range []string{filepath.Base(c.Project), c.Key, filepath.Base(c.Key)} {
-		if name != "" && name != "." && name != "/" && h[name][c.Branch] {
-			return true
+	var lines []holdLine
+	for _, name := range uniq(filepath.Base(c.Project), c.Key, filepath.Base(c.Key)) {
+		if name != "." && name != "/" {
+			lines = append(lines, h[name]...)
 		}
 	}
-	return false
+	if len(lines) == 0 {
+		return false
+	}
+	for _, l := range lines {
+		if c.Branch != "" && sameBranch(c.Branch, l.branch) {
+			return true
+		}
+		for _, t := range uniq(strings.ToLower(c.tested()), strings.ToLower(c.Commit)) {
+			for _, sha := range l.shas {
+				if len(t) >= 7 && (strings.HasPrefix(t, sha) || strings.HasPrefix(sha, t)) {
+					return true
+				}
+			}
+		}
+	}
+	unsure := c.Branch == "" || c.Branch == "HEAD" || strings.HasPrefix(c.Branch, "adm/")
+	return unsure && c.ClosedAt != nil && time.Since(*c.ClosedAt) < holdUnsure
+}
+
+// sameBranch is whether two branch names are one, either maybe with an
+// owner's prefix (someone/dev-1 is dev-1).
+func sameBranch(a, b string) bool {
+	bare := func(s string) string {
+		if i := strings.Index(s, "/"); i >= 0 {
+			return s[i+1:]
+		}
+		return s
+	}
+	return a == b || bare(a) == b || a == bare(b) || bare(a) == bare(b)
 }
 
 // treeBytes is what the files under path take, links not followed.

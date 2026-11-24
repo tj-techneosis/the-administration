@@ -688,8 +688,15 @@ func oldCopy(t *testing.T, c *contract, sha string) string {
 	return root
 }
 
-// holdFile is a hold list (prune --hold) with body.
+// holdFile is a hold list (prune --hold) with body, ended as the helper
+// ends it.
 func holdFile(t *testing.T, body string) string {
+	t.Helper()
+	return rawHoldFile(t, body+"# end\n")
+}
+
+// rawHoldFile is a hold list with exactly body.
+func rawHoldFile(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "hold")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -698,12 +705,12 @@ func holdFile(t *testing.T, body string) string {
 	return path
 }
 
-// heldContract is a closed contract on branch of a worktree of hail-mary,
-// keyed hail-mary, with its copies with and without uncommitted work.
+// heldContract is a closed contract on branch of a worktree of shop-app,
+// keyed shop-app, with its copies with and without uncommitted work.
 func heldContract(t *testing.T, books, id, sha, branch string) (bare, work string) {
 	t.Helper()
 	c := writeContract(t, books, id, sha, true)
-	c.Project, c.Key, c.Branch, c.Work = "/wt/"+branch, "hail-mary", branch, "w-"+sha
+	c.Project, c.Key, c.Branch, c.Work = "/wt/"+branch, "shop-app", branch, "w-"+sha
 	if err := writeJSON(filepath.Join(books, "contracts", id, "contract.json"), c); err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +744,7 @@ func TestCloseKeepsTheRunsCopy(t *testing.T) {
 func TestPruneWithoutAHoldListKeepsEveryCopy(t *testing.T) {
 	books := pruneBooks(t)
 	bare, work := heldContract(t, books, "aaaa", "abc", "dev-1-x")
-	leftover := filepath.Join(books, "copies", projectFolder("hail-mary"), "zzz")
+	leftover := filepath.Join(books, "copies", projectFolder("shop-app"), "zzz")
 	writeOld(t, filepath.Join(leftover, "a.txt"), "x")
 	then := time.Now().Add(-48 * time.Hour)
 	if err := os.Chtimes(leftover, then, then); err != nil {
@@ -786,7 +793,7 @@ func TestPruneHoldKeepsHeldCopiesAndRemovesTheRest(t *testing.T) {
 	}
 	open := writeContract(t, books, "eeee", "efg", false)
 	openCopy := oldCopy(t, open, "efg")
-	hold := holdFile(t, "# not live yet\n\nhail-mary dev-1-held\njoin-belle/hail-mary dev-2-org\n")
+	hold := holdFile(t, "# not live yet\n\nshop-app dev-1-held\nacme/shop-app dev-2-org\n")
 	if err := cmdPrune([]string{"--older", "30d", "--hold", hold, "--dry-run"}); err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +830,14 @@ func TestPruneHoldRefusesABrokenList(t *testing.T) {
 	b3 := madeBuild(t, books, "b3", 3*time.Hour)
 	madeBuild(t, books, "b1", 1*time.Hour)
 	madeBuild(t, books, "b2", 2*time.Hour)
-	for _, path := range []string{filepath.Join(t.TempDir(), "nope"), holdFile(t, "hail-mary\n"), holdFile(t, "hail-mary a b\n")} {
+	for _, path := range []string{
+		filepath.Join(t.TempDir(), "nope"),
+		holdFile(t, "shop-app\n"),
+		holdFile(t, "shop-app a notasha\n"),
+		rawHoldFile(t, ""),                           // cut short before anything
+		rawHoldFile(t, "shop-app dev-1-x\n"),        // cut short: no end
+		rawHoldFile(t, "# end\nshop-app dev-1-x\n"), // goes on after its end
+	} {
 		err := cmdPrune([]string{"--older", "30d", "--hold", path})
 		if err == nil || !strings.Contains(err.Error(), "--hold") || !strings.Contains(err.Error(), "pruned nothing") {
 			t.Fatalf("%s: %v", path, err)
@@ -834,13 +848,79 @@ func TestPruneHoldRefusesABrokenList(t *testing.T) {
 	}
 }
 
+// placedContract is a closed contract on shop-app, closed ago, on branch
+// at commit sha, with its copy of the commit.
+func placedContract(t *testing.T, books, id, sha, branch string, ago time.Duration) string {
+	t.Helper()
+	c := writeContract(t, books, id, sha, true)
+	then := time.Now().Add(-ago).UTC().Truncate(time.Second)
+	c.Project, c.Key, c.Branch, c.ClosedAt = "/home/x/.worktrees/shop-app/"+id, "shop-app", branch, &then
+	if err := writeJSON(filepath.Join(books, "contracts", id, "contract.json"), c); err != nil {
+		t.Fatal(err)
+	}
+	writeOld(t, filepath.Join(books, "contracts", id, "reviewed"), "")
+	return oldCopy(t, c, sha)
+}
+
+// A contract's recorded branch may not be the queue's: placed from an
+// adm/ worktree, detached, or with an owner's prefix. Its commit places
+// it; when nothing can, one on a held repo is held for 30 days, but one on
+// the default branch isn't.
+func TestPruneHoldPlacesContractsByCommitAndHoldsTheUnsure(t *testing.T) {
+	books := pruneBooks(t)
+	day := 24 * time.Hour
+	keep := map[string]string{
+		"adm/ branch, recent":  placedContract(t, books, "aaaa", "1111111aaaa", "adm/fix1", 2*day),
+		"no branch, recent":    placedContract(t, books, "bbbb", "2222222bbbb", "", 2*day),
+		"owner prefix":         placedContract(t, books, "cccc", "3333333cccc", "someone/dev-9-x", 40*day),
+		"sha prefix, old adm/": placedContract(t, books, "dddd", "abcdef0123456789", "adm/fix2", 40*day),
+		"merge sha, main":      placedContract(t, books, "eeee", "fedcba9876543210", "main", 40*day),
+	}
+	gone := map[string]string{
+		"main, no commit listed": placedContract(t, books, "ffff", "4444444ffff", "main", 2*day),
+		"adm/ older than 30d":    placedContract(t, books, "gggg", "5555555gggg", "adm/fix3", 31*day),
+		"no branch, older":       placedContract(t, books, "hhhh", "6666666hhhh", "", 31*day),
+		"another branch":         placedContract(t, books, "iiii", "7777777iiii", "dev-8-live", 2*day),
+	}
+	hold := holdFile(t, "acme/shop-app dev-9-x 9999999\n"+
+		"acme/shop-app dev-10 abcdef0 FEDCBA9876543210\n")
+	if err := cmdPrune([]string{"--older", "30d", "--hold", hold}); err != nil {
+		t.Fatal(err)
+	}
+	for why, d := range keep {
+		if !isDir(d) {
+			t.Errorf("%s: prune removed a held copy", why)
+		}
+	}
+	for why, d := range gone {
+		if isDir(d) {
+			t.Errorf("%s: prune kept an unheld copy", why)
+		}
+	}
+	// None of it on a repo the list doesn't name.
+	if (holdList{"shop": {{branch: "dev-9-x"}}}).holds(&contract{Key: "shop-app", Project: "/p/shop-app", Branch: "adm/x", ClosedAt: &time.Time{}}) {
+		t.Fatal("held a contract on a repo the list doesn't name")
+	}
+}
+
+func TestSameBranch(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{{"dev-1", "dev-1", true}, {"someone/dev-1", "dev-1", true}, {"dev-1", "owner/dev-1", true}, {"a/dev-1", "b/dev-1", true}, {"dev-1", "dev-2", false}, {"main", "dev-1", false}} {
+		if got := sameBranch(c.a, c.b); got != c.want {
+			t.Errorf("sameBranch(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}
+
 // A held contract past the keep is stripped, not removed: its hold must
 // outlive this prune.
 func TestPruneHoldKeepsAHeldContractPastTheKeep(t *testing.T) {
 	books := pruneBooks(t)
 	heldContract(t, books, "aaaa", "abc", "dev-1-held")
 	heldContract(t, books, "bbbb", "bcd", "dev-2-live")
-	if err := cmdPrune([]string{"--keep", "0", "--older", "1h", "--hold", holdFile(t, "hail-mary dev-1-held\n")}); err != nil {
+	if err := cmdPrune([]string{"--keep", "0", "--older", "1h", "--hold", holdFile(t, "shop-app dev-1-held\n")}); err != nil {
 		t.Fatal(err)
 	}
 	if !isDir(filepath.Join(books, "contracts", "aaaa")) {
