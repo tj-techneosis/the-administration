@@ -94,7 +94,7 @@ class Provenance(Base):
         self.assertEqual(os.path.realpath(seen[0]["project"]), os.path.realpath(c["checkout"]))
         self.assertEqual(seen[0]["tested_commit"], c["commit"])
         self.assertEqual(seen[0]["fake_app_txt"], "one\n")
-        self.assertFalse(os.path.exists(c["checkout"]), "verify drops the copy once it's done")
+        self.assertTrue(os.path.isdir(c["checkout"]), "close and verify leave the copy: only prune removes it")
 
     def test_a_pruned_copy_is_made_once_for_every_verifier(self):
         # Four verifiers at once each made the copy, took it from under each
@@ -104,7 +104,9 @@ class Provenance(Base):
         self.cli("wait", cid)
         self.cli("close", cid)
         checkout = self.contract(cid)["checkout"]
-        self.assertFalse(os.path.exists(checkout), "close drops the run's copy")
+        self.assertTrue(os.path.isdir(checkout), "close leaves the run's copy")
+        self.cli("prune", "--older", "0h", "--hold", self.hold(""))
+        self.assertFalse(os.path.exists(checkout), "a prune with nothing held takes it")
         write(os.path.join(self.project, "app.txt"), "moved on\n")
         self.git("commit", "-qam", "later")
         p = self.cli("verify", cid, "--batch", "1", env={"ADMINISTRATION_MATCH": "off"})
@@ -115,7 +117,7 @@ class Provenance(Base):
         for v in seen:
             self.assertEqual(os.path.realpath(v["project"]), os.path.realpath(checkout))
             self.assertEqual(v["fake_app_txt"], "one\n")
-        self.assertEqual(os.listdir(os.path.dirname(checkout)), [], "made once, dropped once verify was done")
+        self.assertEqual(os.listdir(os.path.dirname(checkout)), [os.path.basename(checkout)], "made once, and kept after verify")
 
     def test_a_contract_with_no_commit_says_verify_reads_the_project_as_it_is(self):
         self.hire_file("reader", kind="critic")
@@ -140,11 +142,13 @@ class Provenance(Base):
         self.assertNotIn("checkout", self.contract(cid))
         self.cli("close", cid)
         self.cli("verify", cid, env={"ADMINISTRATION_MATCH": "off"})
-        # Made by verify, among the shared copies, and dropped once it was
-        # done; contract.json is left as place and close wrote it, and the
-        # summary still says what the verifiers read.
+        # Made by verify, among the shared copies, and kept for prune;
+        # contract.json is left as place and close wrote it, and the
+        # summary still says what the verifiers read once it's pruned.
         seen = [json.loads(l) for l in open(os.path.join(self.books, "contracts", cid, "fake-verifier-seen.jsonl"))]
         self.assertEqual(os.path.basename(os.path.realpath(seen[0]["project"])), self.head())
+        self.assertEqual(self.copies(), [self.head()])
+        self.cli("prune", "--older", "0h", "--hold", self.hold(""))
         self.assertEqual(self.copies(), [])
         self.assertIn("read the project as it was then", self.cli("report", cid).stdout)
         # Uncommitted work can't be had later: copied at place.
@@ -444,6 +448,11 @@ commands = [".administration/run"]
             ''')
         self.assertIn("Have its setup print BUILD_COMMIT=", self.cli("equipment-check", "phone", check=2).stdout)
 
+    def hold(self, body):
+        path = os.path.join(self.tmp, "hold")
+        write(path, body)
+        return path
+
     def copies(self):
         root = os.path.join(self.books, "copies")
         return sorted(n for d in (os.listdir(root) if os.path.isdir(root) else [])
@@ -455,16 +464,18 @@ commands = [".administration/run"]
         self.cli("wait", cid)
         self.cli("close", cid)
         checkout = self.contract(cid)["checkout"]
-        # Close dropped it; one a close couldn't drop (the books were busy)
-        # is prune's.
-        self.assertFalse(os.path.isdir(checkout))
-        write(os.path.join(checkout, "app.txt"), "one\n")
+        # Close left it: removing copies is prune's alone.
+        self.assertTrue(os.path.isdir(checkout))
         # a copy killed before it was renamed into place
         cut = os.path.join(os.path.dirname(checkout), "." + os.path.basename(checkout) + "-1234")
         write(os.path.join(cut, "app.txt"), "one\n")
         old = os.path.join(self.books, "contracts", cid, ".checkout")  # where a copy was before they were shared
         write(os.path.join(old, "app.txt"), "one\n")
-        self.cli("prune", "--older", "0h")
+        # No hold list: no copy goes, nor the old one.
+        self.assertIn("No --hold list given", self.cli("prune", "--older", "0h").stdout)
+        self.assertTrue(os.path.isdir(checkout))
+        self.assertTrue(os.path.isdir(old))
+        self.cli("prune", "--older", "0h", "--hold", self.hold(""))
         self.assertFalse(os.path.exists(checkout))
         self.assertFalse(os.path.exists(cut))
         self.assertFalse(os.path.exists(old))
@@ -477,11 +488,23 @@ commands = [".administration/run"]
         self.assertEqual(self.copies(), [self.head()])
         self.cli("wait", a)
         self.cli("close", a)
-        self.cli("prune", "--older", "0h")
+        self.cli("prune", "--older", "0h", "--hold", self.hold(""))
         self.assertEqual(self.copies(), [self.head()], "b is open and reads it")
         self.cli("wait", b)
         self.cli("close", b)
+        # Kept while its change isn't live: the hold list names the
+        # project's repo (by folder name, or org/repo) and branch.
+        branch = self.contract(b)["branch"]
+        self.assertTrue(branch)
+        name = os.path.basename(self.project)
         self.cli("prune", "--older", "0h")
+        self.assertEqual(self.copies(), [self.head()], "no hold list: kept")
+        self.cli("prune", "--older", "0h", "--hold", self.hold(f"# held\nacme/{name} {branch}\n"))
+        self.assertEqual(self.copies(), [self.head()], "held: kept")
+        self.assertIn("pruned nothing", self.cli("prune", "--older", "0h", "--hold", self.hold(f"{name}\n"), check=1).stderr)
+        self.assertIn("pruned nothing", self.cli("prune", "--older", "0h", "--hold", os.path.join(self.tmp, "nope"), check=1).stderr)
+        self.assertEqual(self.copies(), [self.head()], "a broken hold list touches nothing")
+        self.cli("prune", "--older", "0h", "--hold", self.hold(f"{name} some-other-branch\n"))
         self.assertEqual(self.copies(), [])
         # Uncommitted work gets its own; a big uncommitted file isn't in it.
         write(os.path.join(self.project, "app.txt"), "one\nwip\n")

@@ -674,10 +674,18 @@ func countContracts(lines []ledgerLine) int {
 // professionals' streams, briefs, personas and settings, the handout) goes
 // once the Director has reviewed it, or once it's older than --older. Its
 // numbers move to the project's ledger, and only the last --keep summaries
-// and reports stay. The shared copies of the project go once no open
-// contract is on them (close and verify drop a closed contract's own, when
-// nothing else holds the books), and each project's builds down to the
-// last --builds used (2), with any an open contract's rooms install.
+// and reports stay. Each project's builds go down to the last --builds
+// used (2), with any an open contract's rooms install.
+//
+// The copies of the project critics and verifiers read are removed here
+// and nowhere else, and only with --hold FILE, the owner's hold list: a
+// line "<repo> <branch>" a change not yet live (blank lines and # comments
+// ignored). A closed contract's copies are kept while its project and
+// branch match a line (holdList.holds), and an unreviewed contract's copy
+// with uncommitted work is kept as well; an open contract's always are.
+// Without --hold, no copy goes at all. A FILE it can't read, or a line
+// that isn't a repo and a branch, is refused before anything is touched,
+// so a half list never lets a held copy go; an empty one holds nothing.
 //
 // It holds the books' use lock (useBooks) exclusive while it looks and
 // renames, so nothing it removes is being placed, closed, verified or
@@ -697,7 +705,7 @@ func countContracts(lines []ledgerLine) int {
 // can't read is refused before anything is touched, and one that lists no
 // contract prunes nothing.
 func cmdPrune(args []string) error {
-	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false, "mined": true, "builds": true})
+	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false, "mined": true, "builds": true, "hold": true})
 	if err != nil {
 		return err
 	}
@@ -720,6 +728,15 @@ func cmdPrune(args []string) error {
 		}
 	}
 	// Read before anything else: a FILE that isn't there prunes nothing.
+	// No hold list, no copy goes.
+	var hold holdList
+	if f.has("hold") {
+		if hold, err = readHold(f.get("hold")); err != nil {
+			return err
+		}
+	} else {
+		fmt.Println("No --hold list given: every copy of the project is kept.")
+	}
 	var mined map[string]bool
 	if f.has("mined") {
 		var ignored int
@@ -788,9 +805,16 @@ func cmdPrune(args []string) error {
 		if err != nil || c.ClosedAt == nil {
 			continue
 		}
-		// Its copy goes below (no open contract is on it, or it's kept):
-		// the summary keeps saying what it read.
-		if !dry {
+		// A change not live yet keeps its copies, with and without the
+		// uncommitted work: whoever follows it up reads what was tested.
+		if hold.holds(c) {
+			for _, root := range copyRoots(c) {
+				needed[root] = true
+			}
+		}
+		// Its copy may go below (no open contract is on it, and it isn't
+		// held): the summary keeps saying what it read.
+		if hold != nil && !dry {
 			noteCopyRead(c, filepath.Dir(file))
 		}
 		byProject[contractKey(c)] = append(byProject[contractKey(c)], c)
@@ -841,7 +865,9 @@ func cmdPrune(args []string) error {
 			}
 			// Under --mined nothing is removed, past the keep or not: every
 			// summary stays, and only the transcripts of mined runs go.
-			if i >= keep && mined == nil {
+			// A held one stays (stripped, not removed), so the next prune
+			// still knows its copies are held.
+			if i >= keep && mined == nil && !(hold != nil && hold.holds(c)) {
 				// Past the keep: its numbers go to the ledger, then all of
 				// it. The ledger first, so it has them before the contract
 				// is gone; a prune cut off in between leaves the contract
@@ -881,11 +907,17 @@ func cmdPrune(args []string) error {
 				filepath.Join(dir, ".verify"), // a failed verifier's or matcher's stream
 				filepath.Join(dir, ".match"),
 				deskKept(dir),                 // the desk's files as placed
-				checkoutDir(dir),              // the copy critics and verifiers read, before copies were shared
 				filepath.Join(dir, "handout"), // where it was before 0.4
 			}, tmps...) {
 				if _, err := os.Lstat(p); err == nil {
 					paths = append(paths, p)
+				}
+			}
+			// The copy critics and verifiers read, before copies were
+			// shared: a copy like any other, so only with the hold list.
+			if old := checkoutDir(dir); hold != nil && !hold.holds(c) {
+				if _, err := os.Lstat(old); err == nil {
+					paths = append(paths, old)
 				}
 			}
 			if r := keptRooms(c.ID); r != "" {
@@ -922,6 +954,9 @@ func cmdPrune(args []string) error {
 	var freed int64 // what a dry run's removals would free
 	grace := min(time.Hour, older)
 	made, _ := filepath.Glob(filepath.Join(books, "copies", "*", "*"))
+	if hold == nil {
+		made = nil // no hold list: every copy stays
+	}
 	for _, d := range made {
 		into := d
 		if base := filepath.Base(d); strings.HasPrefix(base, ".") {
@@ -1094,50 +1129,61 @@ func copyRoots(c *contract) []string {
 	return out
 }
 
-// dropCopy removes a closed contract's copy of its commit once no open
-// contract is on it: close and verify call it as they finish, so a run's
-// copy doesn't wait for the next prune. Only when it can take the books'
-// use lock exclusive at once, as prune does: a place taking a copy, a
-// verify reading one or an early check still running holds it shared, and
-// the copy is then left for prune. The copy with the uncommitted work is
-// left too: once the work has changed it can't be made again, and the
-// close's verify reads it; prune keeps it until the contract is reviewed
-// or old. Verify makes a dropped copy
-// again if it needs it.
-func dropCopy(c *contract) {
-	// The commit names a folder under the copies: never a path.
-	if t := c.tested(); c.ClosedAt == nil || t == "" || t == "." || t == ".." || filepath.Base(t) != t {
-		return
-	}
-	root, err := copyRoot(c, c.tested(), "")
-	if err != nil || !isDir(root) {
-		return
-	}
-	books, err := booksDir()
+// holdList is the owner's hold list (prune --hold): for each repo name,
+// the branches whose changes aren't live yet.
+type holdList map[string]map[string]bool
+
+// readHold reads a hold list: "<repo> <branch>" a line, the repo a name
+// or org/repo, blank lines and # comments ignored. A FILE it can't read,
+// or a line that isn't two words, is an error: a broken list holds
+// nothing it means to.
+func readHold(path string) (holdList, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, fmt.Errorf("--hold: can't read %s, so pruned nothing: %v", path, err)
 	}
-	unlock, ok := tryLockFile(useLock(books))
-	if !ok {
-		return
-	}
-	needed := map[string]bool{}
-	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
-	for _, file := range files {
-		if o, _, err := loadContract(filepath.Base(filepath.Dir(file))); err == nil && o.ClosedAt == nil {
-			openNeeds(o, needed)
+	h := holdList{}
+	for i, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		w := strings.Fields(l)
+		if len(w) != 2 || strings.Trim(w[0], "/") == "" {
+			return nil, fmt.Errorf("--hold: line %d of %s isn't \"<repo> <branch>\", so pruned nothing: %q", i+1, path, l)
+		}
+		repo := strings.Trim(w[0], "/")
+		for _, name := range []string{repo, filepath.Base(repo)} {
+			if h[name] == nil {
+				h[name] = map[string]bool{}
+			}
+			h[name][w[1]] = true
 		}
 	}
-	moved := false
-	if !needed[root] {
-		noteCopyRead(c, filepath.Join(books, "contracts", c.ID))
-		_, err := aside(books, root)
-		moved = err == nil
+	return h, nil
+}
+
+// holds is whether a contract's change is on the hold list: its branch,
+// with its project's folder name, its books' key or the key's last part
+// as the repo. No list (nil) holds every contract; a contract on no
+// branch is held by none.
+func (h holdList) holds(c *contract) bool {
+	if h == nil {
+		return true
 	}
-	unlock()
-	if moved {
-		clearPruned(books)
+	if c.Branch == "" {
+		return false
 	}
+	for _, name := range []string{filepath.Base(c.Project), c.Key, filepath.Base(c.Key)} {
+		if name != "" && name != "." && name != "/" && h[name][c.Branch] {
+			return true
+		}
+	}
+	return false
 }
 
 // treeBytes is what the files under path take, links not followed.

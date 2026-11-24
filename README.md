@@ -606,12 +606,19 @@ With `--mined FILE` (a contract id a line, say the ones something else has
 already read the findings out of) it takes only those, once older than
 `--older`, and keeps every other contract whole, so if whatever writes FILE
 stops, nothing is lost; a FILE it can't read prunes nothing.
-The copies of the project critics and verifiers read go once no open
-contract is on them: close drops a run's own copy as it finishes, and
-verify drops the one its verifiers read again (verify makes one again
-whenever it needs it), each only when nothing else holds the books; prune
-takes what they leave, and a copy with uncommitted work, which can't be
-made again, is kept until its contract is reviewed or old. Builds, a whole app each, are kept to each
+The copies of the project critics and verifiers read stay until a
+change is live: close and verify leave them, and only `prune --hold FILE`
+removes them. FILE is the owner's hold list, `<repo> <branch>` a line
+(the repo a name or `org/repo`; blank lines and `#` comments ignored), the
+changes not live yet: a closed contract whose project (by its folder's
+name or the books' key) and branch match a line keeps its copies, with
+and without the uncommitted work, and is never removed past `--keep`.
+The others go, once no open contract is on them; a copy with uncommitted
+work, which can't be made again, is kept until its contract is reviewed
+or old all the same. Without `--hold`, prune removes no copy at all and
+says so; a FILE it can't read, or a line that isn't a repo and a branch,
+prunes nothing, so a half list never lets a held copy go. An empty one
+holds nothing. Builds, a whole app each, are kept to each
 project's last `--builds 2` used, plus any an open contract's rooms
 install, and none unused for `--older`. `--dry-run` says what each copy
 and build it would remove takes, and the total.

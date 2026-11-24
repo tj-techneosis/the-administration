@@ -505,8 +505,8 @@ func copyKept(c *contract) string {
 
 // copyReadFile is the file in a contract's folder that keeps which copy
 // of the project it read (copyKept's word) once the copy is removed: a
-// closed contract's goes at close, verify or prune (dropCopy), and the
-// summary still says what critics and verifiers read.
+// closed contract's goes at prune, once the owner's hold list (--hold) lets
+// it go, and the summary still says what critics and verifiers read.
 const copyReadFile = "copy-read"
 
 // noteCopyRead writes copyReadFile before a closed contract's copy goes,

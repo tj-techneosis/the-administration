@@ -39,15 +39,8 @@ func cmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	// A closed contract's copy, which its verifiers may have made again,
-	// goes once they're done, when nothing else holds the books (dropCopy).
-	var closed *contract
-	defer func() {
-		unuse()
-		if closed != nil {
-			dropCopy(closed)
-		}
-	}()
+	// A copy its verifiers made again stays: only prune removes copies.
+	defer unuse()
 	c, dir, err := openContract(f.pos[0])
 	if err != nil {
 		return err
@@ -57,9 +50,6 @@ func cmdVerify(args []string) error {
 	}
 	if c.ClosedAt == nil && !early {
 		return usageError{fmt.Sprintf("contract %s isn't closed yet: close it, then verify", c.ID)}
-	}
-	if c.ClosedAt != nil {
-		closed = c
 	}
 	// One at a time: two would check the same findings and write over each
 	// other's verdicts.

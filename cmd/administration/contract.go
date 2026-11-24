@@ -1648,10 +1648,9 @@ func cmdClose(args []string) error {
 	if matchFindings(c, dir) {
 		_, _ = writeSummary(c, dir)
 	}
-	// Done with the books: its copy of the project goes now, not at the
-	// next prune, when nothing else holds them (dropCopy).
+	// Its copies of the project stay: only prune removes them, and only
+	// those the owner's hold list (--hold) lets go.
 	unuse()
-	dropCopy(c)
 	fmt.Println(summary)
 	return nil
 }

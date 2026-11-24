@@ -159,7 +159,7 @@ func TestPruneLeavesACopyBeingMadeForAnOpenContract(t *testing.T) {
 	if err := writeJSON(filepath.Join(books, "contracts", "abcd", "contract.json"), c); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdPrune([]string{"--older", "1s"}); err != nil {
+	if err := cmdPrune([]string{"--older", "1s", "--hold", holdFile(t, "")}); err != nil {
 		t.Fatal(err)
 	}
 	if !isDir(tmp) {
@@ -382,7 +382,8 @@ func TestAPruneThatFailsPartWayStillDoesTheRest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(books, ".pruned"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := cmdPrune([]string{"--keep", "0", "--older", "1h"})
+	hold := holdFile(t, "")
+	err := cmdPrune([]string{"--keep", "0", "--older", "1h", "--hold", hold})
 	if err == nil || !strings.Contains(err.Error(), "aaaa") || !strings.Contains(err.Error(), "abc") {
 		t.Fatalf("got %v, want both failures named", err)
 	}
@@ -393,7 +394,7 @@ func TestAPruneThatFailsPartWayStillDoesTheRest(t *testing.T) {
 		t.Fatalf("ledger has %d lines, want 2", n)
 	}
 	_ = os.Remove(filepath.Join(books, ".pruned"))
-	if err := cmdPrune([]string{"--keep", "0", "--older", "1h"}); err != nil {
+	if err := cmdPrune([]string{"--keep", "0", "--older", "1h", "--hold", hold}); err != nil {
 		t.Fatal(err)
 	}
 	if isDir(dir) || isDir(cp) {
@@ -687,8 +688,38 @@ func oldCopy(t *testing.T, c *contract, sha string) string {
 	return root
 }
 
-// A run's copy goes when it closes; nothing waits for the next prune.
-func TestCloseDropsTheRunsCopy(t *testing.T) {
+// holdFile is a hold list (prune --hold) with body.
+func holdFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "hold")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// heldContract is a closed contract on branch of a worktree of hail-mary,
+// keyed hail-mary, with its copies with and without uncommitted work.
+func heldContract(t *testing.T, books, id, sha, branch string) (bare, work string) {
+	t.Helper()
+	c := writeContract(t, books, id, sha, true)
+	c.Project, c.Key, c.Branch, c.Work = "/wt/"+branch, "hail-mary", branch, "w-"+sha
+	if err := writeJSON(filepath.Join(books, "contracts", id, "contract.json"), c); err != nil {
+		t.Fatal(err)
+	}
+	writeOld(t, filepath.Join(books, "contracts", id, "reviewed"), "")
+	bare = oldCopy(t, c, sha)
+	work, _ = copyRoot(c, sha, c.Work)
+	writeOld(t, filepath.Join(work, "a.txt"), "x")
+	then := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(work, then, then); err != nil {
+		t.Fatal(err)
+	}
+	return bare, work
+}
+
+// Close and verify leave a run's copy: only prune removes copies.
+func TestCloseKeepsTheRunsCopy(t *testing.T) {
 	books := pruneBooks(t)
 	t.Setenv("ADMINISTRATION_MATCH", "off")
 	c := writeContract(t, books, "aaaa", "abc", false)
@@ -696,98 +727,127 @@ func TestCloseDropsTheRunsCopy(t *testing.T) {
 	if err := cmdClose([]string{"aaaa"}); err != nil {
 		t.Fatal(err)
 	}
-	if isDir(root) {
-		t.Fatal("close left the closed run's copy")
-	}
-	if es, _ := os.ReadDir(filepath.Join(books, ".pruned")); len(es) > 0 {
-		t.Fatalf("close left %d things set aside", len(es))
-	}
-	// The summary still says what critics and verifiers read.
-	closed, dir, err := loadContract("aaaa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := provenanceNote(closed, dir); !strings.Contains(n, "as it was then") {
-		t.Fatalf("the summary forgot the copy once it went: %q", n)
+	if !isDir(root) {
+		t.Fatal("close removed the closed run's copy")
 	}
 }
 
-// A copy two runs share stays while one of them is open, and goes with
-// the last.
-func TestCloseKeepsACopyAnOpenRunIsOn(t *testing.T) {
+// Without --hold, prune removes no copy at all, a closed run's or a
+// leftover; builds and transcripts go as ever.
+func TestPruneWithoutAHoldListKeepsEveryCopy(t *testing.T) {
 	books := pruneBooks(t)
-	t.Setenv("ADMINISTRATION_MATCH", "off")
-	c := writeContract(t, books, "aaaa", "abc", false)
-	writeContract(t, books, "bbbb", "abc", false)
-	root := oldCopy(t, c, "abc")
-	if err := cmdClose([]string{"aaaa"}); err != nil {
+	bare, work := heldContract(t, books, "aaaa", "abc", "dev-1-x")
+	leftover := filepath.Join(books, "copies", projectFolder("hail-mary"), "zzz")
+	writeOld(t, filepath.Join(leftover, "a.txt"), "x")
+	then := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(leftover, then, then); err != nil {
 		t.Fatal(err)
 	}
-	if !isDir(root) {
-		t.Fatal("close removed a copy an open run is on")
-	}
-	if err := cmdPrune([]string{"--older", "1h"}); err != nil {
-		t.Fatal(err)
-	}
-	if !isDir(root) {
-		t.Fatal("prune removed a copy an open run is on")
-	}
-	if err := cmdClose([]string{"bbbb"}); err != nil {
-		t.Fatal(err)
-	}
-	if isDir(root) {
-		t.Fatal("the last run on the copy closed and it stayed")
-	}
-}
-
-// While anything else holds the books (a place taking a copy, a verify
-// reading one), close leaves the copy for prune.
-func TestCloseLeavesTheCopyWhileTheBooksAreInUse(t *testing.T) {
-	books := pruneBooks(t)
-	t.Setenv("ADMINISTRATION_MATCH", "off")
-	c := writeContract(t, books, "aaaa", "abc", false)
-	root := oldCopy(t, c, "abc")
-	unuse, err := useBooks()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmdClose([]string{"aaaa"}); err != nil {
-		t.Fatal(err)
-	}
-	unuse()
-	if !isDir(root) {
-		t.Fatal("close removed a copy while the books were in use")
-	}
-	if err := cmdPrune([]string{"--older", "1h", "--dry-run"}); err != nil {
-		t.Fatal(err)
-	}
-	if !isDir(root) {
-		t.Fatal("a dry run removed the copy")
-	}
-	if err := cmdPrune([]string{"--older", "1h"}); err != nil {
-		t.Fatal(err)
-	}
-	if isDir(root) {
-		t.Fatal("prune left a closed run's copy")
-	}
-}
-
-// Prune keeps a closed run's copy no longer, reviewed or not, young or
-// old: only an open run's.
-func TestPruneTakesAClosedRunsCopyAndKeepsAnOpenOnes(t *testing.T) {
-	books := pruneBooks(t)
-	closed := writeContract(t, books, "aaaa", "abc", true)
-	open := writeContract(t, books, "bbbb", "def", false)
-	gone := oldCopy(t, closed, "abc")
-	kept := oldCopy(t, open, "def")
+	b1 := madeBuild(t, books, "b1", 1*time.Hour)
+	b2 := madeBuild(t, books, "b2", 2*time.Hour)
+	b3 := madeBuild(t, books, "b3", 3*time.Hour)
 	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
 		t.Fatal(err)
 	}
-	if isDir(gone) {
-		t.Fatal("prune kept a closed run's copy")
+	for _, d := range []string{bare, work, leftover} {
+		if !isDir(d) {
+			t.Fatalf("prune without --hold removed the copy %s", d)
+		}
 	}
-	if !isDir(kept) {
-		t.Fatal("prune removed an open run's copy")
+	if !isDir(b1) || !isDir(b2) || isDir(b3) {
+		t.Fatal("builds should go as ever without --hold")
+	}
+}
+
+// With --hold, a closed run's copies (with and without its work) stay
+// while its repo and branch are on the list, by the project's folder,
+// the key or org/repo; the rest go. An open run's stay whatever the list.
+func TestPruneHoldKeepsHeldCopiesAndRemovesTheRest(t *testing.T) {
+	books := pruneBooks(t)
+	heldBare, heldWork := heldContract(t, books, "aaaa", "abc", "dev-1-held")
+	orgBare, orgWork := heldContract(t, books, "bbbb", "bcd", "dev-2-org")
+	goneBare, goneWork := heldContract(t, books, "cccc", "cde", "dev-3-live")
+	other, otherWork := heldContract(t, books, "dddd", "def", "dev-1-held")
+	// The same branch name on another repo isn't held.
+	oc, _, err := loadContract("dddd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oc.Key, oc.Project = "shop", "/wt/shop"
+	if err := writeJSON(filepath.Join(books, "contracts", "dddd", "contract.json"), oc); err != nil {
+		t.Fatal(err)
+	}
+	other, _ = copyRoot(oc, "def", "")
+	otherWork, _ = copyRoot(oc, "def", oc.Work)
+	for _, d := range []string{other, otherWork} {
+		writeOld(t, filepath.Join(d, "a.txt"), "x")
+		then := time.Now().Add(-48 * time.Hour)
+		_ = os.Chtimes(d, then, then)
+	}
+	open := writeContract(t, books, "eeee", "efg", false)
+	openCopy := oldCopy(t, open, "efg")
+	hold := holdFile(t, "# not live yet\n\nhail-mary dev-1-held\njoin-belle/hail-mary dev-2-org\n")
+	if err := cmdPrune([]string{"--older", "30d", "--hold", hold, "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(goneBare) || !isDir(other) {
+		t.Fatal("a dry run removed a copy")
+	}
+	if err := cmdPrune([]string{"--older", "30d", "--hold", hold}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{heldBare, heldWork, orgBare, orgWork, openCopy} {
+		if !isDir(d) {
+			t.Errorf("prune removed a held or open copy %s", d)
+		}
+	}
+	for _, d := range []string{goneBare, goneWork, other, otherWork} {
+		if isDir(d) {
+			t.Errorf("prune kept an unheld closed copy %s", d)
+		}
+	}
+	// Taken off the list (live now), it goes on the next prune.
+	if err := cmdPrune([]string{"--older", "30d", "--hold", holdFile(t, "")}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(heldBare) || isDir(orgWork) || !isDir(openCopy) {
+		t.Fatal("an empty hold list should let every closed copy go, and keep an open one's")
+	}
+}
+
+// A hold list that can't be read, or has a line that isn't a repo and a
+// branch, is refused before anything is touched.
+func TestPruneHoldRefusesABrokenList(t *testing.T) {
+	books := pruneBooks(t)
+	bare, _ := heldContract(t, books, "aaaa", "abc", "dev-1-x")
+	b3 := madeBuild(t, books, "b3", 3*time.Hour)
+	madeBuild(t, books, "b1", 1*time.Hour)
+	madeBuild(t, books, "b2", 2*time.Hour)
+	for _, path := range []string{filepath.Join(t.TempDir(), "nope"), holdFile(t, "hail-mary\n"), holdFile(t, "hail-mary a b\n")} {
+		err := cmdPrune([]string{"--older", "30d", "--hold", path})
+		if err == nil || !strings.Contains(err.Error(), "--hold") || !strings.Contains(err.Error(), "pruned nothing") {
+			t.Fatalf("%s: %v", path, err)
+		}
+	}
+	if !isDir(bare) || !isDir(b3) {
+		t.Fatal("a refused prune removed something")
+	}
+}
+
+// A held contract past the keep is stripped, not removed: its hold must
+// outlive this prune.
+func TestPruneHoldKeepsAHeldContractPastTheKeep(t *testing.T) {
+	books := pruneBooks(t)
+	heldContract(t, books, "aaaa", "abc", "dev-1-held")
+	heldContract(t, books, "bbbb", "bcd", "dev-2-live")
+	if err := cmdPrune([]string{"--keep", "0", "--older", "1h", "--hold", holdFile(t, "hail-mary dev-1-held\n")}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(filepath.Join(books, "contracts", "aaaa")) {
+		t.Fatal("prune removed a held contract past the keep")
+	}
+	if isDir(filepath.Join(books, "contracts", "bbbb")) {
+		t.Fatal("prune kept an unheld contract past the keep")
 	}
 }
 
@@ -889,7 +949,7 @@ func TestPruneKeepsAnUnreviewedRunsWorkCopy(t *testing.T) {
 	if err := os.Chtimes(work, then, then); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+	if err := cmdPrune([]string{"--older", "30d", "--hold", holdFile(t, "")}); err != nil {
 		t.Fatal(err)
 	}
 	if !isDir(work) {
@@ -899,7 +959,7 @@ func TestPruneKeepsAnUnreviewedRunsWorkCopy(t *testing.T) {
 		t.Fatal("prune kept an unreviewed run's copy of the commit alone")
 	}
 	writeOld(t, filepath.Join(books, "contracts", "aaaa", "reviewed"), "")
-	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+	if err := cmdPrune([]string{"--older", "30d", "--hold", holdFile(t, "")}); err != nil {
 		t.Fatal(err)
 	}
 	if isDir(work) {

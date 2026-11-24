@@ -170,12 +170,16 @@ const usage = `administration: contracts for persona agents.
       another contract
   administration stats [--project DIR] [--json]
       each professional's record: runs, findings, how many held up, coins used
-  administration prune [--keep 10] [--older 30d] [--builds 2] [--dry-run] [--mined FILE]
+  administration prune [--keep 10] [--older 30d] [--builds 2] [--dry-run] [--mined FILE] [--hold FILE]
       strip reviewed or old contracts to their summaries; past --keep, to the ledger.
       --mined: only the contracts FILE lists (an id a line), once older than
-      --older; one it doesn't list is kept whole. Removes the copies of the
-      project no open contract is on, and each project's builds past the last
-      --builds used (an open contract's are kept); --dry-run says the bytes
+      --older; one it doesn't list is kept whole. Removes each project's
+      builds past the last --builds used (an open contract's are kept).
+      --hold: the changes not live yet, "<repo> <branch>" a line (repo a name
+      or org/repo; # comments); removes the copies of the project no open
+      contract is on and no held contract read (an unreviewed one's copy with
+      uncommitted work stays too). Without --hold, every copy is kept; a FILE
+      it can't read or a malformed line prunes nothing. --dry-run says the bytes
   administration sweep [--dry-run]
       stop what rooms left behind still run: processes whose room folder and
       working folder are both gone, that no open contract owns (Linux).
