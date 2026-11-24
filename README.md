@@ -400,7 +400,8 @@ only installs and starts its two apps. Uncommitted work is
 built too, kept apart under its own hash. A changed hook or `env/` builds
 again. The checkout has no `.git`, so a build that stamps its version uses
 `$ADMINISTRATION_BUILD_COMMIT`, not `git describe`. `administration build`
-tries the hook; builds stay in the books until `prune` finds them unused.
+tries the hook; `prune` keeps each project's last two builds used (and an
+open contract's), and removes the rest.
 A house without one has every room build the app for itself; when that
 is heavy, `status` and `room-check` say so, with the time and memory they
 measured, and suggest the hook.
@@ -605,6 +606,15 @@ With `--mined FILE` (a contract id a line, say the ones something else has
 already read the findings out of) it takes only those, once older than
 `--older`, and keeps every other contract whole, so if whatever writes FILE
 stops, nothing is lost; a FILE it can't read prunes nothing.
+The copies of the project critics and verifiers read go once no open
+contract is on them: close drops a run's own copy as it finishes, and
+verify drops the one its verifiers read again (verify makes one again
+whenever it needs it), each only when nothing else holds the books; prune
+takes what they leave, and a copy with uncommitted work, which can't be
+made again, is kept until its contract is reviewed or old. Builds, a whole app each, are kept to each
+project's last `--builds 2` used, plus any an open contract's rooms
+install, and none unused for `--older`. `--dry-run` says what each copy
+and build it would remove takes, and the total.
 Each line keeps the seat's times (started, room up, finished, in UTC), how
 long it waited and how long its room took to set up, where the room came
 from (its own, shared, handed on), the contract's data set and room plan,

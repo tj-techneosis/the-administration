@@ -552,7 +552,7 @@ func closedWithStream(t *testing.T, books, id string) string {
 
 // With --mined, only the old contracts FILE lists are stripped; an
 // unlisted one is kept whole however old, and so is a listed one still
-// younger than --older. The others' copies stay too.
+// younger than --older.
 func TestPruneMinedStripsOnlyListedRuns(t *testing.T) {
 	books := pruneBooks(t)
 	listed := closedWithStream(t, books, "aaaa")
@@ -653,5 +653,256 @@ func TestPruneMinedNeverRemoves(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "contract.json")); err != nil {
 			t.Fatalf("%s lost its summary: %v", dir, err)
 		}
+	}
+}
+
+// writeContract puts a contract on project /p, at commit sha, in the books:
+// open, or closed two days ago.
+func writeContract(t *testing.T, books, id, sha string, closed bool) *contract {
+	t.Helper()
+	c := &contract{ID: id, Target: "t", Project: "/p", Key: "/p", Commit: sha, PlacedAt: time.Now().Add(-49 * time.Hour)}
+	if closed {
+		then := time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Second)
+		c.ClosedAt = &then
+	}
+	dir := filepath.Join(books, "contracts", id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(dir, "contract.json"), c); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// oldCopy makes the shared copy of /p at sha, made two days ago.
+func oldCopy(t *testing.T, c *contract, sha string) string {
+	t.Helper()
+	root, _ := copyRoot(c, sha, "")
+	writeOld(t, filepath.Join(root, "a.txt"), "x")
+	then := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(root, then, then); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// A run's copy goes when it closes; nothing waits for the next prune.
+func TestCloseDropsTheRunsCopy(t *testing.T) {
+	books := pruneBooks(t)
+	t.Setenv("ADMINISTRATION_MATCH", "off")
+	c := writeContract(t, books, "aaaa", "abc", false)
+	root := oldCopy(t, c, "abc")
+	if err := cmdClose([]string{"aaaa"}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(root) {
+		t.Fatal("close left the closed run's copy")
+	}
+	if es, _ := os.ReadDir(filepath.Join(books, ".pruned")); len(es) > 0 {
+		t.Fatalf("close left %d things set aside", len(es))
+	}
+	// The summary still says what critics and verifiers read.
+	closed, dir, err := loadContract("aaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := provenanceNote(closed, dir); !strings.Contains(n, "as it was then") {
+		t.Fatalf("the summary forgot the copy once it went: %q", n)
+	}
+}
+
+// A copy two runs share stays while one of them is open, and goes with
+// the last.
+func TestCloseKeepsACopyAnOpenRunIsOn(t *testing.T) {
+	books := pruneBooks(t)
+	t.Setenv("ADMINISTRATION_MATCH", "off")
+	c := writeContract(t, books, "aaaa", "abc", false)
+	writeContract(t, books, "bbbb", "abc", false)
+	root := oldCopy(t, c, "abc")
+	if err := cmdClose([]string{"aaaa"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(root) {
+		t.Fatal("close removed a copy an open run is on")
+	}
+	if err := cmdPrune([]string{"--older", "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(root) {
+		t.Fatal("prune removed a copy an open run is on")
+	}
+	if err := cmdClose([]string{"bbbb"}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(root) {
+		t.Fatal("the last run on the copy closed and it stayed")
+	}
+}
+
+// While anything else holds the books (a place taking a copy, a verify
+// reading one), close leaves the copy for prune.
+func TestCloseLeavesTheCopyWhileTheBooksAreInUse(t *testing.T) {
+	books := pruneBooks(t)
+	t.Setenv("ADMINISTRATION_MATCH", "off")
+	c := writeContract(t, books, "aaaa", "abc", false)
+	root := oldCopy(t, c, "abc")
+	unuse, err := useBooks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdClose([]string{"aaaa"}); err != nil {
+		t.Fatal(err)
+	}
+	unuse()
+	if !isDir(root) {
+		t.Fatal("close removed a copy while the books were in use")
+	}
+	if err := cmdPrune([]string{"--older", "1h", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(root) {
+		t.Fatal("a dry run removed the copy")
+	}
+	if err := cmdPrune([]string{"--older", "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(root) {
+		t.Fatal("prune left a closed run's copy")
+	}
+}
+
+// Prune keeps a closed run's copy no longer, reviewed or not, young or
+// old: only an open run's.
+func TestPruneTakesAClosedRunsCopyAndKeepsAnOpenOnes(t *testing.T) {
+	books := pruneBooks(t)
+	closed := writeContract(t, books, "aaaa", "abc", true)
+	open := writeContract(t, books, "bbbb", "def", false)
+	gone := oldCopy(t, closed, "abc")
+	kept := oldCopy(t, open, "def")
+	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(gone) {
+		t.Fatal("prune kept a closed run's copy")
+	}
+	if !isDir(kept) {
+		t.Fatal("prune removed an open run's copy")
+	}
+}
+
+// madeBuild makes a build of /p at sha with an artifact last used ago.
+func madeBuild(t *testing.T, books, sha string, ago time.Duration) string {
+	t.Helper()
+	d := filepath.Join(books, "builds", projectFolder("/p"), sha)
+	writeOld(t, filepath.Join(d, "out", "app.apk"), "x")
+	writeOld(t, filepath.Join(d, "artifact"), filepath.Join(d, "out", "app.apk")+"\n")
+	then := time.Now().Add(-ago)
+	if err := os.Chtimes(filepath.Join(d, "artifact"), then, then); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// A project keeps its last two builds used, and any an open run's rooms
+// install, however recent the others; a dry run removes none of them.
+func TestPruneKeepsTheLastTwoBuildsAndAnOpenRuns(t *testing.T) {
+	books := pruneBooks(t)
+	b1 := madeBuild(t, books, "b1", 1*time.Hour)
+	b2 := madeBuild(t, books, "b2", 2*time.Hour)
+	b3 := madeBuild(t, books, "b3", 3*time.Hour)
+	b4 := madeBuild(t, books, "b4", 4*time.Hour)
+	b5 := madeBuild(t, books, "b5", 5*time.Hour)
+	writeContract(t, books, "aaaa", "b4", false)
+	if err := cmdPrune([]string{"--older", "30d", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{b1, b2, b3, b4, b5} {
+		if !isDir(d) {
+			t.Fatalf("a dry run removed %s", d)
+		}
+	}
+	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{b1, b2, b4} {
+		if !isDir(d) {
+			t.Errorf("prune removed %s", filepath.Base(d))
+		}
+	}
+	for _, d := range []string{b3, b5} {
+		if isDir(d) {
+			t.Errorf("prune kept %s, past the last two", filepath.Base(d))
+		}
+	}
+	if err := cmdPrune([]string{"--older", "30d", "--builds", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(b1) || isDir(b2) || !isDir(b4) {
+		t.Fatal("--builds 0 should leave only the open run's build")
+	}
+	var u usageError
+	if err := cmdPrune([]string{"--builds", "-1"}); !errors.As(err, &u) {
+		t.Fatalf("--builds -1: %v", err)
+	}
+}
+
+// A build being made (no artifact yet) isn't one of the last used, and
+// doesn't push a made one out.
+func TestPruneDoesntCountABuildBeingMade(t *testing.T) {
+	books := pruneBooks(t)
+	b1 := madeBuild(t, books, "b1", 1*time.Hour)
+	b2 := madeBuild(t, books, "b2", 2*time.Hour)
+	making := filepath.Join(books, "builds", projectFolder("/p"), "b0")
+	if err := os.MkdirAll(making, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(making, "build.log"), []byte("building\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(b1) || !isDir(b2) || !isDir(making) {
+		t.Fatal("prune removed a build it should keep")
+	}
+}
+
+// A closed run not yet reviewed keeps its copy with the uncommitted work:
+// once the work has changed it can't be made again, and its verify would
+// judge the findings against a tree without them. Its copy of the commit
+// alone goes. Once it's reviewed, the work copy goes too.
+func TestPruneKeepsAnUnreviewedRunsWorkCopy(t *testing.T) {
+	books := pruneBooks(t)
+	c := writeContract(t, books, "aaaa", "abc", true)
+	c.Work = "w1"
+	if err := writeJSON(filepath.Join(books, "contracts", "aaaa", "contract.json"), c); err != nil {
+		t.Fatal(err)
+	}
+	bare := oldCopy(t, c, "abc")
+	work, err := copyRoot(c, "abc", "w1")
+	if err != nil || work == bare {
+		t.Fatalf("the work copy's root: %q, %v", work, err)
+	}
+	writeOld(t, filepath.Join(work, "a.txt"), "x")
+	then := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(work, then, then); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if !isDir(work) {
+		t.Fatal("prune removed an unreviewed run's copy with its work")
+	}
+	if isDir(bare) {
+		t.Fatal("prune kept an unreviewed run's copy of the commit alone")
+	}
+	writeOld(t, filepath.Join(books, "contracts", "aaaa", "reviewed"), "")
+	if err := cmdPrune([]string{"--older", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	if isDir(work) {
+		t.Fatal("prune kept a reviewed run's work copy")
 	}
 }

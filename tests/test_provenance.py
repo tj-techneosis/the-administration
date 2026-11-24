@@ -93,7 +93,8 @@ class Provenance(Base):
         seen = [json.loads(l) for l in open(os.path.join(self.books, "contracts", cid, "fake-verifier-seen.jsonl"))]
         self.assertEqual(os.path.realpath(seen[0]["project"]), os.path.realpath(c["checkout"]))
         self.assertEqual(seen[0]["tested_commit"], c["commit"])
-        self.assertEqual(open(os.path.join(seen[0]["project"], "app.txt")).read(), "one\n")
+        self.assertEqual(seen[0]["fake_app_txt"], "one\n")
+        self.assertFalse(os.path.exists(c["checkout"]), "verify drops the copy once it's done")
 
     def test_a_pruned_copy_is_made_once_for_every_verifier(self):
         # Four verifiers at once each made the copy, took it from under each
@@ -103,7 +104,7 @@ class Provenance(Base):
         self.cli("wait", cid)
         self.cli("close", cid)
         checkout = self.contract(cid)["checkout"]
-        subprocess.run(["rm", "-rf", checkout], check=True)
+        self.assertFalse(os.path.exists(checkout), "close drops the run's copy")
         write(os.path.join(self.project, "app.txt"), "moved on\n")
         self.git("commit", "-qam", "later")
         p = self.cli("verify", cid, "--batch", "1", env={"ADMINISTRATION_MATCH": "off"})
@@ -113,8 +114,8 @@ class Provenance(Base):
         self.assertEqual(len(seen), 2)
         for v in seen:
             self.assertEqual(os.path.realpath(v["project"]), os.path.realpath(checkout))
-        self.assertEqual(open(os.path.join(checkout, "app.txt")).read(), "one\n")
-        self.assertEqual([n for n in os.listdir(os.path.dirname(checkout)) if n.startswith(".")], [])
+            self.assertEqual(v["fake_app_txt"], "one\n")
+        self.assertEqual(os.listdir(os.path.dirname(checkout)), [], "made once, dropped once verify was done")
 
     def test_a_contract_with_no_commit_says_verify_reads_the_project_as_it_is(self):
         self.hire_file("reader", kind="critic")
@@ -139,9 +140,12 @@ class Provenance(Base):
         self.assertNotIn("checkout", self.contract(cid))
         self.cli("close", cid)
         self.cli("verify", cid, env={"ADMINISTRATION_MATCH": "off"})
-        # Made by verify, among the shared copies; contract.json is left as
-        # place and close wrote it.
-        self.assertEqual(self.copies(), [self.head()])
+        # Made by verify, among the shared copies, and dropped once it was
+        # done; contract.json is left as place and close wrote it, and the
+        # summary still says what the verifiers read.
+        seen = [json.loads(l) for l in open(os.path.join(self.books, "contracts", cid, "fake-verifier-seen.jsonl"))]
+        self.assertEqual(os.path.basename(os.path.realpath(seen[0]["project"])), self.head())
+        self.assertEqual(self.copies(), [])
         self.assertIn("read the project as it was then", self.cli("report", cid).stdout)
         # Uncommitted work can't be had later: copied at place.
         write(os.path.join(self.project, "app.txt"), "one\nwip\n")
@@ -451,7 +455,10 @@ commands = [".administration/run"]
         self.cli("wait", cid)
         self.cli("close", cid)
         checkout = self.contract(cid)["checkout"]
-        self.assertTrue(os.path.isdir(checkout))
+        # Close dropped it; one a close couldn't drop (the books were busy)
+        # is prune's.
+        self.assertFalse(os.path.isdir(checkout))
+        write(os.path.join(checkout, "app.txt"), "one\n")
         # a copy killed before it was renamed into place
         cut = os.path.join(os.path.dirname(checkout), "." + os.path.basename(checkout) + "-1234")
         write(os.path.join(cut, "app.txt"), "one\n")

@@ -674,7 +674,10 @@ func countContracts(lines []ledgerLine) int {
 // professionals' streams, briefs, personas and settings, the handout) goes
 // once the Director has reviewed it, or once it's older than --older. Its
 // numbers move to the project's ledger, and only the last --keep summaries
-// and reports stay.
+// and reports stay. The shared copies of the project go once no open
+// contract is on them (close and verify drop a closed contract's own, when
+// nothing else holds the books), and each project's builds down to the
+// last --builds used (2), with any an open contract's rooms install.
 //
 // It holds the books' use lock (useBooks) exclusive while it looks and
 // renames, so nothing it removes is being placed, closed, verified or
@@ -694,9 +697,15 @@ func countContracts(lines []ledgerLine) int {
 // can't read is refused before anything is touched, and one that lists no
 // contract prunes nothing.
 func cmdPrune(args []string) error {
-	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false, "mined": true})
+	f, err := parseFlags(args, map[string]bool{"keep": true, "older": true, "dry-run": false, "mined": true, "builds": true})
 	if err != nil {
 		return err
+	}
+	keepBuilds := 2
+	if f.has("builds") {
+		if keepBuilds, err = strconv.Atoi(f.get("builds")); err != nil || keepBuilds < 0 {
+			return usageError{"--builds: how many of each project's builds to keep, the last used first"}
+		}
 	}
 	keep := 10
 	if f.has("keep") {
@@ -761,19 +770,10 @@ func cmdPrune(args []string) error {
 	}
 	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
 	byProject := map[string][]*contract{}
-	// The shared copies of the project (copyRoot) a contract still kept
-	// whole may read, and the builds an open one's rooms may install.
+	// The shared copies of the project (copyRoot) an open contract may
+	// read, and the builds its rooms may install (openNeeds). A closed
+	// contract needs neither: verify makes its copy again if it's gone.
 	needed := map[string]bool{}
-	need := func(c *contract) {
-		if c.tested() == "" {
-			return
-		}
-		for _, w := range []string{c.Work, ""} {
-			if root, err := copyRoot(c, c.tested(), w); err == nil {
-				needed[root] = true
-			}
-		}
-	}
 	// The houses unpacked from a ref (place --house-from) that a contract
 	// still in the books names: its close, verify and resume read it.
 	houses := map[string]bool{}
@@ -783,17 +783,15 @@ func cmdPrune(args []string) error {
 			houses[realPath(c.House)] = true
 		}
 		if err == nil && c.ClosedAt == nil {
-			need(c)
-			if root, err := buildsDir(c); err == nil && buildCommit(c) != "" {
-				needed[filepath.Join(root, buildCommit(c))] = true
-			}
-			// Its before app's build too, of the merge base.
-			if root, err := buildsDir(c); err == nil && c.Before && c.Changes != nil && c.Changes.MergeBase != "" {
-				needed[filepath.Join(root, c.Changes.MergeBase)] = true
-			}
+			openNeeds(c, needed)
 		}
 		if err != nil || c.ClosedAt == nil {
 			continue
+		}
+		// Its copy goes below (no open contract is on it, or it's kept):
+		// the summary keeps saying what it read.
+		if !dry {
+			noteCopyRead(c, filepath.Dir(file))
 		}
 		byProject[contractKey(c)] = append(byProject[contractKey(c)], c)
 	}
@@ -829,8 +827,16 @@ func cmdPrune(args []string) error {
 			if !isReviewed && !old {
 				// Kept whole until the Director has reviewed it, or it's
 				// old, past the keep or not: its findings may not be
-				// checked yet.
-				need(c)
+				// checked yet. Its copy of the commit alone isn't kept
+				// (verify makes it again), but its copy with the
+				// uncommitted work is: once the work has changed it
+				// can't be made again, and verify would judge its
+				// findings against a tree without them.
+				if c.Work != "" && c.tested() != "" {
+					if root, err := copyRoot(c, c.tested(), c.Work); err == nil {
+						needed[root] = true
+					}
+				}
 				continue
 			}
 			// Under --mined nothing is removed, past the keep or not: every
@@ -904,14 +910,16 @@ func cmdPrune(args []string) error {
 			}
 		}
 	}
-	// The shared copies: one no contract kept whole is on goes. A place
-	// holds the use lock from before it takes a copy until its contract
-	// names it, and a worker makes one only for an open contract, which
-	// needs it, so a copy left by nobody is one nobody is using. One made
+	// The shared copies: one no open contract is on goes. A place holds
+	// the use lock from before it takes a copy until its contract names
+	// it, a verify holds it while its verifiers read one, and a worker
+	// makes one only for an open contract, which needs it, so a copy no
+	// open contract is on is one nobody is using. One made
 	// in the last hour (or --older, if less) is left all the same. A copy
 	// still being made (makeCheckout's .<name>-XXXX) is judged by the copy
 	// it's being made into.
 	copies := 0
+	var freed int64 // what a dry run's removals would free
 	grace := min(time.Hour, older)
 	made, _ := filepath.Glob(filepath.Join(books, "copies", "*", "*"))
 	for _, d := range made {
@@ -926,7 +934,9 @@ func cmdPrune(args []string) error {
 			continue
 		}
 		if dry {
-			fmt.Printf("would remove the copy %s\n", d)
+			n := treeBytes(d)
+			freed += n
+			fmt.Printf("would remove the copy %s (%s)\n", d, sizeOf(n))
 			continue
 		}
 		if gone(d) {
@@ -953,48 +963,83 @@ func cmdPrune(args []string) error {
 			unpacked++
 		}
 	}
-	// The build hook's builds, kept per commit: one nobody has used in the
-	// age goes (a contract on it again builds it again). An open
-	// contract's is kept, and so is one a room or a build holds the lock
-	// of (ensureBuild): a room holds it while it's installing or running
-	// the build.
+	// The build hook's builds, kept per commit, each a whole app: a
+	// project keeps the last --builds used (touchBuild marks a use), and
+	// none unused for the age (a contract on it again builds it again). An
+	// open contract's is kept whatever its place, and so is one a room or
+	// a build holds the lock of (ensureBuild): a room holds it while it's
+	// installing or running the build.
 	// A build that failed (a log, no artifact) or was killed before it
 	// could clean up (its checkout left, with the house's env/ copied in)
-	// goes by its log's age the same way, checkout and all.
-	builds := 0
+	// goes by its log's age the same way, checkout and all; it isn't one
+	// of the last used.
+	type built struct {
+		dir  string
+		used time.Time
+		done bool // it has an artifact
+	}
+	byBuilds := map[string][]built{}
 	kept, _ := filepath.Glob(filepath.Join(books, "builds", "*", "*"))
 	for _, d := range kept {
-		if needed[d] {
-			continue
-		}
+		done := true
 		mark := filepath.Join(d, "artifact")
 		if _, err := os.Stat(mark); err != nil {
-			mark = filepath.Join(d, "build.log")
+			done, mark = false, filepath.Join(d, "build.log")
 		}
 		st, err := os.Stat(mark)
 		if err != nil {
 			st, err = os.Stat(d)
 		}
-		if err != nil || time.Since(st.ModTime()) <= older {
+		if err != nil {
 			continue
 		}
-		if dry {
-			if !lockHeld(filepath.Join(d, ".lock")) {
-				fmt.Printf("would remove the build in %s\n", d)
+		byBuilds[filepath.Dir(d)] = append(byBuilds[filepath.Dir(d)], built{d, st.ModTime(), done})
+	}
+	projects := make([]string, 0, len(byBuilds))
+	for p := range byBuilds {
+		projects = append(projects, p)
+	}
+	sort.Strings(projects)
+	builds, pastKeep := 0, 0
+	for _, p := range projects {
+		bs := byBuilds[p]
+		sort.Slice(bs, func(i, j int) bool { return bs[i].used.After(bs[j].used) })
+		last := 0 // the builds made so far, the last used first; an open contract's count
+		for _, b := range bs {
+			if b.done {
+				last++
 			}
-			continue
+			fresh := time.Since(b.used) <= older
+			if needed[b.dir] || (fresh && (!b.done || last <= keepBuilds)) {
+				continue
+			}
+			if dry {
+				if !lockHeld(filepath.Join(b.dir, ".lock")) {
+					n := treeBytes(b.dir)
+					freed += n
+					fmt.Printf("would remove the build in %s (%s)\n", b.dir, sizeOf(n))
+				}
+				continue
+			}
+			unlock, ok := tryLockFile(filepath.Join(b.dir, ".lock"))
+			if !ok {
+				continue // building, or in use
+			}
+			// Renamed aside while it's held: a room that was waiting for
+			// the lock finds the folder gone and starts a new one
+			// (lockWaiting), and nothing starts a build in the folder
+			// being removed.
+			if gone(b.dir) {
+				builds++
+				if fresh {
+					pastKeep++
+				}
+			}
+			unlock()
 		}
-		unlock, ok := tryLockFile(filepath.Join(d, ".lock"))
-		if !ok {
-			continue // building, or in use
-		}
-		// Renamed aside while it's held: a room that was waiting for the
-		// lock finds the folder gone and starts a new one (lockWaiting),
-		// and nothing starts a build in the folder being removed.
-		if gone(d) {
-			builds++
-		}
-		unlock()
+	}
+	if dry && freed > 0 {
+		fmt.Printf("would free %s of copies and builds\n", sizeOf(freed))
 	}
 	if !dry {
 		fmt.Printf("Pruned: %d contracts down to their summaries, %d removed (their numbers are in the ledger).\n", stripped, removed)
@@ -1005,7 +1050,7 @@ func cmdPrune(args []string) error {
 			fmt.Printf("Removed %s unpacked from a ref that no contract names any more.\n", plural(unpacked, "house", "houses"))
 		}
 		if builds > 0 {
-			fmt.Printf("Removed %s unused for %s.\n", plural(builds, "build", "builds"), map[bool]string{true: f.get("older"), false: "30d"}[f.has("older")])
+			fmt.Printf("Removed %s: %d past the last %d used, %d unused for %s.\n", plural(builds, "build", "builds"), pastKeep, keepBuilds, builds-pastKeep, map[bool]string{true: f.get("older"), false: "30d"}[f.has("older")])
 		}
 	}
 	if len(failed) > 0 {
@@ -1013,6 +1058,113 @@ func cmdPrune(args []string) error {
 			plural(len(failed), "thing", "things"), strings.Join(failed, "; "))
 	}
 	return nil
+}
+
+// openNeeds adds to needed what an open contract may still read: the
+// shared copies of the project it's on (copyRoots), the build its rooms
+// install, and its before app's, of the merge base.
+func openNeeds(c *contract, needed map[string]bool) {
+	for _, root := range copyRoots(c) {
+		needed[root] = true
+	}
+	root, err := buildsDir(c)
+	if err != nil {
+		return
+	}
+	if buildCommit(c) != "" {
+		needed[filepath.Join(root, buildCommit(c))] = true
+	}
+	if c.Before && c.Changes != nil && c.Changes.MergeBase != "" {
+		needed[filepath.Join(root, c.Changes.MergeBase)] = true
+	}
+}
+
+// copyRoots is the shared copies a contract may read: of its tested
+// commit with the uncommitted work it was placed with, and without.
+func copyRoots(c *contract) []string {
+	if c.tested() == "" {
+		return nil
+	}
+	var out []string
+	for _, w := range []string{c.Work, ""} {
+		if root, err := copyRoot(c, c.tested(), w); err == nil {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
+// dropCopy removes a closed contract's copy of its commit once no open
+// contract is on it: close and verify call it as they finish, so a run's
+// copy doesn't wait for the next prune. Only when it can take the books'
+// use lock exclusive at once, as prune does: a place taking a copy, a
+// verify reading one or an early check still running holds it shared, and
+// the copy is then left for prune. The copy with the uncommitted work is
+// left too: once the work has changed it can't be made again, and the
+// close's verify reads it; prune keeps it until the contract is reviewed
+// or old. Verify makes a dropped copy
+// again if it needs it.
+func dropCopy(c *contract) {
+	// The commit names a folder under the copies: never a path.
+	if t := c.tested(); c.ClosedAt == nil || t == "" || t == "." || t == ".." || filepath.Base(t) != t {
+		return
+	}
+	root, err := copyRoot(c, c.tested(), "")
+	if err != nil || !isDir(root) {
+		return
+	}
+	books, err := booksDir()
+	if err != nil {
+		return
+	}
+	unlock, ok := tryLockFile(useLock(books))
+	if !ok {
+		return
+	}
+	needed := map[string]bool{}
+	files, _ := filepath.Glob(filepath.Join(books, "contracts", "*", "contract.json"))
+	for _, file := range files {
+		if o, _, err := loadContract(filepath.Base(filepath.Dir(file))); err == nil && o.ClosedAt == nil {
+			openNeeds(o, needed)
+		}
+	}
+	moved := false
+	if !needed[root] {
+		noteCopyRead(c, filepath.Join(books, "contracts", c.ID))
+		_, err := aside(books, root)
+		moved = err == nil
+	}
+	unlock()
+	if moved {
+		clearPruned(books)
+	}
+}
+
+// treeBytes is what the files under path take, links not followed.
+func treeBytes(path string) int64 {
+	var n int64
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			if i, err := d.Info(); err == nil {
+				n += i.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
+
+// sizeOf says a number of bytes the way a person reads it.
+func sizeOf(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d bytes", n)
 }
 
 // readMined reads prune --mined's FILE: one contract id a line. Blank

@@ -52,6 +52,10 @@ if os.path.basename(persona) == "verifier.md":
     data = json.loads(prompt)
     assert data["project"] in args, "it can read the project"
     out = []
+    # What it read of the project, as it was then: the copy goes once the
+    # contract is done with it.
+    app = os.path.join(data["project"], "app.txt")
+    data["fake_app_txt"] = open(app).read() if os.path.exists(app) else None
     with open(os.path.join(os.getcwd(), "..", "..", "fake-verifier-seen.jsonl"), "a") as seen:
         seen.write(json.dumps(data) + "\n")
     listed = data.get("checked_list", [])

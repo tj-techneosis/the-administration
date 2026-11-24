@@ -496,9 +496,14 @@ changes" into CLI calls, and checks findings against the code afterwards.
   doesn't hold up another contract waiting for rooms, and after what can
   refuse the contract cheaply (its flags, a contract needing more rooms
   than are free, asked again under the lock), so one tried again after
-  "busy" or a typo doesn't pay for a copy each time. `prune` removes a
-  copy once no contract kept whole is on it (an open one, or a closed one
-  not yet stripped). Place, close, verify, verdicts and resume hold the
+  "busy" or a typo doesn't pay for a copy each time. A copy goes once no
+  open contract is on it: close drops a run's own as it finishes, and
+  verify the one its verifiers read, each only when it can take the use
+  lock exclusive at once (anything else holding the books leaves the copy
+  for prune), and prune removes the rest. A copy with uncommitted work is
+  left to prune, since it can't be made again and the close's verify reads
+  it; prune keeps it until its contract is reviewed or old. The contract's folder keeps which copy it read (`copy-read`), so the
+  summary still says so once the copy is gone. Place, close, verify, verdicts and resume hold the
   books' use lock (`use.lock`) shared while they need it (place until
   its contract is written and its workers started, not through the watch
   panes and hooks after), and prune takes it exclusive or is refused, so
@@ -619,7 +624,10 @@ changes" into CLI calls, and checks findings against the code afterwards.
   by `equipment-check`, not passed over (the rooms would install with no
   build and nothing said). `administration build [REF]` runs it by hand (to try a
   hook, or build ahead; Ctrl-C stops the hook too, which runs in a
-  process group of its own); `prune` removes builds unused for its age. The
+  process group of its own); `prune` keeps each project's last `--builds`
+  (2) used, by the artifact's time (each use touches it), plus an open
+  contract's, and removes the rest and any unused for its age; a failed or
+  unfinished build isn't one of the last used. The
   hook builds commits, not working trees, because a cache keyed by
   anything less exact is a shared path again.
 - **The room plan** (`roomplan.go`, `handon.go`, `share.go`): one

@@ -503,6 +503,36 @@ func copyKept(c *contract) string {
 	return ""
 }
 
+// copyReadFile is the file in a contract's folder that keeps which copy
+// of the project it read (copyKept's word) once the copy is removed: a
+// closed contract's goes at close, verify or prune (dropCopy), and the
+// summary still says what critics and verifiers read.
+const copyReadFile = "copy-read"
+
+// noteCopyRead writes copyReadFile before a closed contract's copy goes,
+// when there's a copy to say and nothing's said yet.
+func noteCopyRead(c *contract, dir string) {
+	path := filepath.Join(dir, copyReadFile)
+	if _, err := os.Stat(path); err == nil || !isDir(dir) {
+		return
+	}
+	if k := copyKept(c); k != "" {
+		_ = os.WriteFile(path, []byte(k+"\n"), 0o600)
+	}
+}
+
+// copyRead is copyKept, or, once the copy is gone, what copyReadFile kept.
+func copyRead(c *contract, dir string) string {
+	if k := copyKept(c); k != "" {
+		return k
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, copyReadFile))
+	if k := strings.TrimSpace(string(b)); k == "whole" || k == "commit" {
+		return k
+	}
+	return ""
+}
+
 func orNone(s string) string {
 	if s == "" {
 		return "none"
@@ -793,7 +823,7 @@ func provenanceNote(c *contract, dir string) string {
 	var b strings.Builder
 	if t := c.testedLine(); t != "" {
 		b.WriteString(t + ".")
-		switch copied := copyKept(c); {
+		switch copied := copyRead(c, dir); {
 		case copied == "whole" || isDir(checkoutDir(dir)):
 			b.WriteString(" Critics and verifiers read the project as it was then, not as it is now.")
 			if n := leftOutNote(c); n != "" {
